@@ -379,7 +379,7 @@ static bool hasLegalTransactionPayload(const AccessMap &access, int64_t width) {
       llvm::checkedMul(width, access.shape.elementBits);
   return bits && (*bits == 16 || *bits % 32 == 0);
 }
-static SmallVector<wave::memory_lowering::GatherTransaction, 2>
+static wave::memory_lowering::GatherTransactions
 selectGatherTransactions(const AccessMap &access) {
   if (!access.access->gather || access.access->packetWhere)
     return {};
@@ -521,7 +521,7 @@ static FailureOr<std::vector<Transaction>>
 planTransactions(const AccessMap &access, sym::Store &store,
                  std::string &diagnostic) {
   indexing::CheckMemo memo;
-  SmallVector<wave::memory_lowering::GatherTransaction, 2> targets =
+  wave::memory_lowering::GatherTransactions targets =
       selectGatherTransactions(access);
   FailureOr<std::optional<std::vector<Transaction>>> selected =
       planSelectedGatherTransactions(access, targets, store, memo);

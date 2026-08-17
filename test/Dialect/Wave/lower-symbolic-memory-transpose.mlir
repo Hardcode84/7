@@ -201,6 +201,33 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // -----
 
+// Full-domain proof recovers b8 transpose outside fixed permutation families.
+// CHECK-LABEL: func.func @gfx950_b8_verified_xor_origin_transpose(
+// CHECK-NOT: wave.load
+// CHECK: waveamd.transpose_load
+// CHECK-SAME: !wave.simd<vector<8xi8>, 64>
+// CHECK-NOT: waveamd.transpose_load
+// CHECK-NOT: wave.gather
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+  func.func @gfx950_b8_verified_xor_origin_transpose(
+      %base: !wave.ptr<#wave.shared, i8>)
+      -> !wave.simd<vector<8xi8>, 64>
+      attributes {wave.workgroup_size = array<i32: 512, 1, 1>} {
+    %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %bounded_item = wave.assume %item as "item"
+        [#wave.pred<"item >= 0">, #wave.pred<"item <= 511">]
+        : !wave.simd<i32, 64>
+    %value, %token = wave.gather %base mapping
+        <bit_offset = <"8 * (Mod(item, 16) + 512 * Mod(slot, 2) + 256 * Mod(floor(item / 32), 2) + 128 * Mod(floor(item / 16), 2) + 64 * Mod(floor(slot / 4), 2) + 32 * Mod(floor(slot / 2), 2) + 16 * xor(Mod(slot, 2), Mod(floor(item / 256), 2)))">>
+        bindings ["item"](%bounded_item)
+        : (!wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    return %value : !wave.simd<vector<8xi8>, 64>
+  }
+}
+
+// -----
+
 // Group zero matches the B8 tile, but group one has an extra within-dependent
 // term. The whole-domain target proof must fail; no partial subset is emitted.
 // CHECK-LABEL: func.func @gfx950_b8_full_domain_mismatch_falls_back(

@@ -23,6 +23,10 @@
 // ASM-LABEL: symbolic_memory_b16_xor_origin_codegen:
 // ASM-COUNT-1: ds_read_b64_tr_b16
 // ASM: s_endpgm
+// ASM-LABEL: symbolic_memory_b8_xor_origin_codegen:
+// ASM-COUNT-1: ds_read_b64_tr_b8
+// ASM-NOT: ds_read_u8
+// ASM: s_endpgm
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @symbolic_memory_transpose_codegen(
@@ -210,6 +214,33 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         -> !wave.simd<!wave.ptr<#wave.global, f16>, 64>
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<f16, 64>, !wave.simd<!wave.ptr<#wave.global, f16>, 64>,
+           !wave.mem.token) -> !wave.mem.token
+    return
+  }
+
+  func.func @symbolic_memory_b8_xor_origin_codegen(
+      %dst: !wave.ptr<#wave.global, i8>)
+      attributes {wave.kernel,
+                  wave.workgroup_size = array<i32: 512, 1, 1>,
+                  wave.waves_per_workgroup = 8 : i64} {
+    %lds = wave.alloc() {align = 16 : i64, bytesize = 2048 : i64}
+        : !wave.ptr<#wave.shared, i8>
+    %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %bounded_item = wave.assume %item as "x"
+        [#wave.pred<"x >= 0">, #wave.pred<"x <= 511">]
+        : !wave.simd<i32, 64>
+    %value, %token = wave.gather %lds mapping
+        <bit_offset = <"8 * (Mod(item, 16) + 512 * Mod(slot, 2) + 256 * Mod(floor(item / 32), 2) + 128 * Mod(floor(item / 16), 2) + 64 * Mod(floor(slot / 4), 2) + 32 * Mod(floor(slot / 2), 2) + 16 * xor(Mod(slot, 2), Mod(floor(item / 256), 2)))">>
+        bindings ["item"](%bounded_item)
+        : (!wave.ptr<#wave.shared, i8>, !wave.simd<i32, 64>)
+        -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
+    %first = wave.extract %value[0]
+        : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+    %out = wave.ptr_add %dst, %bounded_item
+        : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 64>
+        -> !wave.simd<!wave.ptr<#wave.global, i8>, 64>
+    %stored = wave.store %first -> %out after %token
+        : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
            !wave.mem.token) -> !wave.mem.token
     return
   }

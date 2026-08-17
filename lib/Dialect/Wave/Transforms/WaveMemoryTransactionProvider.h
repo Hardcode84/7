@@ -64,6 +64,8 @@ struct GatherTransactionRequest {
   const indexing::IndexAddress *address = nullptr;
 };
 
+using GatherTransactions = SmallVector<GatherTransaction, 3>;
+
 struct CopyTransactionRequest {
   Value sourceBase;
   Value destinationBase;
@@ -90,7 +92,7 @@ public:
                      int64_t bytes, bool zeroFillInactive) const = 0;
 };
 
-SmallVector<GatherTransaction, 2>
+GatherTransactions
 getGatherTransactions(const GatherTransactionRequest &request);
 
 // AMD currently has exactly two direct-to-LDS widths. Keep both candidates so

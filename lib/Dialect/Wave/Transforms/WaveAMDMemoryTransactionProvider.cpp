@@ -125,9 +125,9 @@ static sym::ExprBinaryOp getB16CombineOp(B16Combine combine) {
 }
 
 static FailureOr<sym::ExprHandle>
-specializeB16Address(sym::Analysis &analysis, sym::ExprHandle address,
-                     sym::ExprHandle item, int64_t itemValue,
-                     sym::ExprHandle slot, int64_t slotValue) {
+specializeAddress(sym::Analysis &analysis, sym::ExprHandle address,
+                  sym::ExprHandle item, int64_t itemValue, sym::ExprHandle slot,
+                  int64_t slotValue) {
   sym::ExprHandle concreteItem = analysis.composeInteger(itemValue);
   sym::ExprHandle concreteSlot = analysis.composeInteger(slotValue);
   std::array<sym::ExprSubstitution, 2> substitutions{
@@ -136,10 +136,10 @@ specializeB16Address(sym::Analysis &analysis, sym::ExprHandle address,
   return analysis.simplify(analysis.substitute(address, substitutions));
 }
 
-static FailureOr<sym::ExprHandle> specializeB16Item(sym::Analysis &analysis,
-                                                    sym::ExprHandle expression,
-                                                    sym::ExprHandle item,
-                                                    int64_t itemValue) {
+static FailureOr<sym::ExprHandle> specializeItem(sym::Analysis &analysis,
+                                                 sym::ExprHandle expression,
+                                                 sym::ExprHandle item,
+                                                 int64_t itemValue) {
   sym::ExprHandle concrete = analysis.composeInteger(itemValue);
   std::array<sym::ExprSubstitution, 1> substitution{
       sym::ExprSubstitution{item, concrete}};
@@ -157,8 +157,8 @@ buildB16BitContribution(sym::Analysis &analysis, sym::ExprHandle address,
                                  : firstSlot;
   if (bit >= 2 && bit < 4)
     sampleItem = 0;
-  FailureOr<sym::ExprHandle> sample = specializeB16Address(
-      analysis, address, item, sampleItem, slot, sampleSlot);
+  FailureOr<sym::ExprHandle> sample =
+      specializeAddress(analysis, address, item, sampleItem, slot, sampleSlot);
   if (failed(sample))
     return failure();
   FailureOr<sym::ExprHandle> coefficient =
@@ -182,7 +182,7 @@ buildB16SourceAddress(sym::Analysis &analysis, sym::ExprHandle address,
                       int64_t itemCount, unsigned firstSlot,
                       B16Composition composition) {
   FailureOr<sym::ExprHandle> base =
-      specializeB16Address(analysis, address, item, 0, slot, firstSlot);
+      specializeAddress(analysis, address, item, 0, slot, firstSlot);
   if (failed(base))
     return failure();
   FailureOr<sym::ExprHandle> source = *base;
@@ -208,10 +208,10 @@ static bool verifyB16SourceAddress(sym::Analysis &analysis,
     int64_t lane = outputItem % 64;
     int64_t sourceBase = outputItem - lane + 16 * (lane / 16) + (lane % 16) / 4;
     for (int64_t within = 0; within < 4; ++within) {
-      FailureOr<sym::ExprHandle> actual = specializeB16Address(
+      FailureOr<sym::ExprHandle> actual = specializeAddress(
           analysis, address, item, outputItem, slot, firstSlot + within);
       FailureOr<sym::ExprHandle> supplied =
-          specializeB16Item(analysis, source, item, sourceBase + 4 * within);
+          specializeItem(analysis, source, item, sourceBase + 4 * within);
       FailureOr<sym::ExprHandle> expected =
           failed(supplied)
               ? FailureOr<sym::ExprHandle>(failure())
@@ -251,7 +251,7 @@ findB16SourceAddress(sym::Analysis &analysis, sym::ExprHandle address,
   return failure();
 }
 
-static bool isValidB16Request(
+static bool isValidVerifiedRequest(
     const wave::memory_lowering::GatherTransactionRequest &request) {
   return request.address && request.item && request.slot && request.itemCount &&
          *request.itemCount > 0;
@@ -263,7 +263,7 @@ buildVerifiedB16Transaction(
     sym::Store &store,
     std::shared_ptr<const wave::memory_lowering::GatherTransactionEmitter>
         emitter) {
-  if (!isValidB16Request(request))
+  if (!isValidVerifiedRequest(request))
     return failure();
   FailureOr<sym::ExprHandle> address = indexing::materialize(
       store, request.address->map, request.address->bitOffset);
@@ -278,6 +278,7 @@ buildVerifiedB16Transaction(
     return failure();
   std::vector<wave::memory_lowering::GatherTransaction::VerifiedAddress>
       verified;
+  verified.reserve(packet.getNumElements() / 4);
   for (unsigned first = 0; first < packet.getNumElements(); first += 4) {
     FailureOr<sym::ExprHandle> source =
         findB16SourceAddress(**analysis, *address, request.item, request.slot,
@@ -292,15 +293,6 @@ buildVerifiedB16Transaction(
   transaction.emitter = std::move(emitter);
   return transaction;
 }
-
-struct TransposeFrame {
-  sym::ExprHandle lane;
-  sym::ExprHandle waveBase;
-  sym::ExprHandle groupBase;
-  sym::ExprHandle withinGroup;
-  sym::ExprHandle group;
-  sym::ExprHandle within;
-};
 
 struct TransposeWaveCoordinates {
   sym::ExprHandle lane, waveBase;
@@ -337,6 +329,125 @@ buildTransposeGroupCoordinates(sym::Store &store, sym::ExprHandle lane) {
     return failure();
   return TransposeGroupCoordinates{*groupBase, *withinGroup};
 }
+
+static FailureOr<sym::ExprHandle>
+buildB8VerifiedSourceAddress(sym::Analysis &analysis, sym::Store &store,
+                             sym::ExprHandle address, sym::ExprHandle item,
+                             sym::ExprHandle slot, unsigned firstSlot) {
+  FailureOr<TransposeWaveCoordinates> wave =
+      buildTransposeWaveCoordinates(store, item);
+  if (failed(wave))
+    return failure();
+  FailureOr<TransposeGroupCoordinates> group =
+      buildTransposeGroupCoordinates(store, wave->lane);
+  if (failed(group))
+    return failure();
+  FailureOr<sym::ExprHandle> row =
+      composeIntBinary(store, wave->lane, sym::ExprBinaryOp::Mod, 2);
+  FailureOr<sym::ExprHandle> rowBase =
+      failed(row) ? FailureOr<sym::ExprHandle>(failure())
+                  : composeIntBinary(store, *row, sym::ExprBinaryOp::Mul, 8);
+  FailureOr<sym::ExprHandle> sourceItem =
+      failed(rowBase) ? FailureOr<sym::ExprHandle>(failure())
+                      : analysis.compose(wave->waveBase, sym::ExprBinaryOp::Add,
+                                         group->groupBase);
+  if (succeeded(sourceItem))
+    sourceItem =
+        analysis.compose(*sourceItem, sym::ExprBinaryOp::Add, *rowBase);
+
+  FailureOr<sym::ExprHandle> sourceSlot =
+      composeFloorDiv(store, group->withinGroup, 2);
+  if (succeeded(sourceSlot))
+    sourceSlot =
+        composeIntBinary(store, *sourceSlot, sym::ExprBinaryOp::Add, firstSlot);
+  if (failed(sourceItem) || failed(sourceSlot))
+    return failure();
+
+  // Inverse gfx950 b8 coordinates; full-domain proof guards emission.
+  std::array<sym::ExprSubstitution, 2> substitutions{
+      sym::ExprSubstitution{item, *sourceItem},
+      sym::ExprSubstitution{slot, *sourceSlot}};
+  return analysis.simplify(analysis.substitute(address, substitutions));
+}
+
+static bool verifyB8SourceAddress(sym::Analysis &analysis,
+                                  sym::ExprHandle address,
+                                  sym::ExprHandle source, sym::ExprHandle item,
+                                  sym::ExprHandle slot, int64_t itemCount,
+                                  unsigned firstSlot) {
+  for (int64_t outputItem = 0; outputItem < itemCount; ++outputItem) {
+    int64_t lane = outputItem % 64;
+    int64_t sourceBase = outputItem - lane + 16 * (lane / 16) + (lane % 16) / 8;
+    for (int64_t within = 0; within < 8; ++within) {
+      FailureOr<sym::ExprHandle> actual = specializeAddress(
+          analysis, address, item, outputItem, slot, firstSlot + within);
+      FailureOr<sym::ExprHandle> supplied =
+          specializeItem(analysis, source, item, sourceBase + 2 * within);
+      FailureOr<sym::ExprHandle> expected =
+          failed(supplied)
+              ? FailureOr<sym::ExprHandle>(failure())
+              : analysis.compose(*supplied, sym::ExprBinaryOp::Add,
+                                 analysis.composeInteger(8 * (lane % 8)));
+      FailureOr<sym::ExprHandle> difference =
+          failed(actual) || failed(expected)
+              ? FailureOr<sym::ExprHandle>(failure())
+              : analysis.compose(*actual, sym::ExprBinaryOp::Sub, *expected);
+      if (failed(difference))
+        return false;
+      difference = analysis.simplify(*difference);
+      if (failed(difference) || sym::getIntegerLiteralValue(*difference) != 0)
+        return false;
+    }
+  }
+  return true;
+}
+
+static FailureOr<wave::memory_lowering::GatherTransaction>
+buildVerifiedB8Transaction(
+    const wave::memory_lowering::GatherTransactionRequest &request,
+    sym::Store &store,
+    std::shared_ptr<const wave::memory_lowering::GatherTransactionEmitter>
+        emitter) {
+  if (!isValidVerifiedRequest(request) || *request.itemCount % 64 != 0)
+    return failure();
+  FailureOr<sym::ExprHandle> address = indexing::materialize(
+      store, request.address->map, request.address->bitOffset);
+  if (failed(address))
+    return failure();
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, {});
+  if (failed(analysis))
+    return failure();
+  VectorType packet = cast<VectorType>(request.resultType.getElementType());
+  if (packet.getNumElements() % 8)
+    return failure();
+  std::vector<wave::memory_lowering::GatherTransaction::VerifiedAddress>
+      verified;
+  verified.reserve(packet.getNumElements() / 8);
+  for (unsigned first = 0; first < packet.getNumElements(); first += 8) {
+    FailureOr<sym::ExprHandle> source = buildB8VerifiedSourceAddress(
+        **analysis, store, *address, request.item, request.slot, first);
+    if (failed(source) ||
+        !verifyB8SourceAddress(**analysis, *address, *source, request.item,
+                               request.slot, *request.itemCount, first))
+      return failure();
+    verified.push_back({first, *source});
+  }
+  wave::memory_lowering::GatherTransaction transaction;
+  transaction.width = 8;
+  transaction.verifiedAddresses = std::move(verified);
+  transaction.emitter = std::move(emitter);
+  return transaction;
+}
+
+struct TransposeFrame {
+  sym::ExprHandle lane;
+  sym::ExprHandle waveBase;
+  sym::ExprHandle groupBase;
+  sym::ExprHandle withinGroup;
+  sym::ExprHandle group;
+  sym::ExprHandle within;
+};
 
 static FailureOr<TransposeFrame> buildTransposeFrame(sym::Store &store,
                                                      sym::ExprHandle item) {
@@ -556,11 +667,10 @@ static std::optional<int64_t> getTransposeElementBits(VectorType packet) {
   return std::nullopt;
 }
 
-static SmallVector<wave::memory_lowering::GatherTransaction, 2>
-buildTransposeTransactions(
+static wave::memory_lowering::GatherTransactions buildTransposeTransactions(
     sym::Store &store, const TransposeFrame &frame, int64_t elementBits,
     const wave::memory_lowering::GatherTransactionRequest &request) {
-  SmallVector<wave::memory_lowering::GatherTransaction, 2> transactions;
+  wave::memory_lowering::GatherTransactions transactions;
   FailureOr<wave::memory_lowering::GatherTransaction> permutation =
       buildHardwareTransposePermutation(store, frame, elementBits,
                                         getTransposeEmitter());
@@ -577,6 +687,10 @@ buildTransposeTransactions(
       llvm_unreachable(
           "failed to construct AMD b8 bit-affine transpose index map");
     transactions.push_back(std::move(*bitAffine));
+    FailureOr<wave::memory_lowering::GatherTransaction> verified =
+        buildVerifiedB8Transaction(request, store, getTransposeEmitter());
+    if (succeeded(verified))
+      transactions.push_back(std::move(*verified));
   } else {
     FailureOr<wave::memory_lowering::GatherTransaction> verified =
         buildVerifiedB16Transaction(request, store, getTransposeEmitter());
@@ -586,8 +700,7 @@ buildTransposeTransactions(
   return transactions;
 }
 
-static SmallVector<wave::memory_lowering::GatherTransaction, 2>
-getAMDGatherTransactions(
+static wave::memory_lowering::GatherTransactions getAMDGatherTransactions(
     const wave::memory_lowering::GatherTransactionRequest &request) {
   if (!hasTransposeExecutionContext(request))
     return {};
@@ -606,7 +719,7 @@ getAMDGatherTransactions(
   std::optional<int64_t> elementBits = getTransposeElementBits(packet);
   return elementBits
              ? buildTransposeTransactions(store, *frame, *elementBits, request)
-             : SmallVector<wave::memory_lowering::GatherTransaction, 2>{};
+             : wave::memory_lowering::GatherTransactions{};
 }
 
 static PtrType getPointerType(Type type) {
@@ -759,7 +872,7 @@ getAMDCopyTransactions(
 
 } // namespace
 
-SmallVector<mlir::wave::memory_lowering::GatherTransaction, 2>
+mlir::wave::memory_lowering::GatherTransactions
 mlir::wave::memory_lowering::getGatherTransactions(
     const GatherTransactionRequest &request) {
   return getAMDGatherTransactions(request);
