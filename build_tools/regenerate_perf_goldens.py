@@ -150,7 +150,7 @@ def run_lit(build_dir: Path) -> None:
     if not test_root.exists():
         raise SystemExit(f"lit test dir missing: {rel(test_root)}")
     subprocess.run(
-        [sys.executable, str(lit), "-sv", str(test_root), "--filter=PerfGolden"],
+        [str(lit), "-sv", str(test_root), "--filter=PerfGolden"],
         check=True,
     )
 
