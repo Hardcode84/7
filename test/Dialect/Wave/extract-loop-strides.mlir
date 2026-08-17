@@ -690,6 +690,33 @@ func.func @drop_dead_simd_offset_carries(
 
 // -----
 
+// CHECK-LABEL: func.func @drop_only_offset_carry
+// CHECK: scf.for %[[IV:[^ ]+]] =
+// CHECK-NOT: iter_args
+// CHECK: %[[SCALED:.*]] = wave.binary muli {{.*}}, %[[IV]]
+// CHECK: %[[OFF:.*]] = wave.binary addi {{.*}}, %[[SCALED]]
+// CHECK: %[[PTR:.*]] = wave.ptr_add %{{.*}}, %[[OFF]]
+// CHECK: wave.load %[[PTR]]
+// CHECK-NOT: scf.yield {{.*}} : i32
+func.func @drop_only_offset_carry(
+    %a: !wave.ptr<#wave.global, i32>, %n: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c64 = arith.constant 64 : i32
+  %unused = scf.for %i = %c0 to %n step %c1
+      iter_args(%off = %c64) -> (i32) : i32 {
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
+    %v, %t = wave.load %p
+        : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+    %next = wave.binary addi %off, %c64 : i32, i32 -> i32
+    scf.yield %next : i32
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @extract_non_normalized_shared_pointer_carry
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[BASE:.*]] = wave.index_expr <"32 + 8*Mod(wi, 64)"> ["wi"](%[[WI]])

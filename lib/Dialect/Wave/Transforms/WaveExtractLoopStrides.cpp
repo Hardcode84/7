@@ -1831,12 +1831,20 @@ static Value createOffsetCarryValue(IRRewriter &rewriter, Location loc,
                           BinaryKind::AddI, candidate.init, scaled);
 }
 
+static void eraseDefaultYield(IRRewriter &rewriter, Block &body) {
+  if (body.empty())
+    return;
+  if (auto defaultYield = dyn_cast<scf::YieldOp>(body.back()))
+    rewriter.eraseOp(defaultYield);
+}
+
 static LogicalResult cloneBodyWithoutOffsetCarries(
     IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
     LoopOffsetCarryCandidate candidate, const llvm::BitVector &removed,
     ArrayRef<unsigned> newIndex) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
+  eraseDefaultYield(rewriter, dstBody);
 
   IRMapping map;
   map.map(src.getInductionVar(), dst.getInductionVar());
