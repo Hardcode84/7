@@ -176,6 +176,22 @@ def Wave_BallotOp : Wave_Op<"ballot", [NoMemoryEffect]> {
   let hasVerifier = 1;
 }
 
+def Wave_MaskAllOp : Wave_Op<"mask_all", [Pure]> {
+  let summary = "test whether every lane in a logical mask is active";
+  let arguments = (ins Wave_Mask:$mask);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$mask attr-dict `:` qualified(type($mask))";
+  let hasFolder = 1;
+}
+
+def Wave_MaskAnyOp : Wave_Op<"mask_any", [Pure]> {
+  let summary = "test whether any lane in a logical mask is active";
+  let arguments = (ins Wave_Mask:$mask);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$mask attr-dict `:` qualified(type($mask))";
+  let hasFolder = 1;
+}
+
 def Wave_SplatOp : Wave_Op<"splat", [Pure,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
   let summary = "broadcast a scalar value into a lane-varying SIMD value";

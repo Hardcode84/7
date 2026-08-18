@@ -3121,6 +3121,18 @@ LogicalResult BallotOp::verify() {
   return success();
 }
 
+OpFoldResult MaskAllOp::fold(FoldAdaptor adaptor) {
+  if (std::optional<bool> mask = foldWaveMaskAttrToBool(adaptor.getMask()))
+    return BoolAttr::get(getContext(), *mask);
+  return {};
+}
+
+OpFoldResult MaskAnyOp::fold(FoldAdaptor adaptor) {
+  if (std::optional<bool> mask = foldWaveMaskAttrToBool(adaptor.getMask()))
+    return BoolAttr::get(getContext(), *mask);
+  return {};
+}
+
 namespace {
 struct CanonicalizeJoinOp : OpRewritePattern<JoinOp> {
   using OpRewritePattern<JoinOp>::OpRewritePattern;

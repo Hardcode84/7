@@ -3056,6 +3056,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<CmpFOp>([&](auto o) { return selectCmpF(o); })
       .Case<SelectOp>([&](auto o) { return selectSelect(o); })
       .Case<BallotOp>([&](auto o) { return selectBallot(o); })
+      .Case<MaskAllOp>([&](auto o) { return selectMaskAll(o); })
+      .Case<MaskAnyOp>([&](auto o) { return selectMaskAny(o); })
       .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
       .Case<ShuffleOp>([&](auto o) { return selectShuffle(o); })
       .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
@@ -6974,6 +6976,29 @@ LogicalResult WaveAMDMachineSelector::selectBallot(BallotOp op) {
   values[op.getResult()] = expect(op.getMask(), op);
   eraseIfTopLevel(op);
   return success();
+}
+
+static LogicalResult selectMaskVote(WaveAMDMachineSelector &S, Operation *op,
+                                    Value mask, Value result, bool all) {
+  unsigned bits = cast<MaskType>(mask.getType()).getWidth();
+  Value loweredMask = S.expect(mask, op);
+  Value expected = createImm(S.builder, op->getLoc(), all ? -1 : 0);
+  CmpRelation relation = all ? CmpRelation::Eq : CmpRelation::Ne;
+  Value scc = bits == 64 ? createScalarI64Cmp(S, op->getLoc(), relation, false,
+                                              loweredMask, expected)
+                         : createScalarWordCmp(S, op->getLoc(), relation, false,
+                                               loweredMask, expected);
+  S.values[result] = materializeSCCBool(S, op->getLoc(), scc);
+  S.eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectMaskAll(MaskAllOp op) {
+  return selectMaskVote(*this, op, op.getMask(), op.getResult(), true);
+}
+
+LogicalResult WaveAMDMachineSelector::selectMaskAny(MaskAnyOp op) {
+  return selectMaskVote(*this, op, op.getMask(), op.getResult(), false);
 }
 
 LogicalResult WaveAMDMachineSelector::selectReadFirst(ReadFirstOp op) {

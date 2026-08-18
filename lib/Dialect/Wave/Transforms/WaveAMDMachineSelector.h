@@ -421,6 +421,8 @@ public:
   LogicalResult selectSelect(SelectOp op);
   LogicalResult selectTokenSelect(SelectOp op);
   LogicalResult selectBallot(BallotOp op);
+  LogicalResult selectMaskAll(MaskAllOp op);
+  LogicalResult selectMaskAny(MaskAnyOp op);
   LogicalResult selectReadFirst(ReadFirstOp op);
   LogicalResult selectShuffle(ShuffleOp op);
   LogicalResult selectScfIf(scf::IfOp op);

@@ -557,6 +557,20 @@ func.func @ballot_cmpi_constant_fold() -> (i32, i64) {
   return %all, %zero : i32, i64
 }
 
+// CHECK-LABEL: func.func @mask_vote_constant_fold
+// CHECK-NOT: wave.mask_all
+// CHECK-NOT: wave.mask_any
+// CHECK: %[[TRUE:.*]] = wave.constant true
+// CHECK: %[[FALSE:.*]] = wave.constant false
+// CHECK: return %[[TRUE]], %[[FALSE]] : i1, i1
+func.func @mask_vote_constant_fold() -> (i1, i1) {
+  %true_mask = wave.constant true -> !wave.mask<64>
+  %false_mask = wave.constant false -> !wave.mask<64>
+  %all = wave.mask_all %true_mask : !wave.mask<64>
+  %any = wave.mask_any %false_mask : !wave.mask<64>
+  return %all, %any : i1, i1
+}
+
 // CHECK-LABEL: func.func @cmpi_mask_constant_fold
 // CHECK-NOT: wave.splat
 // CHECK-NOT: wave.cmpi

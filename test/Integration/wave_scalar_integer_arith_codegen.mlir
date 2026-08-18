@@ -165,6 +165,31 @@ func.func @scalar_i64_div_rem_codegen(%out: !wave.ptr<#wave.global, i32>,
   return
 }
 
+// ASM-LABEL: mask_vote_codegen:
+// ASM: s_cmp_eq_u32
+// ASM: s_cmp_lg_u32
+// ASM: global_store_b32
+func.func @mask_vote_codegen(%out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %c16 = arith.constant 16 : i32
+  %v16 = wave.splat %c16 : i32 -> !wave.simd<i32, 32>
+  %mask = wave.cmpi ult %lane, %v16
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %all = wave.mask_all %mask : !wave.mask<32>
+  %any = wave.mask_any %mask : !wave.mask<32>
+  %zero = arith.constant 0 : i32
+  %one = arith.constant 1 : i32
+  %all_i32 = wave.select %all, %one, %zero : i32
+  %any_i32 = wave.select %any, %one, %zero : i32
+  %sum = wave.binary addi %all_i32, %any_i32 : i32, i32 -> i32
+  %value = wave.splat %sum : i32 -> !wave.simd<i32, 32>
+  %tok = wave.store %value -> %out
+      : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
+  return
+}
+
 // ASM-LABEL: scalar_i64_dynamic_pow2_divsi_codegen:
 // ASM: s_ctz_i32_b64
 // ASM: s_lshr_b64

@@ -109,6 +109,10 @@ func.func @wave_ops(%pred: i1, %value: i32, %out: !wave.ptr<#wave.global, i32>) 
   %wi_x = wave.workitem_id 0 : !wave.simd<i32, 32>
   // CHECK: wave.ballot {{.*}} : !wave.mask<32> -> i32
   %bits = wave.ballot %mask : !wave.mask<32> -> i32
+  // CHECK: wave.mask_all {{.*}} : !wave.mask<32>
+  %all = wave.mask_all %mask : !wave.mask<32>
+  // CHECK: wave.mask_any {{.*}} : !wave.mask<32>
+  %any = wave.mask_any %mask : !wave.mask<32>
   // CHECK: wave.read_first {{.*}} : !wave.simd<i32, 32> -> i32
   %first = wave.read_first %sum : !wave.simd<i32, 32> -> i32
   // CHECK: wave.shuffle {{.*}} from {{.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
