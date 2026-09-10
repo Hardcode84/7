@@ -8,6 +8,7 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "WavePointerAdd.h"
 #include "WaveSignedRange.h"
 
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
@@ -1546,23 +1547,6 @@ findOffsetCarryCandidate(scf::ForOp loop) {
   return std::optional<LoopOffsetCarryCandidate>(std::move(candidate));
 }
 
-static bool isScalarOffset(Type type) {
-  return isIntegerOffsetCarryType(type) && !isa<SimdType>(type);
-}
-
-static bool needsSimdOffset(Type resultType, Type baseType, Type offsetType) {
-  return isa<SimdType>(resultType) && isa<PtrType>(baseType) &&
-         isScalarOffset(offsetType);
-}
-
-static Type getSimdOffsetType(Type resultType, Type offsetType) {
-  if (!offsetType.isIndex() && !offsetType.isInteger(32))
-    return {};
-  auto resultSimd = cast<SimdType>(resultType);
-  return SimdType::get(resultType.getContext(), offsetType,
-                       resultSimd.getWidth());
-}
-
 static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
                                    MLIRContext *ctx, const BoundExpr &expr,
                                    IRMapping *map = nullptr) {
@@ -1576,20 +1560,6 @@ static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
   return IndexExprOp::create(rewriter, loc, type, ExprAttr::get(ctx, expr.expr),
                              getIndexExprPredArrayAttr(ctx, expr.assumptions),
                              rewriter.getStrArrayAttr(nameRefs), bindings);
-}
-
-static FailureOr<Value> createPtrAdd(IRRewriter &rewriter, Location loc,
-                                     Type resultType, Value base,
-                                     Value offset) {
-  if (needsSimdOffset(resultType, base.getType(), offset.getType())) {
-    Type offsetType = getSimdOffsetType(resultType, offset.getType());
-    if (!offsetType)
-      return failure();
-    Value simdOffset = SplatOp::create(rewriter, loc, offsetType, offset);
-    return PtrAddOp::create(rewriter, loc, resultType, base, simdOffset)
-        .getResult();
-  }
-  return PtrAddOp::create(rewriter, loc, resultType, base, offset).getResult();
 }
 
 static LogicalResult cloneBodyWithCarriedPointer(IRRewriter &rewriter,
