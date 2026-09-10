@@ -1471,17 +1471,13 @@ static std::vector<Carry> computeCarries(LowerCtx &lc, const Stmt *thenBlock,
       continue;
     if (carryNameInList(carries, bnd.name, bnd.name_len))
       continue;
+    // Newest binding supplies carry; first binding sets order.
+    const Binding &current = *lookup(lc, bnd.name, bnd.name_len);
     Carry c;
     c.name = bnd.name;
-    c.type = bnd.type;
+    c.type = current.type;
+    c.incoming = current.value;
     c.name_len = bnd.name_len;
-    // Incoming is the CURRENT (newest) binding -- what every read sees via
-    // lookup() -- not this possibly-shadowed env entry. A name rebound to an
-    // enclosing region's carry (e.g. a for iter_arg) must carry the rebound
-    // value; bnd.value here could feed the body a stale loop-invariant.
-    Binding *cur = lookup(lc, bnd.name, bnd.name_len);
-    c.incoming = (cur != nullptr) ? cur->value : bnd.value;
-    c.type = (cur != nullptr) ? cur->type : bnd.type;
     carries.push_back(c);
   }
   return carries;
