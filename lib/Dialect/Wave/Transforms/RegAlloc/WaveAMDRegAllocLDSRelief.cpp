@@ -495,9 +495,9 @@ static FailureOr<Value> shiftM0Value(OpBuilder &builder, Location loc, Value m0,
   return failure();
 }
 
-static bool isSCCValue(Value value) {
-  return wave::getHardwareResourceForValue(value) ==
-         wave::HardwareResourceKind::SCC;
+template <wave::HardwareResourceKind Resource>
+static bool isResourceValue(Value value) {
+  return wave::getHardwareResourceForValue(value) == Resource;
 }
 
 static bool isDefinedInside(Operation *owner, Value value) {
@@ -508,50 +508,54 @@ static bool isDefinedInside(Operation *owner, Value value) {
   return parent == owner || (parent && owner->isAncestor(parent));
 }
 
-static Value findNestedSCCCapture(Operation *owner, Region &region) {
+template <wave::HardwareResourceKind Resource>
+static Value findNestedResourceCapture(Operation *owner, Region &region) {
   for (Block &block : region) {
     for (Operation &nested : block) {
       for (Value operand : nested.getOperands())
-        if (isSCCValue(operand) && !isDefinedInside(owner, operand))
+        if (isResourceValue<Resource>(operand) &&
+            !isDefinedInside(owner, operand))
           return operand;
       for (Region &child : nested.getRegions())
-        if (Value capture = findNestedSCCCapture(owner, child))
+        if (Value capture = findNestedResourceCapture<Resource>(owner, child))
           return capture;
     }
   }
   return {};
 }
 
-static Value findSCCRead(Operation *op) {
+template <wave::HardwareResourceKind Resource>
+static Value findResourceRead(Operation *op) {
   for (Value operand : op->getOperands())
-    if (isSCCValue(operand))
+    if (isResourceValue<Resource>(operand))
       return operand;
   for (Region &region : op->getRegions())
-    if (Value capture = findNestedSCCCapture(op, region))
+    if (Value capture = findNestedResourceCapture<Resource>(op, region))
       return capture;
   return {};
 }
 
-static bool writesSCC(Operation *op) {
-  if (llvm::is_contained(wave::getHardwareResourceEffects(op).writes,
-                         wave::HardwareResourceKind::SCC))
+template <wave::HardwareResourceKind Resource>
+static bool writesResource(Operation *op) {
+  if (llvm::is_contained(wave::getHardwareResourceEffects(op).writes, Resource))
     return true;
   return op
       ->walk([&](Operation *nested) {
         if (nested != op &&
             llvm::is_contained(wave::getHardwareResourceEffects(nested).writes,
-                               wave::HardwareResourceKind::SCC))
+                               Resource))
           return WalkResult::interrupt();
         return WalkResult::advance();
       })
       .wasInterrupted();
 }
 
-static Value findLiveSCCAt(Operation *point) {
+template <wave::HardwareResourceKind Resource>
+static Value findLiveResourceAt(Operation *point) {
   for (Operation *op = point; op; op = op->getNextNode()) {
-    if (Value read = findSCCRead(op))
+    if (Value read = findResourceRead<Resource>(op))
       return read;
-    if (writesSCC(op))
+    if (writesResource<Resource>(op))
       return {};
   }
   return {};
@@ -563,74 +567,12 @@ static Operation *getAncestorInBlock(Operation *op, Block *block) {
   return op;
 }
 
-static void replaceSCCUsesAtOrAfter(Value oldSCC, Value newSCC,
-                                    Operation *point) {
-  for (OpOperand &use : llvm::make_early_inc_range(oldSCC.getUses())) {
+static void replaceResourceUsesAtOrAfter(Value oldValue, Value newValue,
+                                         Operation *point) {
+  for (OpOperand &use : llvm::make_early_inc_range(oldValue.getUses())) {
     Operation *owner = getAncestorInBlock(use.getOwner(), point->getBlock());
     if (owner && (owner == point || point->isBeforeInBlock(owner)))
-      use.set(newSCC);
-  }
-}
-
-static bool isM0Value(Value value) {
-  return wave::getHardwareResourceForValue(value) ==
-         wave::HardwareResourceKind::M0;
-}
-
-static Value findNestedM0Capture(Operation *owner, Region &region) {
-  for (Block &block : region) {
-    for (Operation &nested : block) {
-      for (Value operand : nested.getOperands())
-        if (isM0Value(operand) && !isDefinedInside(owner, operand))
-          return operand;
-      for (Region &child : nested.getRegions())
-        if (Value capture = findNestedM0Capture(owner, child))
-          return capture;
-    }
-  }
-  return {};
-}
-
-static Value findM0Read(Operation *op) {
-  for (Value operand : op->getOperands())
-    if (isM0Value(operand))
-      return operand;
-  for (Region &region : op->getRegions())
-    if (Value capture = findNestedM0Capture(op, region))
-      return capture;
-  return {};
-}
-
-static bool writesM0(Operation *op) {
-  if (llvm::is_contained(wave::getHardwareResourceEffects(op).writes,
-                         wave::HardwareResourceKind::M0))
-    return true;
-  return op
-      ->walk([&](Operation *nested) {
-        if (nested != op &&
-            llvm::is_contained(wave::getHardwareResourceEffects(nested).writes,
-                               wave::HardwareResourceKind::M0))
-          return WalkResult::interrupt();
-        return WalkResult::advance();
-      })
-      .wasInterrupted();
-}
-
-static Value findLiveM0At(Operation *point) {
-  for (Operation *op = point; op; op = op->getNextNode()) {
-    if (Value read = findM0Read(op))
-      return read;
-    if (writesM0(op))
-      return {};
-  }
-  return {};
-}
-
-static void replaceM0UsesAtOrAfter(Value oldM0, Value newM0, Operation *point) {
-  for (OpOperand &use : llvm::make_early_inc_range(oldM0.getUses())) {
-    Operation *owner = getAncestorInBlock(use.getOwner(), point->getBlock());
-    if (owner && (owner == point || point->isBeforeInBlock(owner)))
-      use.set(newM0);
+      use.set(newValue);
   }
 }
 
@@ -715,7 +657,7 @@ static void restoreSCCAfterM0(OpBuilder &builder, Operation *point,
                               Value liveSCC, Value savedSCC,
                               Value restoredSCC) {
   if (restoredSCC) {
-    replaceSCCUsesAtOrAfter(liveSCC, restoredSCC, point);
+    replaceResourceUsesAtOrAfter(liveSCC, restoredSCC, point);
     return;
   }
   if (!savedSCC)
@@ -724,7 +666,7 @@ static void restoreSCCAfterM0(OpBuilder &builder, Operation *point,
   waveamdmachine::SCmpLgU32Op reloaded = waveamdmachine::SCmpLgU32Op::create(
       builder, point->getLoc(), liveSCC.getType(), savedSCC, zero);
   markRegAllocTemp(reloaded, builder);
-  replaceSCCUsesAtOrAfter(liveSCC, reloaded.getResult(), point);
+  replaceResourceUsesAtOrAfter(liveSCC, reloaded.getResult(), point);
 }
 
 static LogicalResult restoreLiveM0(OpBuilder &builder, Value liveM0,
@@ -742,7 +684,9 @@ static LogicalResult restoreLiveM0(OpBuilder &builder, Value liveM0,
     return point->emitError("regalloc LDS relief cannot restore live M0 value");
 
   bool setsSCC = add || !increments.empty();
-  Value liveSCC = setsSCC ? findLiveSCCAt(point) : Value{};
+  Value liveSCC =
+      setsSCC ? findLiveResourceAt<wave::HardwareResourceKind::SCC>(point)
+              : Value{};
   bool rebuildsLiveSCC = m0RestoreRebuildsSCC(liveSCC, add, increments);
 
   builder.setInsertionPoint(point);
@@ -752,7 +696,7 @@ static LogicalResult restoreLiveM0(OpBuilder &builder, Value liveM0,
       restoreM0Root(builder, point, root, mov, add, liveSCC);
   restored = replayM0Increments(builder, point, increments, liveSCC, restored);
   restoreSCCAfterM0(builder, point, liveSCC, savedSCC, restored.scc);
-  replaceM0UsesAtOrAfter(liveM0, restored.m0, point);
+  replaceResourceUsesAtOrAfter(liveM0, restored.m0, point);
   return success();
 }
 
@@ -777,7 +721,9 @@ static LogicalResult restoreGeneratedLDSM0(func::FuncOp func,
     Operation *point = boundary->getNextNode();
     if (!point)
       continue;
-    if (failed(restoreLiveM0(builder, findLiveM0At(point), point)))
+    if (failed(restoreLiveM0(
+            builder, findLiveResourceAt<wave::HardwareResourceKind::M0>(point),
+            point)))
       return failure();
   }
   return success();
@@ -857,7 +803,7 @@ static LogicalResult shiftM0ChainRoot(OpBuilder &builder, Value root,
   if (!m0ChainOnlyAddressesLDS(root, visited))
     return oldDef->emitError("M0 chain has a non-LDS address use");
 
-  Value liveSCC = findLiveSCCAt(oldDef);
+  Value liveSCC = findLiveResourceAt<wave::HardwareResourceKind::SCC>(oldDef);
   builder.setInsertionPoint(oldDef);
   Value savedSCC;
   if (liveSCC) {
@@ -878,7 +824,7 @@ static LogicalResult shiftM0ChainRoot(OpBuilder &builder, Value root,
     waveamdmachine::SCmpLgU32Op reloaded = waveamdmachine::SCmpLgU32Op::create(
         builder, oldDef->getLoc(), liveSCC.getType(), savedSCC, zero);
     markRegAllocTemp(reloaded, builder);
-    replaceSCCUsesAtOrAfter(liveSCC, reloaded.getResult(), oldDef);
+    replaceResourceUsesAtOrAfter(liveSCC, reloaded.getResult(), oldDef);
   }
   root.replaceAllUsesWith(*shifted);
   eraseDeadAddressOp(oldDef);
@@ -892,7 +838,7 @@ shiftLDSAddressOperand(OpBuilder &builder, Operation *op, unsigned bytes,
     if (!isa<waveamdmachine::M0Type>(operand.get().getType()))
       continue;
     builder.setInsertionPoint(op);
-    Value liveSCC = findLiveSCCAt(op);
+    Value liveSCC = findLiveResourceAt<wave::HardwareResourceKind::SCC>(op);
     Value savedSCC;
     if (liveSCC) {
       Value one = createImm(builder, op->getLoc(), 1);
@@ -913,7 +859,7 @@ shiftLDSAddressOperand(OpBuilder &builder, Operation *op, unsigned bytes,
                            builder, op->getLoc(),
                            getSCCType(builder.getContext()), savedSCC, zero)
                            .getResult();
-      replaceSCCUsesAtOrAfter(liveSCC, reloaded, op);
+      replaceResourceUsesAtOrAfter(liveSCC, reloaded, op);
     }
     operand.set(*shifted);
     eraseDeadAddressOp(oldM0.getDefiningOp());
@@ -1056,7 +1002,9 @@ storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext &context,
                 Location loc, Value value, waveamdmachine::RegType type,
                 Value token, ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
   Operation *point = getInsertionPointOp(builder);
-  Value liveM0 = point ? findLiveM0At(point) : Value{};
+  Value liveM0 = point
+                     ? findLiveResourceAt<wave::HardwareResourceKind::M0>(point)
+                     : Value{};
   unsigned width = type.getWidth();
   if (width == 1) {
     FailureOr<Value> stored =
@@ -1121,7 +1069,9 @@ loadLDSValue(OpBuilder &builder, const LDSAddTidContext &context, Location loc,
              Type type, Value token,
              ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
   Operation *point = getInsertionPointOp(builder);
-  Value liveM0 = point ? findLiveM0At(point) : Value{};
+  Value liveM0 = point
+                     ? findLiveResourceAt<wave::HardwareResourceKind::M0>(point)
+                     : Value{};
   unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
   if (width == 1) {
     FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
