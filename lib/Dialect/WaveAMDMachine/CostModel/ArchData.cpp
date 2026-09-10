@@ -328,9 +328,9 @@ const ArchData &getArchData(const llvm::AMDGPU::IsaVersion &isa) {
       return *gfx1250;
   }
   llvm::report_fatal_error(llvm::Twine("ArchData: unsupported IsaVersion ") +
-                           llvm::Twine(isa.Major) + "." +
-                           llvm::Twine(isa.Minor) + "." +
-                           llvm::Twine(isa.Stepping));
+                           llvm::Twine(unsigned(isa.Major)) + "." +
+                           llvm::Twine(unsigned(isa.Minor)) + "." +
+                           llvm::Twine(unsigned(isa.Stepping)));
 }
 
 } // namespace mlir::waveamdmachine

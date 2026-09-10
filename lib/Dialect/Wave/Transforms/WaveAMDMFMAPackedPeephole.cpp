@@ -455,6 +455,13 @@ struct WaveAMDMFMAPackedPeepholePass
     if (failed(isa))
       return signalPassFailure();
 
+    if (!isArchSupported(*isa)) {
+      root->emitError(
+          "waveamd-mfma-packed-peephole requires a cost model for ISA ")
+          << unsigned(isa->Major) << "." << unsigned(isa->Minor) << "."
+          << unsigned(isa->Stepping);
+      return signalPassFailure();
+    }
     const ArchData &arch = getArchData(*isa);
     if (!arch.hasMfmaCoissueRestriction)
       return;
