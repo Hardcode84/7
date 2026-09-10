@@ -35,32 +35,26 @@ static bool isUnderWaveConditional(waveamdmachine::SBarrierOp barrier) {
          barrier->getParentOfType<waveamdmachine::UniformIfOp>();
 }
 
-static bool isEligibleBarrier(waveamdmachine::SBarrierOp barrier) {
-  if (isUnderWaveConditional(barrier))
-    return false;
-  return true;
-}
-
-static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize,
-                               const waveamdmachine::ArchData &arch) {
+static void splitFunc(func::FuncOp func, unsigned wavefrontSize,
+                      const waveamdmachine::ArchData &arch) {
   if (func.isExternal())
-    return success();
+    return;
 
   std::optional<unsigned> expectedWaves =
       split_barrier_detail::getExpectedWaves(func, wavefrontSize);
   if (!expectedWaves)
-    return success();
+    return;
   if (*expectedWaves <= static_cast<unsigned>(arch.simdsPerCU))
-    return success();
+    return;
 
   SmallVector<waveamdmachine::SBarrierOp> barriers;
   func.walk([&](waveamdmachine::SBarrierOp barrier) {
-    if (!isEligibleBarrier(barrier))
+    if (isUnderWaveConditional(barrier))
       return;
     barriers.push_back(barrier);
   });
   if (barriers.empty())
-    return success();
+    return;
 
   MLIRContext *ctx = func.getContext();
   Type barrierType = waveamdmachine::BarrierType::get(ctx);
@@ -86,7 +80,6 @@ static LogicalResult splitFunc(func::FuncOp func, unsigned wavefrontSize,
       result.replaceAllUsesWith(wait.getToken());
     barrier.erase();
   }
-  return success();
 }
 
 struct WaveAMDSplitBarriersPass
@@ -119,8 +112,7 @@ struct WaveAMDSplitBarriersPass
         waveamdmachine::getArchData(target->isa);
 
     for (func::FuncOp func : functions)
-      if (failed(splitFunc(func, *wavefrontSize, arch)))
-        return signalPassFailure();
+      splitFunc(func, *wavefrontSize, arch);
   }
 };
 
