@@ -160,14 +160,14 @@ static void materializeScratchAddress(OpBuilder &builder, Location loc,
   instOffset = 0;
 }
 
-static FailureOr<Value>
-storeScratchScalarValue(OpBuilder &builder, Location loc, Value value,
-                        Value token, wave::regalloc::ScratchSpillPlan plan) {
+static Value storeScratchScalarValue(OpBuilder &builder, Location loc,
+                                     Value value, Value token,
+                                     unsigned byteOffset) {
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
   Value storeVaddr;
   Value storeSaddr;
   int64_t storeOffset = 0;
-  materializeScratchAddress(builder, loc, plan.slotBase, storeVaddr, storeSaddr,
+  materializeScratchAddress(builder, loc, byteOffset, storeVaddr, storeSaddr,
                             storeOffset);
   waveamdmachine::ScratchStoreB32Op store =
       waveamdmachine::ScratchStoreB32Op::create(builder, loc, tokenType,
@@ -177,23 +177,14 @@ storeScratchScalarValue(OpBuilder &builder, Location loc, Value value,
   return store.getToken();
 }
 
-static FailureOr<Value> storeScratchScalarValue(OpBuilder &builder,
-                                                Location loc, Value value,
-                                                Value token,
-                                                unsigned byteOffset) {
-  wave::regalloc::ScratchSpillPlan plan;
-  plan.slotBase = byteOffset;
-  return storeScratchScalarValue(builder, loc, value, token, plan);
-}
-
-static FailureOr<Value>
-storeScratchTupleValue(OpBuilder &builder, Location loc, Value value,
-                       Value token, wave::regalloc::ScratchSpillPlan plan) {
+static Value storeScratchTupleValue(OpBuilder &builder, Location loc,
+                                    Value value, Value token,
+                                    unsigned byteOffset) {
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
   Value storeVaddr;
   Value storeSaddr;
   int64_t storeOffset = 0;
-  materializeScratchAddress(builder, loc, plan.slotBase, storeVaddr, storeSaddr,
+  materializeScratchAddress(builder, loc, byteOffset, storeVaddr, storeSaddr,
                             storeOffset);
   waveamdmachine::ScratchStoreTupleB32Op store =
       waveamdmachine::ScratchStoreTupleB32Op::create(
@@ -213,54 +204,51 @@ static void recordScratchVGPRSpillSave(func::FuncOp func, OpBuilder &builder,
                 builder.getI64IntegerAttr(spilledVGPRs + dwords));
 }
 
-static FailureOr<Value>
-storeScratchValueAt(OpBuilder &builder, func::FuncOp func, Location loc,
-                    Value value, waveamdmachine::RegType type, Value token,
-                    wave::regalloc::ScratchSpillPlan plan);
+static Value storeScratchValueAt(OpBuilder &builder, func::FuncOp func,
+                                 Location loc, Value value,
+                                 waveamdmachine::RegType type, Value token,
+                                 wave::regalloc::ScratchSpillPlan plan);
 
-static FailureOr<Value> storeScratchValue(OpBuilder &builder, func::FuncOp func,
-                                          const ScratchReliefSlot &slot,
-                                          Value token) {
+static Value storeScratchValue(OpBuilder &builder, func::FuncOp func,
+                               const ScratchReliefSlot &slot, Value token) {
   wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
   return storeScratchValueAt(builder, func, slot.value.getLoc(), slot.value,
                              slot.type, token, slot.plan);
 }
 
-static FailureOr<Value>
-storeScratchValueAt(OpBuilder &builder, func::FuncOp func, Location loc,
-                    Value value, waveamdmachine::RegType type, Value token,
-                    wave::regalloc::ScratchSpillPlan plan) {
+static Value storeScratchValueAt(OpBuilder &builder, func::FuncOp func,
+                                 Location loc, Value value,
+                                 waveamdmachine::RegType type, Value token,
+                                 wave::regalloc::ScratchSpillPlan plan) {
   unsigned width = type.getWidth();
   recordScratchVGPRSpillSave(func, builder, width);
   if (width == 1)
-    return storeScratchScalarValue(builder, loc, value, token, plan);
+    return storeScratchScalarValue(builder, loc, value, token, plan.slotBase);
   if (scratchTupleFitsImmediate(plan.slotBase, width))
-    return storeScratchTupleValue(builder, loc, value, token, plan);
+    return storeScratchTupleValue(builder, loc, value, token, plan.slotBase);
 
   SmallVector<Value> elements =
       wave::regalloc::splitMemorySpillValue(value, builder, loc);
   SmallVector<Value> tokens;
   tokens.reserve(elements.size());
   for (auto [index, element] : llvm::enumerate(elements)) {
-    FailureOr<Value> stored = storeScratchScalarValue(
+    Value stored = storeScratchScalarValue(
         builder, loc, element, token,
         plan.slotBase + static_cast<unsigned>(index) * 4);
-    if (failed(stored))
-      return failure();
-    tokens.push_back(*stored);
+    tokens.push_back(stored);
   }
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
   return wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc);
 }
 
-static FailureOr<wave::regalloc::MemorySpillLoadResult>
+static wave::regalloc::MemorySpillLoadResult
 loadScratchScalarValue(OpBuilder &builder, Location loc, Type type, Value token,
-                       wave::regalloc::ScratchSpillPlan plan) {
+                       unsigned byteOffset) {
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
   Value loadVaddr;
   Value loadSaddr;
   int64_t loadOffset = 0;
-  materializeScratchAddress(builder, loc, plan.slotBase, loadVaddr, loadSaddr,
+  materializeScratchAddress(builder, loc, byteOffset, loadVaddr, loadSaddr,
                             loadOffset);
   waveamdmachine::ScratchLoadB32Op load =
       waveamdmachine::ScratchLoadB32Op::create(builder, loc, type, tokenType,
@@ -271,22 +259,14 @@ loadScratchScalarValue(OpBuilder &builder, Location loc, Type type, Value token,
                                                load.getToken()};
 }
 
-static FailureOr<wave::regalloc::MemorySpillLoadResult>
-loadScratchScalarValue(OpBuilder &builder, Location loc, Type type, Value token,
-                       unsigned byteOffset) {
-  wave::regalloc::ScratchSpillPlan plan;
-  plan.slotBase = byteOffset;
-  return loadScratchScalarValue(builder, loc, type, token, plan);
-}
-
-static FailureOr<wave::regalloc::MemorySpillLoadResult>
+static wave::regalloc::MemorySpillLoadResult
 loadScratchTupleValue(OpBuilder &builder, Location loc, Type type, Value token,
-                      wave::regalloc::ScratchSpillPlan plan) {
+                      unsigned byteOffset) {
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
   Value loadVaddr;
   Value loadSaddr;
   int64_t loadOffset = 0;
-  materializeScratchAddress(builder, loc, plan.slotBase, loadVaddr, loadSaddr,
+  materializeScratchAddress(builder, loc, byteOffset, loadVaddr, loadSaddr,
                             loadOffset);
   waveamdmachine::ScratchLoadTupleB32Op load =
       waveamdmachine::ScratchLoadTupleB32Op::create(
@@ -297,14 +277,14 @@ loadScratchTupleValue(OpBuilder &builder, Location loc, Type type, Value token,
                                                load.getToken()};
 }
 
-static FailureOr<wave::regalloc::MemorySpillLoadResult>
+static wave::regalloc::MemorySpillLoadResult
 loadScratchValue(OpBuilder &builder, Location loc, Type type, Value token,
                  wave::regalloc::ScratchSpillPlan plan) {
   unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
   if (width == 1)
-    return loadScratchScalarValue(builder, loc, type, token, plan);
+    return loadScratchScalarValue(builder, loc, type, token, plan.slotBase);
   if (scratchTupleFitsImmediate(plan.slotBase, width))
-    return loadScratchTupleValue(builder, loc, type, token, plan);
+    return loadScratchTupleValue(builder, loc, type, token, plan.slotBase);
 
   SmallVector<Type> elementTypes =
       wave::regalloc::getMemorySpillScalarRegTypes(type);
@@ -313,14 +293,11 @@ loadScratchValue(OpBuilder &builder, Location loc, Type type, Value token,
   elements.reserve(elementTypes.size());
   tokens.reserve(elementTypes.size());
   for (auto [index, elementType] : llvm::enumerate(elementTypes)) {
-    FailureOr<wave::regalloc::MemorySpillLoadResult> load =
-        loadScratchScalarValue(builder, loc, elementType, token,
-                               plan.slotBase +
-                                   static_cast<unsigned>(index) * 4);
-    if (failed(load))
-      return failure();
-    elements.push_back(load->value);
-    tokens.push_back(load->token);
+    wave::regalloc::MemorySpillLoadResult load = loadScratchScalarValue(
+        builder, loc, elementType, token,
+        plan.slotBase + static_cast<unsigned>(index) * 4);
+    elements.push_back(load.value);
+    tokens.push_back(load.token);
   }
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
   return wave::regalloc::MemorySpillLoadResult{
@@ -345,7 +322,8 @@ static void reserveScratchSpillBytes(func::FuncOp func, OpBuilder &builder,
 static LogicalResult
 materializeScratchRelief(OpBuilder &builder, func::FuncOp func,
                          const ScratchReliefCandidate &candidate) {
-  auto store = [&](const ScratchReliefSlot &slot, Value token) {
+  auto store = [&](const ScratchReliefSlot &slot,
+                   Value token) -> FailureOr<Value> {
     return storeScratchValue(builder, func, slot, token);
   };
   auto load = [&](Location loc, Type type, Value token,
