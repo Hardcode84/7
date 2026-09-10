@@ -763,10 +763,6 @@ def _mxfp4_scale_tiles_per_wave(tile_count: int) -> int:
     return tile_count // _MXFP4_SCALE_PACK
 
 
-def _splat_const(bld: dsl.FunctionBuilder, value: int) -> dsl.Value:
-    return bld.splat(bld.constant(dsl.i32(), value))
-
-
 def _target_waves_attrs(target_waves: int | None) -> dict[str, dsl.Attribute]:
     if target_waves is None:
         return {}
@@ -7048,17 +7044,6 @@ def _emit_dma_subpanel_mma_range(
         if on_column is not None and (ordinal + 1) % len(a_frags) == 0:
             on_column(tuple(new_accs), j)
     return tuple(new_accs)
-
-
-def _emit_dma_subpanel_mma_prefix(
-    bld: dsl.FunctionBuilder,
-    cfg: _MatmulConfig,
-    a_frags: tuple[dsl.Value, ...],
-    b_frags: tuple[dsl.Value, ...],
-    accs: tuple[dsl.Value, ...],
-    count: int,
-) -> tuple[dsl.Value, ...]:
-    return _emit_dma_subpanel_mma_range(bld, cfg, a_frags, b_frags, accs, 0, count)
 
 
 def _emit_dma_subpanel_phase0(
