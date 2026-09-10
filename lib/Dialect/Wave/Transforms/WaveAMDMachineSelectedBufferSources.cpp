@@ -65,8 +65,8 @@ composeFoldedVOffset(WaveAMDMachineSelector &S, const AddressPlan &plan,
   return appendInstOffsetExpr(S, *voffset, plan, includeInstOffset);
 }
 
-static FailureOr<sym::ExprHandle>
-buildVOffsetProof(sym::Analysis &analysis, sym::ExprHandle materialization) {
+static sym::ExprHandle buildVOffsetProof(sym::Analysis &analysis,
+                                         sym::ExprHandle materialization) {
   sym::ExprHandle proof = analysis.expand(materialization);
   FailureOr<sym::ExprHandle> simplified = analysis.simplify(proof);
   return succeeded(simplified) ? *simplified : proof;
@@ -110,15 +110,12 @@ LogicalResult foldBufferAddressFieldsIntoVOffset(WaveAMDMachineSelector &S,
   if (failed(created))
     return success();
   sym::Analysis &analysis = **created;
-  FailureOr<sym::ExprHandle> proof =
-      buildVOffsetProof(analysis, materialization);
-  sym::ExprHandle proofExpr = succeeded(proof) ? *proof : materialization;
-  if (!S.slotFitsU32(analysis, proofExpr))
+  sym::ExprHandle proof = buildVOffsetProof(analysis, materialization);
+  if (!S.slotFitsU32(analysis, proof))
     return success();
-  plan.voffsetExpr =
-      succeeded(proof) && shouldUseSimplifiedIndexExpr(*proof, materialization)
-          ? *proof
-          : materialization;
+  plan.voffsetExpr = shouldUseSimplifiedIndexExpr(proof, materialization)
+                         ? proof
+                         : materialization;
   plan.voffsetNeedsWide =
       needsWideAddressMaterialization(plan.voffsetExpr, plan);
   clearFoldedAddressFields(plan, includeInstOffset);

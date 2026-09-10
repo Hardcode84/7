@@ -173,21 +173,16 @@ getRedistributedSourceIndex(RedistributionAttr relation,
   if (!isItemLocalRedistribution(relation))
     return std::optional<int64_t>{};
 
-  FailureOr<sym::ExprHandle> slot = sym::composeExprSym(store, "slot");
-  FailureOr<sym::ExprHandle> index =
-      sym::composeExprInt(store, destinationIndex);
-  if (failed(slot) || failed(index))
-    return failure();
+  sym::ExprHandle slot = sym::composeExprSym(store, "slot");
+  sym::ExprHandle index = sym::composeExprInt(store, destinationIndex);
   std::array<sym::ExprSubstitution, 1> substitutions{
-      sym::ExprSubstitution{*slot, *index}};
-  FailureOr<sym::ExprHandle> sourceSlot =
+      sym::ExprSubstitution{slot, index}};
+  sym::ExprHandle sourceSlot =
       sym::substituteExpr(store, relation.getSourceSlot(), substitutions);
-  if (failed(sourceSlot))
+  FailureOr<sym::ExprHandle> simplified = sym::simplifyExpr(store, sourceSlot);
+  if (failed(simplified))
     return failure();
-  sourceSlot = sym::simplifyExpr(store, *sourceSlot);
-  if (failed(sourceSlot))
-    return failure();
-  std::optional<int64_t> sourceIndex = sym::getIntegerLiteralValue(*sourceSlot);
+  std::optional<int64_t> sourceIndex = sym::getIntegerLiteralValue(*simplified);
   if (!sourceIndex || *sourceIndex < 0)
     return std::optional<int64_t>{};
   return std::optional<int64_t>{*sourceIndex};
@@ -383,29 +378,19 @@ getAtomicLeafSemanticRange(Value value) {
   return std::nullopt;
 }
 
-static inline LogicalResult
+static inline void
 appendExprSignedRangeAssumption(sym::Store &store, sym::ExprHandle expr,
                                 SignedI64Range range,
                                 SmallVectorImpl<sym::PredHandle> &assumptions) {
-  FailureOr<sym::ExprHandle> lower = sym::composeExprInt(store, range.first);
-  FailureOr<sym::ExprHandle> upper = sym::composeExprInt(store, range.second);
-  FailureOr<sym::PredHandle> atLeast =
-      failed(lower)
-          ? FailureOr<sym::PredHandle>(failure())
-          : sym::composePredCmp(store, expr, sym::PredCmpOp::Ge, *lower);
-  FailureOr<sym::PredHandle> atMost =
-      failed(upper)
-          ? FailureOr<sym::PredHandle>(failure())
-          : sym::composePredCmp(store, expr, sym::PredCmpOp::Le, *upper);
-  FailureOr<sym::PredHandle> bounded =
-      failed(atLeast) || failed(atMost)
-          ? FailureOr<sym::PredHandle>(failure())
-          : sym::composePredAnd(store, *atLeast, *atMost);
-  if (failed(bounded))
-    return failure();
-  if (!llvm::is_contained(assumptions, *bounded))
-    assumptions.push_back(*bounded);
-  return success();
+  sym::ExprHandle lower = sym::composeExprInt(store, range.first);
+  sym::ExprHandle upper = sym::composeExprInt(store, range.second);
+  sym::PredHandle atLeast =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Ge, lower);
+  sym::PredHandle atMost =
+      sym::composePredCmp(store, expr, sym::PredCmpOp::Le, upper);
+  sym::PredHandle bounded = sym::composePredAnd(store, atLeast, atMost);
+  if (!llvm::is_contained(assumptions, bounded))
+    assumptions.push_back(bounded);
 }
 
 static inline unsigned elementStorageBitWidth(Type type) {

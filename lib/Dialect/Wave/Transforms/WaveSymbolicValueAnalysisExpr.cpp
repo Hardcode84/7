@@ -647,9 +647,7 @@ LogicalResult SymbolicValueBuilder::appendNoSignedWrapResultRange(
     return failure();
   }
   SmallVector<sym::PredHandle, 2> assumptions;
-  if (failed(appendExprSignedRangeAssumption(store, mathematical, *range,
-                                             assumptions)))
-    return failure();
+  appendExprSignedRangeAssumption(store, mathematical, *range, assumptions);
   return appendRequiredAssumptions(assumptions, op.getOperation(), skip,
                                    context);
 }

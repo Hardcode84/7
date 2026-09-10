@@ -508,7 +508,7 @@ inferSignedI64Range(sym::Store &store, sym::ExprHandle expr,
   return SignedI64Range{*lo, *hi};
 }
 
-static LogicalResult
+static void
 appendExprSignedRangeAssumption(sym::Store &store, sym::ExprHandle expr,
                                 SignedI64Range range,
                                 SmallVectorImpl<sym::PredHandle> &assumptions) {
@@ -518,13 +518,10 @@ appendExprSignedRangeAssumption(sym::Store &store, sym::ExprHandle expr,
       sym::rangeAssumption(store, resultName, range.first, range.second);
   std::array<sym::ExprSubstitution, 1> substitution{
       sym::ExprSubstitution{result, expr}};
-  FailureOr<sym::PredHandle> remapped =
+  sym::PredHandle remapped =
       sym::substitutePred(store, resultRange, substitution);
-  if (failed(remapped))
-    return failure();
-  if (!isPredicateImplied(store, *remapped, assumptions))
-    assumptions.push_back(*remapped);
-  return success();
+  if (!isPredicateImplied(store, remapped, assumptions))
+    assumptions.push_back(remapped);
 }
 
 static std::optional<SignedI64Range>
@@ -2501,11 +2498,9 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
                                      state.assumptions);
   if (failed(simplification))
     return failure();
-  if (resultRange && failed(appendExprSignedRangeAssumption(
-                         store, simplification->expr, *resultRange,
-                         simplification->assumptions)))
-    return op.emitError(
-        "failed to preserve generated wave.index_expr result range");
+  if (resultRange)
+    appendExprSignedRangeAssumption(store, simplification->expr, *resultRange,
+                                    simplification->assumptions);
   SmallVector<IndexExprBinding> liveBindings =
       collectLiveBindings(simplification->expr, state.bindings);
   llvm::DenseSet<StringRef> liveSymbols;
