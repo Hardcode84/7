@@ -67,14 +67,14 @@ struct WaveAMDMetadataPass
       return signalPassFailure();
     }
     OpBuilder builder(root->getContext());
-    SmallVector<func::FuncOp> kernels;
-    root->walk([&](func::FuncOp f) {
-      if (f->hasAttr(wave::WaveDialect::getKernelAttrName()))
-        kernels.push_back(f);
+    WalkResult result = root->walk([&](func::FuncOp func) {
+      if (func->hasAttr(wave::WaveDialect::getKernelAttrName()) &&
+          failed(initializeKernelMetadata(func, builder)))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
     });
-    for (func::FuncOp func : kernels)
-      if (failed(initializeKernelMetadata(func, builder)))
-        return signalPassFailure();
+    if (result.wasInterrupted())
+      return signalPassFailure();
   }
 };
 
