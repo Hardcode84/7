@@ -201,17 +201,32 @@ def pipeline_text(
         return str(module)
 
 
-def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Path:
-    path = tmp / variant.name / "pipelines.mlir"
+def prepare_variant_pipeline(
+    build_dir: Path,
+    output_dir: Path,
+    *,
+    variant: Variant,
+    report_options: dict[str, bool | int | str] | None = None,
+) -> Path:
+    path = output_dir / variant.name / "pipelines.mlir"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         pipeline_text(
-            args.build_dir,
+            build_dir,
             schedule_options=schedule_pass_options(variant),
-            report_options=schedule_report_options(variant, args),
+            report_options=report_options or {},
         )
     )
     return path
+
+
+def write_pipeline(tmp: Path, variant: Variant, args: argparse.Namespace) -> Path:
+    return prepare_variant_pipeline(
+        args.build_dir,
+        tmp,
+        variant=variant,
+        report_options=schedule_report_options(variant, args),
+    )
 
 
 def parse_total_cycles(text: str) -> int:

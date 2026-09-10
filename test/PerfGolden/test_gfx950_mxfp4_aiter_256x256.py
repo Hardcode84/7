@@ -33,6 +33,7 @@ MAX_WIDTH_VMEM_LOAD = re.compile(
     r"^\s*(?:buffer_load_dwordx4|global_load_b128|global_load_lds_dwordx4)\b"
 )
 normalize_asm = perf_golden_mlir.normalize_asm
+CALIBRATION_VARIANT = "scheduled"
 
 
 def run_calibrator(
@@ -47,7 +48,7 @@ def run_calibrator(
         "--m=2048",
         "--n=8192",
         "--k=4096",
-        "--variants=scheduled",
+        f"--variants={CALIBRATION_VARIANT}",
         "--skip-hw",
     ]
     if generated_out is not None:

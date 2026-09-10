@@ -23,6 +23,7 @@ import perf_golden_mlir  # noqa: E402
 CALIBRATOR = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate.py"
 GOLDEN = HERE / "Inputs" / f"{NAME}.s"
 normalize_asm = perf_golden_mlir.normalize_asm
+CALIBRATION_VARIANT = "scheduled"
 
 
 def run_calibrator(
@@ -37,7 +38,7 @@ def run_calibrator(
         "--m=4096",
         "--n=4096",
         "--k=8192",
-        "--variants=scheduled",
+        f"--variants={CALIBRATION_VARIANT}",
         "--skip-hw",
         "--enable-split-barriers",
     ]

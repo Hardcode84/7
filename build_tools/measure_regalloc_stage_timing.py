@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+
+from wave_calibration import VARIANTS, Variant, prepare_variant_pipeline  # noqa: E402
+
 DEFAULT_PERF_GOLDEN = REPO_ROOT / "test/PerfGolden/test_v9_4096_original_wave.py"
 TIMING_RE = re.compile(
     r"^\s*([0-9]+(?:\.[0-9]+)?)\s+\(\s*[0-9.]+%\)\s+([A-Za-z0-9_]+)\s*$"
@@ -54,6 +58,7 @@ class PerfGoldenInput:
     isolate_kernel: Callable[[Path], Path] | None
     normalize_asm: Callable[[str], str]
     pipeline_entry_point: str | None
+    calibration_variant: Variant | None
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,11 @@ def load_perf_golden(path: Path) -> PerfGoldenInput:
         isolate_kernel=isolate_kernel,
         normalize_asm=data["normalize_asm"],
         pipeline_entry_point=data.get("PIPELINE_ENTRY_POINT"),
+        calibration_variant=(
+            VARIANTS[data["CALIBRATION_VARIANT"]]
+            if "CALIBRATION_VARIANT" in data
+            else None
+        ),
     )
 
 
@@ -222,7 +232,13 @@ def measure(
     output_dir: Path,
     disable_threading: bool,
 ) -> list[TimingSample]:
-    pipeline_dir = build_dir / "share/wave-mlir/pipelines"
+    pipeline_dir = (
+        prepare_variant_pipeline(
+            build_dir, output_dir, variant=perf_golden.calibration_variant
+        ).parent
+        if perf_golden.calibration_variant is not None
+        else build_dir / "share/wave-mlir/pipelines"
+    )
     if not pipeline_dir.exists():
         raise SystemExit(f"pipeline dir missing: {rel(pipeline_dir)}")
     golden = perf_golden.normalize_asm(perf_golden.golden.read_text(encoding="utf-8"))
