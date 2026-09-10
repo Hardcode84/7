@@ -4258,10 +4258,10 @@ private:
                   {dst, vccLo, lhs, rhs, clamp});
   }
 
-  LogicalResult emitVMulLoU32(Operation &op, Value dst, Value lhs, Value rhs) {
+  LogicalResult emitVMulU32(Operation &op, Value dst, Value lhs, Value rhs,
+                            unsigned opcode, StringRef mnemonic) {
     if (failed(waveamdmachine::requireVMulU32OperandLegality(
-            &op, "v_mul_lo_u32", isaVersion, targetChip,
-            [](Value lhs, Value rhs) {
+            &op, mnemonic, isaVersion, targetChip, [](Value lhs, Value rhs) {
               return waveamdmachine::isSamePhysicalReg(lhs, rhs);
             })))
       return failure();
@@ -4273,33 +4273,11 @@ private:
         Value regValue = lhsImm ? rhs : lhs;
         if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
           return failure();
-        return emitMC(vMulLoU32(),
+        return emitMC(opcode,
                       {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
       }
     }
-    return emitMC(vMulLoU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
-  }
-
-  LogicalResult emitVMulHiU32(Operation &op, Value dst, Value lhs, Value rhs) {
-    if (failed(waveamdmachine::requireVMulU32OperandLegality(
-            &op, "v_mul_hi_u32", isaVersion, targetChip,
-            [](Value lhs, Value rhs) {
-              return waveamdmachine::isSamePhysicalReg(lhs, rhs);
-            })))
-      return failure();
-    if (isGfx8Or9()) {
-      std::optional<unsigned> lhsImm = getImmediate(lhs);
-      std::optional<unsigned> rhsImm = getImmediate(rhs);
-      if (lhsImm || rhsImm) {
-        Value immValue = lhsImm ? lhs : rhs;
-        Value regValue = lhsImm ? rhs : lhs;
-        if (failed(emitMC(vMovB32(), {toMCOperand(dst), toMCB32(immValue)})))
-          return failure();
-        return emitMC(vMulHiU32(),
-                      {toMCOperand(dst), toMCOperand(dst), toMCB32(regValue)});
-      }
-    }
-    return emitMC(vMulHiU32(), {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
+    return emitMC(opcode, {toMCOperand(dst), toMCB32(lhs), toMCB32(rhs)});
   }
 
   LogicalResult emitUniformLoop(waveamdmachine::UniformLoopOp loop) {
@@ -4944,9 +4922,11 @@ private:
                      toMCB32(op.getOperand(0))});
     }
     if (isa<waveamdmachine::VMulLoU32Op>(op))
-      return emitVMulLoU32(op, result(), op.getOperand(0), op.getOperand(1));
+      return emitVMulU32(op, result(), op.getOperand(0), op.getOperand(1),
+                         vMulLoU32(), "v_mul_lo_u32");
     if (isa<waveamdmachine::VMulHiU32Op>(op))
-      return emitVMulHiU32(op, result(), op.getOperand(0), op.getOperand(1));
+      return emitVMulU32(op, result(), op.getOperand(0), op.getOperand(1),
+                         vMulHiU32(), "v_mul_hi_u32");
     if (isa<waveamdmachine::VFfbhU32Op, waveamdmachine::VFfblB32Op>(op)) {
       unsigned opcode =
           isa<waveamdmachine::VFfbhU32Op>(op) ? vFfbhU32() : vFfblB32();
