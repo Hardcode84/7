@@ -47,5 +47,8 @@
 # NOTE: amdhsa.kernels:
 # NOTE: .name: saxpy
 
-# NO-LLD: WAVE_LLVM_TOOLS_DIR does not contain executable ld.lld:
+# NO-LLD: <wavec-wave-ir>:1:1: error: WAVE_LLVM_TOOLS_DIR does not contain executable ld.lld:
+# NO-LLD-NEXT: module attributes {gpu.container_module} {
+# NO-LLD-NEXT: ^
+# NO-LLD-NEXT: <wavec-wave-ir>:1:1: note: see current operation:
 # NO-DEFAULT-LLD: unable to find ld.lld; set WAVE_LLVM_TOOLS_DIR to its bin directory

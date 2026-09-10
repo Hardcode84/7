@@ -191,3 +191,33 @@ lists each test. Those tests require unavailable target features or runtime
 support, principally gfx950/MFMA and gfx1250. Two four-wave profile codegen tests
 also require a gfx950 host. Compiler output checks do not replace these hardware
 checks.
+
+
+## Structural frontend bridge experiment
+
+The experiment returned an owned `MlirModule` in a caller-owned context. The
+backend used that module directly and verified it before target selection.
+SAXPY and WMMA produced identical Wave MLIR, ASM, and HSACO bytes. A context
+reuse probe passed success, lowering failure, then success. Both successful
+modules remained valid until the caller destroyed them.
+
+The diagnostic gate failed. Set `WAVE_LLVM_TOOLS_DIR` to an absent directory and
+compile `wavec/test/e2e/good/saxpy.wave` with `-c`. The text bridge reports the
+missing linker at `<wavec-wave-ir>:1:1`, with a source excerpt and an operation
+note. The structural bridge reports the error but loses that context. Both
+commands return exit status 1. The frontend integration test checks these
+required diagnostic details.
+
+Do not land this replacement under the current contract. Parsing supplies
+locations in generated text; the lowering builder supplies unknown locations.
+The printer operation map does not supply equivalent token locations: result
+assignments shift operation-name columns, and block arguments need separate
+locations. Removal of the text bridge requires either an approved change to
+original-source diagnostics or complete diagnostic provenance with an error-only
+printer. The latter must retain the original IR across destructive passes and
+map operation names, block arguments, and omitted operations to parser-equivalent
+positions. It is not a helper cleanup.
+
+The candidate removed serialization, copying, and parsing proportional to IR
+text size. No new nested traversal was added. No timing comparison was used.
+The failed diagnostic gate stopped the experiment; production code was restored.
