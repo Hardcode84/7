@@ -58,14 +58,12 @@ static bool closeHoistDependencies(WhereOp first,
                                    const DenseSet<Operation *> &gap,
                                    DenseSet<Operation *> &hoist,
                                    SmallVectorImpl<Operation *> &worklist) {
-  DenseSet<Value> firstResults(first.getResults().begin(),
-                               first.getResults().end());
   while (!worklist.empty()) {
     Operation *op = worklist.pop_back_val();
     for (Value operand : op->getOperands()) {
-      if (firstResults.contains(operand))
-        return false;
       Operation *def = operand.getDefiningOp();
+      if (def == first.getOperation())
+        return false;
       if (def && gap.contains(def) && hoist.insert(def).second)
         worklist.push_back(def);
     }
