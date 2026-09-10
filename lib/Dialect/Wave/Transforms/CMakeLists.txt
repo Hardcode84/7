@@ -4,7 +4,6 @@ add_mlir_dialect_library(MLIRWaveTransforms
   RegAlloc/WaveAMDClearRegAllocTransformState.cpp
   RegAlloc/WaveAMDRegAllocVerification.cpp
   RegAlloc/WaveAMDRegLiveIntervals.cpp
-  RegAlloc/WaveAMDRegPressureRelief.cpp
   RegAlloc/WaveAMDResourceInfo.cpp
   WaveAMDABILowering.cpp
   WaveAMDBarrierCleanup.cpp
