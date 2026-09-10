@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
+
+#include "WaveSignedRange.h"
 #include "mlir/Dialect/Wave/Transforms/SymbolicValue.h"
 
 #include "WaveSymbolicTransformTiming.h"
@@ -383,29 +385,6 @@ matchBooleanSelectComparison(arith::CmpIPredicate predicate, Value lhs,
                                  isEqual == (*falseValue == *comparedValue)};
 }
 
-static bool isFullSignedRange(const ConstantIntRanges &range) {
-  unsigned width = range.smin().getBitWidth();
-  if (width == 0)
-    return true;
-  return range.smin() == APInt::getSignedMinValue(width) &&
-         range.smax() == APInt::getSignedMaxValue(width);
-}
-
-static std::optional<ConstantIntRanges>
-finiteSignedRange(DataFlowSolver &solver, Value value) {
-  const dataflow::IntegerValueRangeLattice *lattice =
-      solver.lookupState<dataflow::IntegerValueRangeLattice>(value);
-  if (!lattice)
-    return std::nullopt;
-  IntegerValueRange ivr = lattice->getValue();
-  if (ivr.isUninitialized())
-    return std::nullopt;
-  ConstantIntRanges range = ivr.getValue();
-  if (isFullSignedRange(range))
-    return std::nullopt;
-  return range;
-}
-
 static bool isPositivePowerOfTwo(int64_t value) {
   return value > 0 && llvm::isPowerOf2_64(static_cast<uint64_t>(value));
 }
@@ -421,28 +400,10 @@ static std::optional<int64_t> getPowerOfTwoMaskModulus(int64_t mask) {
   return static_cast<int64_t>(modulus);
 }
 
-static std::optional<int64_t> getSExtI64(const APInt &value) {
-  if (!value.isSignedIntN(64))
-    return std::nullopt;
-  return value.getSExtValue();
-}
-
 using SignedI64Range = std::pair<int64_t, int64_t>;
 
 static SignedI64Range signedI32StorageRange() {
   return SignedI64Range{-(int64_t{1} << 31), (int64_t{1} << 31) - 1};
-}
-
-static std::optional<std::pair<int64_t, int64_t>>
-finiteSignedI64Range(DataFlowSolver &solver, Value value) {
-  std::optional<ConstantIntRanges> range = finiteSignedRange(solver, value);
-  if (!range)
-    return std::nullopt;
-  std::optional<int64_t> lo = getSExtI64(range->smin());
-  std::optional<int64_t> hi = getSExtI64(range->smax());
-  if (!lo || !hi)
-    return std::nullopt;
-  return std::pair<int64_t, int64_t>{*lo, *hi};
 }
 
 static std::optional<int64_t> getKnownWorkgroupDim(Operation *op,
@@ -536,45 +497,6 @@ intersectRange(std::optional<SignedI64Range> lhs,
   if (result.first > result.second)
     return std::nullopt;
   return result;
-}
-
-static unsigned elementStorageBitWidth(Type type) {
-  if (auto simd = dyn_cast<SimdType>(type))
-    type = simd.getElementType();
-  return ConstantIntRanges::getStorageBitwidth(type);
-}
-
-static bool fitsSignedWidth(__int128 value, unsigned bits) {
-  if (bits == 0)
-    return false;
-  __int128 min = -(__int128{1} << (bits - 1));
-  __int128 max = (__int128{1} << (bits - 1)) - 1;
-  return value >= min && value <= max;
-}
-
-static bool fitsSignedWidth(std::pair<__int128, __int128> range,
-                            unsigned bits) {
-  return fitsSignedWidth(range.first, bits) &&
-         fitsSignedWidth(range.second, bits);
-}
-
-static std::pair<__int128, __int128> addRange(std::pair<int64_t, int64_t> lhs,
-                                              std::pair<int64_t, int64_t> rhs) {
-  return {__int128(lhs.first) + rhs.first, __int128(lhs.second) + rhs.second};
-}
-
-static std::pair<__int128, __int128> subRange(std::pair<int64_t, int64_t> lhs,
-                                              std::pair<int64_t, int64_t> rhs) {
-  return {__int128(lhs.first) - rhs.second, __int128(lhs.second) - rhs.first};
-}
-
-static std::pair<__int128, __int128> mulRange(std::pair<int64_t, int64_t> lhs,
-                                              std::pair<int64_t, int64_t> rhs) {
-  std::array<__int128, 4> products{
-      __int128(lhs.first) * rhs.first, __int128(lhs.first) * rhs.second,
-      __int128(lhs.second) * rhs.first, __int128(lhs.second) * rhs.second};
-  return {*std::min_element(products.begin(), products.end()),
-          *std::max_element(products.begin(), products.end())};
 }
 
 static std::optional<std::pair<__int128, __int128>>
