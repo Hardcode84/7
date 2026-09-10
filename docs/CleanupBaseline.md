@@ -95,20 +95,25 @@ compare it before replay. The timing-helper defect has a separate cleanup task.
 
 1. Rebuild tools before output checks. Finish all builds, tests, and artifact
    preparation before measurements. Do not run two measurement jobs together.
-2. Use one warmup and at least five measured runs per workload and variant.
-   Alternate baseline/candidate order. Preserve CPU affinity, environment,
-   pipelines, compiler flags, and input bytes.
+2. Warm each variant. Use at least five measured runs per workload and variant.
+   Balance each variant across run positions. Randomize complete balanced blocks
+   with a recorded seed. Reversing three variants leaves the middle variant in
+   the same position. Preserve CPU affinity, environment, pipelines, compiler
+   flags, and input bytes.
 3. Keep subprocess wall time, individual step time, and MLIR stage time. Treat the
    sum of pipeline steps as the complete workload time. Do not describe a single
    stage improvement as an end-to-end improvement.
-4. Run an alternating baseline/baseline control on affected workloads. Inspect
-   its paired differences before interpreting candidate differences. Retain all
+4. Include two baseline copies in balanced blocks for affected workloads. Inspect
+   their paired differences before interpreting candidate differences. Retain all
    samples; do not remove slow samples without a recorded external cause and a
    complete rerun.
-5. If a candidate has a positive paired median, run at least ten more pairs in a
-   separate batch. Reject a repeatable positive shift, even if it is small. If
-   control noise prevents a decision, keep the task open and repeat under stable
-   conditions. Noise is not evidence of equivalence.
+5. Report the paired effect and its uncertainty. A positive median alone does
+   not establish a regression, even when a second batch has the same sign.
+   Reject a repeatable positive shift that the controls and uncertainty support.
+   If noise prevents a decision, keep the task open. Inspect stage measurements,
+   instruction counts, generated CPU code, and linker layout to identify the
+   mechanism before more runs. Noise is not evidence of equivalence. Identical
+   instructions do not exclude a cost from a change in code layout.
 6. For shared-header changes, replay the selected original C++ compile commands
    into isolated object files. Preserve the dependency closure and flags. Measure
    the affected incremental build at full parallelism before acceptance. The
