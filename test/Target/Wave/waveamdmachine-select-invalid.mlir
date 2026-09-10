@@ -691,3 +691,23 @@ func.func @set_priority_inc_wg_requires_target_support() attributes {
   return
 }
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @floor_nonpow2_unknown_sign(%x: i32) -> index {
+  // expected-error @below {{wave.index_expr non-power-of-two floor needs nonnegative operand}}
+  %off = wave.index_expr <"floor(1/3*x)"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @floor_wide_nonpow2_unknown_sign(%x: i32) -> index {
+  // expected-error @below {{wave.index_expr non-power-of-two floor needs nonnegative operand}}
+  %off = wave.index_expr <"floor(1/4294967297*x)"> ["x"](%x) : (i32) -> index
+  return %off : index
+}
+}

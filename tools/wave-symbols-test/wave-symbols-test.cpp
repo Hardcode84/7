@@ -734,10 +734,8 @@ static void runSingletonFactSimplification(sym::Store &store) {
                << "\n";
 }
 
-static void printMaterializationCost(sym::Store &store, StringRef label,
-                                     StringRef text) {
-  std::optional<uint64_t> cost =
-      getIndexExprMaterializationCost(mustParseExpr(store, text));
+static void printMaterializationCost(StringRef label, sym::ExprHandle expr) {
+  std::optional<uint64_t> cost = getIndexExprMaterializationCost(expr);
   llvm::outs() << label << ": ";
   if (cost)
     llvm::outs() << *cost;
@@ -746,10 +744,20 @@ static void printMaterializationCost(sym::Store &store, StringRef label,
   llvm::outs() << "\n";
 }
 
+static void printMaterializationCost(sym::Store &store, StringRef label,
+                                     StringRef text) {
+  printMaterializationCost(label, mustParseExpr(store, text));
+}
+
 static void runMaterializationCostQueries(sym::Store &store) {
   printMaterializationCost(store, "material-cost-rational", "1/2");
   printMaterializationCost(store, "material-cost-nonpow2-floor",
                            "floor(1/3*x)");
+  printMaterializationCost(store, "material-cost-nonpow2-ceil",
+                           "ceiling(1/3*x)");
+  printMaterializationCost(
+      "material-cost-nonpow2-trunc",
+      sym::composeExprTrunc(store, mustParseExpr(store, "1/3*x")));
   printMaterializationCost(store, "material-cost-wide-nonpow2-mod",
                            "Mod(x, 4294967297)");
   printMaterializationCost(store, "material-cost-nonpow2-exact", "1/3*x");

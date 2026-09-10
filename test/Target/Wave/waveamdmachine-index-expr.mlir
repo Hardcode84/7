@@ -349,6 +349,15 @@ func.func @narrow_floor_large_denominator(%x_raw: i32) -> index {
   return %off : index
 }
 
+// CHECK-LABEL: func.func @signed_floor_large_denominator
+// CHECK: %[[SHIFT:.*]] = waveamdmachine.imm 31
+// CHECK: waveamdmachine.s_ashr_i32 %{{.*}}, %[[SHIFT]]
+func.func @signed_floor_large_denominator(%x: i32) -> index {
+  %off = wave.index_expr <"floor(1/4294967296*x)"> ["x"](%x)
+      : (i32) -> index
+  return %off : index
+}
+
 // CHECK-LABEL: func.func @whole_field_proof_selects_cheaper_material_form
 // CHECK-NOT: waveamdmachine.s_and_b32
 // CHECK: waveamdmachine.s_lshl_b32

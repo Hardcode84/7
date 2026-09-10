@@ -2133,6 +2133,27 @@ static Value materializeSignedShrPow2(WaveAMDMachineSelector &S, Location loc,
       S.ensureVGPRForVSrc1(loc, value), shiftValue);
 }
 
+static FailureOr<Value>
+materializeNarrowFloorRational(WaveAMDMachineSelector &S,
+                               sym::Analysis &analysis, Value numerator,
+                               sym::ExprHandle numeratorExpr, int64_t den,
+                               bool nonNegative, Operation *user) {
+  if (!isPositivePowerOfTwo(den)) {
+    if (!S.slotFitsU32(analysis, numeratorExpr))
+      return user->emitError(
+          "wave.index_expr non-power-of-two floor numerator must fit u32");
+    return materializeUnsignedMagicQuotient(S, user->getLoc(), numerator,
+                                            static_cast<uint32_t>(den));
+  }
+  unsigned shift = std::min<unsigned>(llvm::Log2_64(den), 31);
+  if (nonNegative)
+    return S.shrPow2(user->getLoc(), numerator, shift);
+  if (!rationalNumeratorFitsI32(analysis, numeratorExpr))
+    return user->emitError(
+        "wave.index_expr floor shift lowering needs nonnegative operand");
+  return materializeSignedShrPow2(S, user->getLoc(), numerator, shift);
+}
+
 static FailureOr<Value> materializeFloorRational(WaveAMDMachineSelector &S,
                                                  sym::Analysis &analysis,
                                                  RationalIndexValue value,
@@ -2145,34 +2166,23 @@ static FailureOr<Value> materializeFloorRational(WaveAMDMachineSelector &S,
   if (den == 1)
     return materializeValue(S, user->getLoc(), value.numerator, user);
   if (den <= 0)
-    return user->emitError("wave.index_expr floor needs a positive denominator");
+    return user->emitError(
+        "wave.index_expr floor needs a positive denominator");
+  bool nonNegative = isProvablyNonNegative(analysis, sourceExpr);
+  if (!isPositivePowerOfTwo(den) && !nonNegative)
+    return user->emitError(
+        "wave.index_expr non-power-of-two floor needs nonnegative operand");
   if (failed(requireNarrowRationalNumerator(S, analysis, value.numeratorExpr,
                                             user)))
     return failure();
-  if (den > std::numeric_limits<uint32_t>::max())
+  if (den > std::numeric_limits<uint32_t>::max() && nonNegative)
     return createImm(S.builder, user->getLoc(), 0);
   FailureOr<Value> numerator =
       materializeValue(S, user->getLoc(), value.numerator, user);
   if (failed(numerator))
     return failure();
-  if (!isPositivePowerOfTwo(den)) {
-    if (!isProvablyNonNegative(analysis, sourceExpr))
-      return user->emitError(
-          "wave.index_expr non-power-of-two floor needs nonnegative operand");
-    if (!S.slotFitsU32(analysis, value.numeratorExpr))
-      return user->emitError(
-          "wave.index_expr non-power-of-two floor numerator must fit u32");
-    return materializeUnsignedMagicQuotient(
-        S, user->getLoc(), *numerator, static_cast<uint32_t>(den));
-  }
-  unsigned shift = llvm::Log2_64(den);
-  if (isProvablyNonNegative(analysis, sourceExpr))
-    return S.shrPow2(user->getLoc(), *numerator, shift);
-  if (!rationalNumeratorFitsI32(analysis, value.numeratorExpr)) {
-    (void)requireNonNegativeRoundedExpr(analysis, sourceExpr, user, "floor");
-    return failure();
-  }
-  return materializeSignedShrPow2(S, user->getLoc(), *numerator, shift);
+  return materializeNarrowFloorRational(
+      S, analysis, *numerator, value.numeratorExpr, den, nonNegative, user);
 }
 
 static FailureOr<Value> materializeWideCeilRational(WaveAMDMachineSelector &S,

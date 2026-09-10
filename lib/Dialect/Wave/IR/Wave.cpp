@@ -4361,12 +4361,12 @@ getRoundedIndexExprMaterializationCost(sym::ExprView view) {
     return std::nullopt;
   if (llvm::isPowerOf2_64(*denominator))
     return *arg + 1;
-  if (!llvm::isUInt<32>(*denominator))
+  if (view.getKind() != sym::ExprKind::Floor || !llvm::isUInt<32>(*denominator))
     return std::nullopt;
-  // Unsigned constant division expands to a multiply-high, an optional
-  // correction add, and shifts. Keep the estimate conservative; it is used
-  // only to choose between equivalent symbolic forms.
-  return *arg + 5;
+  // Budget multiply-high, correction, and shifts.
+  if (!addIndexExprMaterializationCost(5, *arg))
+    return std::nullopt;
+  return arg;
 }
 
 static std::optional<uint64_t>
@@ -4441,9 +4441,7 @@ mlir::wave::getIndexExprMaterializationCost(sym::ExprHandle expr) {
       kind == sym::ExprKind::Add || kind == sym::ExprKind::Mul;
   if (rationalAllowed) {
     std::optional<int64_t> denominator = getIndexExprStaticDenominator(expr);
-    if (!denominator || *denominator <= 0 ||
-        (!llvm::isPowerOf2_64(*denominator) &&
-         !llvm::isUInt<32>(*denominator)))
+    if (!denominator || !llvm::isPowerOf2_64(*denominator))
       return std::nullopt;
   }
   return getIndexExprMaterializationCostImpl(expr, rationalAllowed);
