@@ -17,6 +17,7 @@
 
 #include "Utils/AMDGPUBaseInfo.h"
 #include "WaveAMDHardwareResources.h"
+#include "WaveExecutableCFG.h"
 #include "mlir/Analysis/DataFlow/DenseAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -2065,25 +2066,17 @@ public:
       : DenseForwardDataFlowAnalysis(solver), cfg(cfg) {}
 
   LogicalResult initialize(Operation *top) override {
-    auto markRegions = [&](Operation *op) {
-      for (Region &region : op->getRegions()) {
-        for (Block &block : region) {
-          auto *blockLive =
-              getOrCreate<Executable>(getProgramPointBefore(&block));
-          propagateIfChanged(blockLive, blockLive->setToLive());
-          Operation *term = block.getTerminator();
-          if (!term)
-            continue;
-          for (Block *successor : term->getSuccessors()) {
-            auto *edgeLive = getOrCreate<Executable>(
-                getLatticeAnchor<CFGEdge>(&block, successor));
-            propagateIfChanged(edgeLive, edgeLive->setToLive());
-          }
-        }
-      }
-    };
-    markRegions(top);
-    top->walk(markRegions);
+    wave::seedExecutableCFG(
+        top,
+        [&](Block *block) {
+          auto *live = getOrCreate<Executable>(getProgramPointBefore(block));
+          propagateIfChanged(live, live->setToLive());
+        },
+        [&](Block *block, Block *successor) {
+          auto *live = getOrCreate<Executable>(
+              getLatticeAnchor<CFGEdge>(block, successor));
+          propagateIfChanged(live, live->setToLive());
+        });
     return DenseForwardDataFlowAnalysis<HazardLattice>::initialize(top);
   }
 
