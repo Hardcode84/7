@@ -678,13 +678,11 @@ FailureOr<std::pair<sym::ExprHandle, sym::ExprHandle>>
 SymbolicValueBuilder::buildUnsignedLoopSuccessor(
     sym::ExprHandle mathematicalInduction, sym::ExprHandle unsignedInduction,
     int64_t step, unsigned bitWidth) {
-  FailureOr<sym::ExprHandle> stepExpr = sym::composeExprInt(store, step);
-  if (failed(stepExpr))
-    return failure();
+  sym::ExprHandle stepExpr = sym::composeExprInt(store, step);
   FailureOr<sym::ExprHandle> mathematicalNext = sym::composeExprBinary(
-      store, mathematicalInduction, sym::ExprBinaryOp::Add, *stepExpr);
+      store, mathematicalInduction, sym::ExprBinaryOp::Add, stepExpr);
   FailureOr<sym::ExprHandle> unwrappedNext = sym::composeExprBinary(
-      store, unsignedInduction, sym::ExprBinaryOp::Add, *stepExpr);
+      store, unsignedInduction, sym::ExprBinaryOp::Add, stepExpr);
   if (failed(mathematicalNext) || failed(unwrappedNext))
     return failure();
   FailureOr<sym::ExprHandle> next =

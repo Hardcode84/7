@@ -621,11 +621,9 @@ LogicalResult SymbolicValueBuilder::appendNoUnsignedWrapRelation(
       op, operands, *unsignedLhs, *unsignedRhs, bits);
   if (failed(mathematical))
     return failure();
-  FailureOr<sym::PredHandle> exact = sym::composePredCmp(
+  sym::PredHandle exact = sym::composePredCmp(
       store, *unsignedResult, sym::PredCmpOp::Eq, *mathematical);
-  if (failed(exact))
-    return failure();
-  std::array<sym::PredHandle, 1> assumption{*exact};
+  std::array<sym::PredHandle, 1> assumption{exact};
   return appendRequiredAssumptions(assumption, op.getOperation(), skip,
                                    context);
 }
