@@ -1113,7 +1113,9 @@ static LogicalResult validateWaveAMDMachineOp(Operation *op,
     return failure();
   if (failed(validateWaitEvent(op, target)))
     return failure();
-  return validateExpertScheduling(op, target);
+  if (failed(validateExpertScheduling(op, target)))
+    return failure();
+  return waveamdmachine::validateInstructionIssueCountTarget(op, target.isa);
 }
 
 static void requireValue(WaitRequirement &req, Value value,

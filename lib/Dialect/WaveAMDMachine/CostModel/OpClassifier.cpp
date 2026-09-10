@@ -166,6 +166,29 @@ SchedClass classifyOp(Operation *op) {
   return fallbackClassify(op);
 }
 
+LogicalResult
+validateInstructionIssueCountTarget(Operation *op,
+                                    const llvm::AMDGPU::IsaVersion &targetIsa) {
+  bool supported;
+  if (isa<TDMLoadOp>(op))
+    supported = TDMLoadOp::isSupportedOnIsa(targetIsa);
+  else if (isa<TDMStoreOp>(op))
+    supported = TDMStoreOp::isSupportedOnIsa(targetIsa);
+  else
+    return success();
+  if (!supported)
+    return op->emitError() << op->getName() << " is not supported on ISA "
+                           << unsigned(targetIsa.Major) << "."
+                           << unsigned(targetIsa.Minor) << "."
+                           << unsigned(targetIsa.Stepping);
+  if (!isArchSupported(targetIsa))
+    return op->emitError() << op->getName() << " requires a cost model for ISA "
+                           << unsigned(targetIsa.Major) << "."
+                           << unsigned(targetIsa.Minor) << "."
+                           << unsigned(targetIsa.Stepping);
+  return success();
+}
+
 unsigned getInstructionIssueCount(Operation *op,
                                   const llvm::AMDGPU::IsaVersion &targetIsa,
                                   unsigned wavefrontSize) {

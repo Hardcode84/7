@@ -1099,10 +1099,13 @@ static void addProducedTransRegHazard(Value result, HazardState &state,
                     cfg.transForwardingWaitStates);
 }
 
-static HazardOpInfoMap collectHazardOpInfo(Operation *root,
-                                           const HazardConfig &cfg) {
+static FailureOr<HazardOpInfoMap> collectHazardOpInfo(Operation *root,
+                                                      const HazardConfig &cfg) {
   HazardOpInfoMap infos;
-  root->walk([&](Operation *op) {
+  WalkResult result = root->walk([&](Operation *op) {
+    if (failed(waveamdmachine::validateInstructionIssueCountTarget(
+            op, cfg.isaVersion)))
+      return WalkResult::interrupt();
     HazardOpInfo info;
     info.storeWriteData =
         waveamdmachine::getStoreWriteDataHazard(op, cfg.isaVersion);
@@ -1136,7 +1139,10 @@ static HazardOpInfoMap collectHazardOpInfo(Operation *root,
     info.permlane32Swap = isPermlane32Swap(op);
     info.ldsDmaIssue = isLdsDmaIssue(op);
     infos.try_emplace(op, info);
+    return WalkResult::advance();
   });
+  if (result.wasInterrupted())
+    return failure();
   return infos;
 }
 
@@ -2142,12 +2148,14 @@ struct WaveAMDHazardRepairPass
     hoistTiming.stop();
 
     TimingScope collectTiming = timing.nest("hazard_repair_collect_op_info");
-    HazardOpInfoMap infos = collectHazardOpInfo(root, cfg);
+    FailureOr<HazardOpInfoMap> infos = collectHazardOpInfo(root, cfg);
+    if (failed(infos))
+      return signalPassFailure();
     collectTiming.stop();
 
     TimingScope blocksTiming = timing.nest("hazard_repair_blocks");
     root->walk(
-        [&](Block *block) { (void)repairBlock(*block, cfg, &infos, dom); });
+        [&](Block *block) { (void)repairBlock(*block, cfg, &*infos, dom); });
   }
 };
 
@@ -2187,7 +2195,8 @@ private:
            !op.getAttrOfType<StringAttr>("base");
   }
 
-  LogicalResult validateInput(func::FuncOp func) {
+  LogicalResult validateInput(func::FuncOp func,
+                              const llvm::AMDGPU::IsaVersion &isaVersion) {
     SmallVector<Operation *> ops;
     func.walk<WalkOrder::PreOrder>([&](Operation *op) {
       if (isWaveAMDMachineOp(op))
@@ -2201,6 +2210,9 @@ private:
         return op->emitError(
             "waveamd-insert-hazard-waits expects scalar memory loads to "
             "carry a base register attribute");
+      if (failed(waveamdmachine::validateInstructionIssueCountTarget(
+              op, isaVersion)))
+        return failure();
     }
     return success();
   }
@@ -2600,7 +2612,7 @@ private:
     if (failed(wave::failIfWaveAMDRegAllocOverflowed(
             func, "waveamd-insert-hazard-waits")))
       return failure();
-    if (failed(validateInput(func)))
+    if (failed(validateInput(func, cfg.isaVersion)))
       return failure();
 
     (void)contractTokenOnlyBarrierDrains(func, cfg);

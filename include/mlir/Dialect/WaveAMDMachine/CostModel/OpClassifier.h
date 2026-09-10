@@ -10,6 +10,7 @@
 #define MLIR_DIALECT_WAVEAMDMACHINE_COSTMODEL_OPCLASSIFIER_H
 
 #include "mlir/Dialect/WaveAMDMachine/CostModel/SchedClass.h"
+#include "mlir/Support/LogicalResult.h"
 
 namespace llvm::AMDGPU {
 struct IsaVersion;
@@ -36,6 +37,10 @@ struct InstructionCoexecutionModel {
 // release builds fall back to Write32Bit and emit a warning via
 // llvm::errs().
 SchedClass classifyOp(Operation *op);
+
+LogicalResult
+validateInstructionIssueCountTarget(Operation *op,
+                                    const llvm::AMDGPU::IsaVersion &targetIsa);
 
 unsigned getInstructionIssueCount(Operation *op,
                                   const llvm::AMDGPU::IsaVersion &targetIsa,
