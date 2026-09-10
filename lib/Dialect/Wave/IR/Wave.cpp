@@ -4353,13 +4353,20 @@ static std::optional<uint64_t>
 getRoundedIndexExprMaterializationCost(sym::ExprView view) {
   std::optional<int64_t> denominator =
       getIndexExprStaticDenominator(view.getUnaryArg());
-  if (!denominator || !llvm::isPowerOf2_64(*denominator))
+  if (!denominator || *denominator <= 0)
     return std::nullopt;
   std::optional<uint64_t> arg =
       getIndexExprMaterializationCostImpl(view.getUnaryArg(), true);
   if (!arg || *arg == std::numeric_limits<uint64_t>::max())
     return std::nullopt;
-  return *arg + 1;
+  if (llvm::isPowerOf2_64(*denominator))
+    return *arg + 1;
+  if (!llvm::isUInt<32>(*denominator))
+    return std::nullopt;
+  // Unsigned constant division expands to a multiply-high, an optional
+  // correction add, and shifts. Keep the estimate conservative; it is used
+  // only to choose between equivalent symbolic forms.
+  return *arg + 5;
 }
 
 static std::optional<uint64_t>
@@ -4434,7 +4441,9 @@ mlir::wave::getIndexExprMaterializationCost(sym::ExprHandle expr) {
       kind == sym::ExprKind::Add || kind == sym::ExprKind::Mul;
   if (rationalAllowed) {
     std::optional<int64_t> denominator = getIndexExprStaticDenominator(expr);
-    if (!denominator || !llvm::isPowerOf2_64(*denominator))
+    if (!denominator || *denominator <= 0 ||
+        (!llvm::isPowerOf2_64(*denominator) &&
+         !llvm::isUInt<32>(*denominator)))
       return std::nullopt;
   }
   return getIndexExprMaterializationCostImpl(expr, rationalAllowed);

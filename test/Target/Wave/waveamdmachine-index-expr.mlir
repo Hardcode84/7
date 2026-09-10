@@ -417,6 +417,24 @@ func.func @non_power_of_two_mod_lane(%out: !wave.ptr<#wave.global, i32>,
   return
 }
 
+// A bounded nonnegative rational floor uses the same unsigned magic quotient
+// as non-power-of-two modulo.
+// CHECK-LABEL: func.func @non_power_of_two_floor_lane
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[MAGIC:.*]] = waveamdmachine.imm 2863311531
+// CHECK: %[[HI:.*]] = waveamdmachine.v_mul_hi_u32 %[[LANE]], %[[MAGIC]]
+// CHECK: %[[SHIFT:.*]] = waveamdmachine.imm 1
+// CHECK: waveamdmachine.v_lshrrev_b32 %[[HI]], %[[SHIFT]]
+func.func @non_power_of_two_floor_lane(%x: i32) -> !wave.simd<index, 32> {
+  %lane_raw = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.assume %lane_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
+      : !wave.simd<i32, 32>
+  %off = wave.index_expr <"floor(1/3*lid)"> ["lid"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  return %off : !wave.simd<index, 32>
+}
+
 // CHECK-LABEL: func.func @floor_fractional_add_global
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[NUM:.*]] = waveamdmachine.v_add_u32 %{{.*}}, %[[LANE]]
