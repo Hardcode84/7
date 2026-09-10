@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import argparse
-import difflib
 import os
 import subprocess
 import sys
@@ -17,16 +15,13 @@ from pathlib import Path
 NAME = "a4w4_mxfp_k16k"
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
+sys.path.insert(0, str(HERE / "Inputs"))
+
+import perf_golden_mlir  # noqa: E402
+
 SOURCE = HERE / "Inputs" / f"{NAME}.mlir"
 GOLDEN = HERE / "Inputs" / f"{NAME}.s"
-
-
-def normalize_asm(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.rstrip() for line in text.split("\n")]
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines) + "\n"
+normalize_asm = perf_golden_mlir.normalize_asm
 
 
 def isolate_kernel(_output_dir: Path) -> Path:
@@ -63,25 +58,6 @@ def generate_asm(build_dir: Path, generated_out: Path, emit_mlir: Path | None) -
     return proc.stdout
 
 
-def print_diff(
-    golden: str, generated: str, generated_name: str, max_lines: int
-) -> None:
-    diff = list(
-        difflib.unified_diff(
-            golden.splitlines(),
-            generated.splitlines(),
-            fromfile=str(GOLDEN),
-            tofile=generated_name,
-            lineterm="",
-            n=3,
-        )
-    )
-    if max_lines >= 0 and len(diff) > max_lines:
-        diff = [*diff[:max_lines], f"... {len(diff) - max_lines} diff lines omitted"]
-    for line in diff:
-        print(line)
-
-
 def check_asm(
     build_dir: Path,
     generated_out: Path | None = None,
@@ -94,16 +70,9 @@ def check_asm(
         generated = normalize_asm(generate_asm(build_dir, out, emit_mlir))
         golden = normalize_asm(GOLDEN.read_text(encoding="utf-8"))
 
-        if generated == golden:
-            print(f"perf-golden: {NAME}: asm matches golden")
-            return
-
-        print(f"perf-golden: {NAME}: ASM DRIFT DETECTED")
-        print(f"golden: {GOLDEN}")
-        print(f"generated: {out}")
-        print("rerun HW perf for both golden and generated asm before updating")
-        print_diff(golden, generated, str(out), max_diff_lines)
-        raise SystemExit(1)
+        perf_golden_mlir.compare_asm(
+            NAME, GOLDEN, golden, generated, str(out), max_diff_lines
+        )
 
 
 def test_a4w4_mxfp_k16k() -> None:
@@ -111,15 +80,7 @@ def test_a4w4_mxfp_k16k() -> None:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
-    parser.add_argument("--generated-out", type=Path)
-    parser.add_argument("--emit-mlir", type=Path)
-    parser.add_argument("--max-diff-lines", type=int, default=200)
-    args = parser.parse_args(argv)
-
-    check_asm(args.build_dir, args.generated_out, args.emit_mlir, args.max_diff_lines)
-    return 0
+    return perf_golden_mlir.main_with_check(REPO_ROOT / "build", argv, check_asm)
 
 
 if __name__ == "__main__":

@@ -9,26 +9,20 @@
 
 from __future__ import annotations
 
-import argparse
-import difflib
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 NAME = "gfx950-tensilelite-mxfp4-256x256-4wave"
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
+sys.path.insert(0, str(HERE / "Inputs"))
+
+import perf_golden_mlir  # noqa: E402
+
 CALIBRATOR = REPO_ROOT / "tools/wave-matmul-calibrate/wave-matmul-calibrate.py"
 GOLDEN = HERE / "Inputs" / f"{NAME}.s"
-
-
-def normalize_asm(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.rstrip() for line in text.split("\n")]
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines) + "\n"
+normalize_asm = perf_golden_mlir.normalize_asm
 
 
 def run_calibrator(
@@ -79,47 +73,21 @@ def run_calibrator(
     raise SystemExit(proc.returncode)
 
 
-def print_diff(
-    golden: str, generated: str, generated_name: str, max_lines: int
-) -> None:
-    diff = list(
-        difflib.unified_diff(
-            golden.splitlines(),
-            generated.splitlines(),
-            fromfile=str(GOLDEN),
-            tofile=generated_name,
-            lineterm="",
-            n=3,
-        )
-    )
-    if max_lines >= 0 and len(diff) > max_lines:
-        diff = [*diff[:max_lines], f"... {len(diff) - max_lines} diff lines omitted"]
-    for line in diff:
-        print(line)
-
-
 def check_asm(
     build_dir: Path,
     generated_out: Path | None = None,
     emit_mlir: Path | None = None,
     max_diff_lines: int = 200,
 ) -> None:
-    with tempfile.TemporaryDirectory() as td:
-        out = generated_out or Path(td) / f"{NAME}.s"
-        run_calibrator(build_dir, out, emit_mlir)
-        generated = normalize_asm(out.read_text(encoding="utf-8"))
-        golden = normalize_asm(GOLDEN.read_text(encoding="utf-8"))
-
-        if generated == golden:
-            print(f"perf-golden: {NAME}: asm matches golden")
-            return
-
-        print(f"perf-golden: {NAME}: ASM DRIFT DETECTED")
-        print(f"golden: {GOLDEN}")
-        print(f"generated: {out}")
-        print("rerun HW perf for both golden and generated asm before updating")
-        print_diff(golden, generated, str(out), max_diff_lines)
-        raise SystemExit(1)
+    perf_golden_mlir.check_generated_asm(
+        NAME,
+        GOLDEN,
+        run_calibrator,
+        build_dir,
+        generated_out,
+        emit_mlir,
+        max_diff_lines,
+    )
 
 
 def test_gfx950_tensilelite_mxfp4_256x256_4wave() -> None:
@@ -127,18 +95,9 @@ def test_gfx950_tensilelite_mxfp4_256x256_4wave() -> None:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
-    parser.add_argument("--generated-out", type=Path)
-    parser.add_argument("--emit-mlir", type=Path)
-    parser.add_argument("--max-diff-lines", type=int, default=200)
-    args = parser.parse_args(argv)
-
-    if args.emit_mlir is not None and args.generated_out is None:
-        run_calibrator(args.build_dir, None, args.emit_mlir)
-        return 0
-    check_asm(args.build_dir, args.generated_out, args.emit_mlir, args.max_diff_lines)
-    return 0
+    return perf_golden_mlir.generated_main(
+        REPO_ROOT / "build", argv, run_calibrator, check_asm
+    )
 
 
 if __name__ == "__main__":

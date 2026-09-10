@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -90,27 +91,83 @@ def check_asm(
         generated = normalize_asm(generate_asm(source, build_dir, out, emit_mlir))
         golden = normalize_asm(golden_path.read_text(encoding="utf-8"))
 
-        if generated == golden:
-            print(f"perf-golden: {name}: asm matches golden")
-            return
-
-        print(f"perf-golden: {name}: ASM DRIFT DETECTED")
-        print(f"golden: {golden_path}")
-        print(f"generated: {out}")
-        print("rerun HW perf for both golden and generated asm before updating")
-        print_diff(golden_path, golden, generated, str(out), max_diff_lines)
-        raise SystemExit(1)
+        compare_asm(name, golden_path, golden, generated, str(out), max_diff_lines)
 
 
-def main(
-    name: str, source: Path, golden_path: Path, default_build: Path, argv: list[str]
+def compare_asm(
+    name: str,
+    golden_path: Path,
+    golden: str,
+    generated: str,
+    generated_name: str,
+    max_diff_lines: int = 200,
+) -> None:
+    if generated == golden:
+        print(f"perf-golden: {name}: asm matches golden")
+        return
+
+    print(f"perf-golden: {name}: ASM DRIFT DETECTED")
+    print(f"golden: {golden_path}")
+    print(f"generated: {generated_name}")
+    print("rerun HW perf for both golden and generated asm before updating")
+    print_diff(golden_path, golden, generated, generated_name, max_diff_lines)
+    raise SystemExit(1)
+
+
+def check_generated_asm(
+    name: str,
+    golden_path: Path,
+    run_calibrator: Callable[[Path, Path | None, Path | None], None],
+    build_dir: Path,
+    generated_out: Path | None = None,
+    emit_mlir: Path | None = None,
+    max_diff_lines: int = 200,
+) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        out = generated_out or Path(td) / f"{name}.s"
+        run_calibrator(build_dir, out, emit_mlir)
+        generated = normalize_asm(out.read_text(encoding="utf-8"))
+        golden = normalize_asm(golden_path.read_text(encoding="utf-8"))
+        compare_asm(name, golden_path, golden, generated, str(out), max_diff_lines)
+
+
+def generated_main(
+    default_build: Path,
+    argv: list[str],
+    run_calibrator: Callable[[Path, Path | None, Path | None], None],
+    check_asm: Callable[[Path, Path | None, Path | None, int], None],
 ) -> int:
+    args = parse_args(default_build, argv)
+    if args.emit_mlir is not None and args.generated_out is None:
+        run_calibrator(args.build_dir, None, args.emit_mlir)
+        return 0
+    check_asm(args.build_dir, args.generated_out, args.emit_mlir, args.max_diff_lines)
+    return 0
+
+
+def main_with_check(
+    default_build: Path,
+    argv: list[str],
+    check_asm: Callable[[Path, Path | None, Path | None, int], None],
+) -> int:
+    args = parse_args(default_build, argv)
+    check_asm(args.build_dir, args.generated_out, args.emit_mlir, args.max_diff_lines)
+    return 0
+
+
+def parse_args(default_build: Path, argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, default=default_build)
     parser.add_argument("--generated-out", type=Path)
     parser.add_argument("--emit-mlir", type=Path)
     parser.add_argument("--max-diff-lines", type=int, default=200)
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def main(
+    name: str, source: Path, golden_path: Path, default_build: Path, argv: list[str]
+) -> int:
+    args = parse_args(default_build, argv)
 
     check_asm(
         name,
