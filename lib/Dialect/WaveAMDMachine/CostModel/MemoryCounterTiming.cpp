@@ -26,24 +26,11 @@ namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
 
-static bool isLDSCounterIssuer(Operation *op) {
-  return getWaitcntInfo(op).event == WaitcntEvent::Lds;
-}
-
 static bool hasRegisterResult(Operation *op) {
   for (Value result : op->getResults())
     if (!isa<MemTokenType>(result.getType()))
       return true;
   return false;
-}
-
-static bool isLDSLoad(Operation *op) {
-  WaitcntInfo info = getWaitcntInfo(op);
-  return info.event == WaitcntEvent::Lds && hasRegisterResult(op);
-}
-
-static bool isSMEMLoad(Operation *op) {
-  return getWaitcntInfo(op).event == WaitcntEvent::Smem;
 }
 
 static int overrideOrDefault(int overrideLatency, int defaultLatency) {
@@ -148,11 +135,11 @@ int getMemoryCounterLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(overrides.vmemStore, defaultLatency);
   if (llvm::is_contained(defaultLatencyEvents, event))
     return defaultLatency;
-  if (isLDSCounterIssuer(op))
+  if (event == WaitcntEvent::Lds)
     return overrideOrDefault(overrides.lds, arch.ldsCounterLatency == 0
                                                 ? defaultLatency
                                                 : arch.ldsCounterLatency);
-  if (isSMEMLoad(op))
+  if (event == WaitcntEvent::Smem)
     return overrideOrDefault(overrides.smemLoad, defaultLatency);
   llvm_unreachable("op has no memory counter timing");
 }
@@ -162,7 +149,7 @@ bool hasMemoryValueLatency(Operation *op) {
     return false;
   WaitcntEvent event = getWaitcntInfo(op).event;
   return event == WaitcntEvent::Vmem || event == WaitcntEvent::Flat ||
-         isLDSLoad(op) || isSMEMLoad(op);
+         event == WaitcntEvent::Lds || event == WaitcntEvent::Smem;
 }
 
 int getMemoryValueLatency(const ArchData &arch, Operation *op,
@@ -181,11 +168,11 @@ int getMemoryValueLatency(const ArchData &arch, Operation *op,
     return overrideOrDefault(
         valueOverrides.vmemLoad,
         getMemoryCounterLatency(arch, op, counterOverrides, calibration));
-  if (isLDSLoad(op))
+  if (event == WaitcntEvent::Lds && hasRegisterResult(op))
     return overrideOrDefault(
         valueOverrides.lds,
         getMemoryCounterLatency(arch, op, counterOverrides, calibration));
-  if (isSMEMLoad(op))
+  if (event == WaitcntEvent::Smem)
     return overrideOrDefault(
         valueOverrides.smemLoad,
         getMemoryCounterLatency(arch, op, counterOverrides, calibration));
