@@ -32,7 +32,6 @@ V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
 V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
 STATIC_LDS_LIMIT = 64 * 1024
 DEFAULT_SIM_TRIP_COUNT = 32
-EMIT_ONLY_ENTRY_POINT = "waveamd_backend_emit_only"
 _INT32_MAX = (1 << 31) - 1
 _UINT32_MAX = (1 << 32) - 1
 _SIZE_T_MAX = 2 * sys.maxsize + 1
@@ -47,11 +46,15 @@ from common import (  # noqa: E402
     resolve_llvm_tool,
 )
 from wave_calibration import (  # noqa: E402, F401
+    EMIT_ONLY_ENTRY_POINT,
     VARIANTS,
     Variant,
     append_calibration_entry,
+    assemble_hsaco,
     backend_pipeline_path,
+    detect_asm_chip,
     detect_chip,
+    emit_machine_asm,
     erase_default_entry,
     import_mlir_bindings,
     parse_hw,
@@ -675,19 +678,6 @@ def lower_asm(
     return asm
 
 
-def emit_machine_asm(
-    build_dir: Path, machine: Path, pipeline: Path, tmp: Path, name: str
-) -> Path:
-    return lower_asm(
-        build_dir,
-        machine,
-        pipeline,
-        tmp,
-        name,
-        entry_point=EMIT_ONLY_ENTRY_POINT,
-    )
-
-
 def ensure_machine_asm(
     build_dir: Path,
     machine: Path,
@@ -698,49 +688,14 @@ def ensure_machine_asm(
 ) -> Path:
     if asm is not None:
         return asm
-    return emit_machine_asm(build_dir, machine, pipeline, tmp, name)
-
-
-def assemble_hsaco(
-    build_dir: Path, asm: Path, target_ir: Path, tmp: Path, name: str
-) -> Path:
-    variant_tmp = tmp / name
-    variant_tmp.mkdir(parents=True, exist_ok=True)
-    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
-    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
-    for tool in (llvm_mc, ld_lld):
-        if not tool.exists():
-            sys.exit(f"required tool missing: {tool}")
-    obj = variant_tmp / f"{name}.o"
-    hsaco = variant_tmp / f"{name}.hsaco"
-    run(
-        [
-            str(llvm_mc),
-            "-triple=amdgcn-amd-amdhsa",
-            f"-mcpu={detect_asm_chip(target_ir)}",
-            "-filetype=obj",
-            "-o",
-            str(obj),
-            str(asm),
-        ]
-    )
-    run([str(ld_lld), "-shared", str(obj), "-o", str(hsaco)])
-    return hsaco
+    return emit_machine_asm(lower_asm, build_dir, machine, pipeline, tmp, name)
 
 
 def lower_hsaco(
     build_dir: Path, source: Path, pipeline: Path, tmp: Path, name: str
 ) -> Path:
     asm = lower_asm(build_dir, source, pipeline, tmp, name)
-    return assemble_hsaco(build_dir, asm, source, tmp, name)
-
-
-def detect_asm_chip(source: Path) -> str:
-    text = source.read_text()
-    match = re.search(r'waveamdmachine\.target = "amdgcn-amd-amdhsa--([^"]+)"', text)
-    if not match:
-        sys.exit("source missing waveamdmachine.target")
-    return match.group(1)
+    return assemble_hsaco(resolve_llvm_tool, build_dir, asm, source, tmp, name)
 
 
 def selected_matrix_intrinsic(args: argparse.Namespace) -> str:
@@ -1092,14 +1047,18 @@ def run_variant(
     machine = lower_machine(args.build_dir, source, pipeline, tmp, variant.name)
     asm = None
     if emit_asm is not None:
-        asm = emit_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name)
+        asm = emit_machine_asm(
+            lower_asm, args.build_dir, machine, pipeline, tmp, variant.name
+        )
         emit_asm.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(asm, emit_asm)
     sim_cycles = run_simulation(args, machine)
     if runner is None:
         return VariantResult(variant.name, sim_cycles, [], [], None)
     asm = ensure_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name, asm)
-    hsaco = assemble_hsaco(args.build_dir, asm, machine, tmp, variant.name)
+    hsaco = assemble_hsaco(
+        resolve_llvm_tool, args.build_dir, asm, machine, tmp, variant.name
+    )
     hw_cycles, hw_us, hw_check = run_hw_repeats(runner, hsaco, args, run_hw=run_hw)
     return VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
 

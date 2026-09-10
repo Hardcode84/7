@@ -15,6 +15,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+EMIT_ONLY_ENTRY_POINT = "waveamd_backend_emit_only"
+
 
 @dataclass(frozen=True)
 class Variant:
@@ -268,3 +270,61 @@ def parse_variants(text: str) -> list[Variant]:
     if not variants:
         raise argparse.ArgumentTypeError("no variants selected")
     return variants
+
+
+def detect_asm_chip(source: Path) -> str:
+    text = source.read_text()
+    match = re.search(r'waveamdmachine\.target = "amdgcn-amd-amdhsa--([^"]+)"', text)
+    if not match:
+        sys.exit("source missing waveamdmachine.target")
+    return match.group(1)
+
+
+def emit_machine_asm(
+    lower_asm: Callable[..., Path],
+    build_dir: Path,
+    machine: Path,
+    pipeline: Path,
+    tmp: Path,
+    name: str,
+) -> Path:
+    return lower_asm(
+        build_dir,
+        machine,
+        pipeline,
+        tmp,
+        name,
+        entry_point=EMIT_ONLY_ENTRY_POINT,
+    )
+
+
+def assemble_hsaco(
+    resolve_llvm_tool: Callable[[str, Path], Path],
+    build_dir: Path,
+    asm: Path,
+    target_ir: Path,
+    tmp: Path,
+    name: str,
+) -> Path:
+    variant_tmp = tmp / name
+    variant_tmp.mkdir(parents=True, exist_ok=True)
+    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
+    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
+    for tool in (llvm_mc, ld_lld):
+        if not tool.exists():
+            sys.exit(f"required tool missing: {tool}")
+    obj = variant_tmp / f"{name}.o"
+    hsaco = variant_tmp / f"{name}.hsaco"
+    run(
+        [
+            str(llvm_mc),
+            "-triple=amdgcn-amd-amdhsa",
+            f"-mcpu={detect_asm_chip(target_ir)}",
+            "-filetype=obj",
+            "-o",
+            str(obj),
+            str(asm),
+        ]
+    )
+    run([str(ld_lld), "-shared", str(obj), "-o", str(hsaco)])
+    return hsaco

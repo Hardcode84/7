@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -20,7 +19,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "examples/wave/flash_attention.py"
 RUNNER_SRC = REPO_ROOT / "tools/wave-fa-calibrate/wave-fa-calibrate-runner.cpp"
 KERNEL_NAME = "flash_attention_f32"
-EMIT_ONLY_ENTRY_POINT = "waveamd_backend_emit_only"
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(REPO_ROOT / "examples/wave"))
 
@@ -32,11 +30,15 @@ from common import (  # noqa: E402
 )
 from flash_attention import flash_attention_f32_flops  # noqa: E402
 from wave_calibration import (  # noqa: E402, F401
+    EMIT_ONLY_ENTRY_POINT,
     VARIANTS,
     Variant,
     append_calibration_entry,
+    assemble_hsaco,
     backend_pipeline_path,
+    detect_asm_chip,
     detect_chip,
+    emit_machine_asm,
     erase_default_entry,
     import_mlir_bindings,
     parse_hw,
@@ -134,14 +136,6 @@ def lower_machine(
     return out
 
 
-def detect_asm_chip(source: Path) -> str:
-    text = source.read_text()
-    match = re.search(r'waveamdmachine\.target = "amdgcn-amd-amdhsa--([^"]+)"', text)
-    if not match:
-        sys.exit("source missing waveamdmachine.target")
-    return match.group(1)
-
-
 def lower_asm(
     build_dir: Path,
     source: Path,
@@ -165,46 +159,6 @@ def lower_asm(
         run([str(wave_translate), "--wave-to-amdgpu-asm", str(source)], env=env)
     )
     return asm
-
-
-def emit_machine_asm(
-    build_dir: Path, machine: Path, pipeline: Path, tmp: Path, name: str
-) -> Path:
-    return lower_asm(
-        build_dir,
-        machine,
-        pipeline,
-        tmp,
-        name,
-        entry_point=EMIT_ONLY_ENTRY_POINT,
-    )
-
-
-def assemble_hsaco(
-    build_dir: Path, asm: Path, target_ir: Path, tmp: Path, name: str
-) -> Path:
-    variant_tmp = tmp / name
-    variant_tmp.mkdir(parents=True, exist_ok=True)
-    llvm_mc = resolve_llvm_tool("llvm-mc", build_dir)
-    ld_lld = resolve_llvm_tool("ld.lld", build_dir)
-    for tool in (llvm_mc, ld_lld):
-        if not tool.exists():
-            sys.exit(f"required tool missing: {tool}")
-    obj = variant_tmp / f"{name}.o"
-    hsaco = variant_tmp / f"{name}.hsaco"
-    run(
-        [
-            str(llvm_mc),
-            "-triple=amdgcn-amd-amdhsa",
-            f"-mcpu={detect_asm_chip(target_ir)}",
-            "-filetype=obj",
-            "-o",
-            str(obj),
-            str(asm),
-        ]
-    )
-    run([str(ld_lld), "-shared", str(obj), "-o", str(hsaco)])
-    return hsaco
 
 
 def run_sim_report(
@@ -280,8 +234,12 @@ def run_variant(
     sim_cycles = run_sim_report(args.build_dir, machine, args)
     if runner is None:
         return VariantResult(variant.name, sim_cycles, [], [], None)
-    asm = emit_machine_asm(args.build_dir, machine, pipeline, tmp, variant.name)
-    hsaco = assemble_hsaco(args.build_dir, asm, machine, tmp, variant.name)
+    asm = emit_machine_asm(
+        lower_asm, args.build_dir, machine, pipeline, tmp, variant.name
+    )
+    hsaco = assemble_hsaco(
+        resolve_llvm_tool, args.build_dir, asm, machine, tmp, variant.name
+    )
     hw_cycles, hw_us, hw_check = run_hw_repeats(runner, hsaco, args, run_hw=run_hw)
     return VariantResult(variant.name, sim_cycles, hw_cycles, hw_us, hw_check)
 
