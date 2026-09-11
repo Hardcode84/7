@@ -591,6 +591,7 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
       getMachineSelectionTargetInfo(func, targetModule);
   if (failed(targetInfo))
     return failure();
+  selector.wavefrontSize = targetInfo->wavefrontSize;
   selector.target = std::move(targetInfo->target);
   selector.bufferResourceBaseBits = targetInfo->bufferResourceBaseBits;
   selector.matrixFamily = targetInfo->matrixFamily;
@@ -1303,7 +1304,19 @@ struct WideSymbolBinding {
   Value selected;
 };
 
-static TermKind wideMaterializationKind(sym::ExprHandle expr,
+static std::optional<UniformThreadQuotient>
+matchWideUniformThreadQuotient(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                               ArrayRef<WideSymbolBinding> bindings) {
+  return matchUniformThreadQuotient(S, expr, [&](StringRef name) -> Value {
+    for (const WideSymbolBinding &binding : bindings)
+      if (binding.name == name)
+        return binding.selected;
+    return {};
+  });
+}
+
+static TermKind wideMaterializationKind(WaveAMDMachineSelector &S,
+                                        sym::ExprHandle expr,
                                         ArrayRef<WideSymbolBinding> bindings,
                                         bool symbolsAreUniform);
 
@@ -1341,72 +1354,77 @@ wideSymbolMaterializationKind(sym::ExprHandle expr,
   return TermKind::Lane;
 }
 
-static TermKind wideAddMaterializationKind(sym::ExprHandle expr,
+static TermKind wideAddMaterializationKind(WaveAMDMachineSelector &S,
+                                           sym::ExprHandle expr,
                                            ArrayRef<WideSymbolBinding> bindings,
                                            bool symbolsAreUniform) {
   sym::ExprView view(expr);
-  TermKind kind = wideMaterializationKind(view.getAddConstant(), bindings,
+  TermKind kind = wideMaterializationKind(S, view.getAddConstant(), bindings,
                                           symbolsAreUniform);
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
     sym::AddTerm term = view.getAddTerm(i);
-    kind = std::max(kind, wideMaterializationKind(term.coefficient, bindings,
+    kind = std::max(kind, wideMaterializationKind(S, term.coefficient, bindings,
                                                   symbolsAreUniform));
-    kind = std::max(
-        kind, wideMaterializationKind(term.term, bindings, symbolsAreUniform));
+    kind = std::max(kind, wideMaterializationKind(S, term.term, bindings,
+                                                  symbolsAreUniform));
   }
   return kind;
 }
 
-static TermKind wideMulMaterializationKind(sym::ExprHandle expr,
+static TermKind wideMulMaterializationKind(WaveAMDMachineSelector &S,
+                                           sym::ExprHandle expr,
                                            ArrayRef<WideSymbolBinding> bindings,
                                            bool symbolsAreUniform) {
   sym::ExprView view(expr);
-  TermKind kind = wideMaterializationKind(view.getMulCoefficient(), bindings,
+  TermKind kind = wideMaterializationKind(S, view.getMulCoefficient(), bindings,
                                           symbolsAreUniform);
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getMulFactorCount()))
-    kind = std::max(kind, wideMaterializationKind(view.getMulFactor(i).base,
+    kind = std::max(kind, wideMaterializationKind(S, view.getMulFactor(i).base,
                                                   bindings, symbolsAreUniform));
   return kind;
 }
 
 static TermKind
-wideAssocMaterializationKind(sym::ExprView view,
+wideAssocMaterializationKind(WaveAMDMachineSelector &S, sym::ExprView view,
                              ArrayRef<WideSymbolBinding> bindings,
                              bool symbolsAreUniform) {
   TermKind kind = TermKind::Const;
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
-    kind = std::max(kind, wideMaterializationKind(view.getAssocArg(i), bindings,
-                                                  symbolsAreUniform));
+    kind = std::max(kind, wideMaterializationKind(S, view.getAssocArg(i),
+                                                  bindings, symbolsAreUniform));
   return kind;
 }
 
 static TermKind
-wideCompoundMaterializationKind(sym::ExprView view,
+wideCompoundMaterializationKind(WaveAMDMachineSelector &S, sym::ExprView view,
                                 ArrayRef<WideSymbolBinding> bindings,
                                 bool symbolsAreUniform) {
   switch (view.getKind()) {
   case sym::ExprKind::Floor:
   case sym::ExprKind::Ceil:
   case sym::ExprKind::Trunc:
-    return wideMaterializationKind(view.getUnaryArg(), bindings,
+    return wideMaterializationKind(S, view.getUnaryArg(), bindings,
                                    symbolsAreUniform);
   case sym::ExprKind::Mod:
-    return std::max(wideMaterializationKind(view.getBinaryLhs(), bindings,
+    return std::max(wideMaterializationKind(S, view.getBinaryLhs(), bindings,
                                             symbolsAreUniform),
-                    wideMaterializationKind(view.getBinaryRhs(), bindings,
+                    wideMaterializationKind(S, view.getBinaryRhs(), bindings,
                                             symbolsAreUniform));
   case sym::ExprKind::Xor:
   case sym::ExprKind::And:
   case sym::ExprKind::Or:
-    return wideAssocMaterializationKind(view, bindings, symbolsAreUniform);
+    return wideAssocMaterializationKind(S, view, bindings, symbolsAreUniform);
   default:
     return TermKind::Lane;
   }
 }
 
-static TermKind wideMaterializationKind(sym::ExprHandle expr,
+static TermKind wideMaterializationKind(WaveAMDMachineSelector &S,
+                                        sym::ExprHandle expr,
                                         ArrayRef<WideSymbolBinding> bindings,
                                         bool symbolsAreUniform) {
+  if (matchWideUniformThreadQuotient(S, expr, bindings))
+    return TermKind::Uniform;
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -1415,11 +1433,12 @@ static TermKind wideMaterializationKind(sym::ExprHandle expr,
   case sym::ExprKind::Symbol:
     return wideSymbolMaterializationKind(expr, bindings, symbolsAreUniform);
   case sym::ExprKind::Add:
-    return wideAddMaterializationKind(expr, bindings, symbolsAreUniform);
+    return wideAddMaterializationKind(S, expr, bindings, symbolsAreUniform);
   case sym::ExprKind::Mul:
-    return wideMulMaterializationKind(expr, bindings, symbolsAreUniform);
+    return wideMulMaterializationKind(S, expr, bindings, symbolsAreUniform);
   default:
-    return wideCompoundMaterializationKind(view, bindings, symbolsAreUniform);
+    return wideCompoundMaterializationKind(S, view, bindings,
+                                           symbolsAreUniform);
   }
 }
 
@@ -1549,7 +1568,8 @@ static bool orderedBefore(TermKind lhsKind, unsigned lhsDepth, TermKind rhsKind,
 }
 
 static SmallVector<OrderedWideAddTerm, 8>
-collectOrderedWideAddTerms(sym::ExprHandle expr, Operation *user,
+collectOrderedWideAddTerms(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                           Operation *user,
                            ArrayRef<WideSymbolBinding> bindings,
                            bool symbolsAreUniform, IndexExprAddOrder addOrder) {
   sym::ExprView view(expr);
@@ -1558,8 +1578,9 @@ collectOrderedWideAddTerms(sym::ExprHandle expr, Operation *user,
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getAddTermCount())) {
     sym::AddTerm term = view.getAddTerm(i);
     TermKind kind = std::max(
-        wideMaterializationKind(term.coefficient, bindings, symbolsAreUniform),
-        wideMaterializationKind(term.term, bindings, symbolsAreUniform));
+        wideMaterializationKind(S, term.coefficient, bindings,
+                                symbolsAreUniform),
+        wideMaterializationKind(S, term.term, bindings, symbolsAreUniform));
     unsigned depth =
         std::max(wideMaterializationLoopDepth(term.coefficient, user, bindings),
                  wideMaterializationLoopDepth(term.term, user, bindings));
@@ -1573,10 +1594,9 @@ collectOrderedWideAddTerms(sym::ExprHandle expr, Operation *user,
   return terms;
 }
 
-static SmallVector<OrderedWideMulFactor, 8>
-collectOrderedWideMulFactors(sym::ExprHandle expr, Operation *user,
-                             ArrayRef<WideSymbolBinding> bindings,
-                             bool symbolsAreUniform) {
+static SmallVector<OrderedWideMulFactor, 8> collectOrderedWideMulFactors(
+    WaveAMDMachineSelector &S, sym::ExprHandle expr, Operation *user,
+    ArrayRef<WideSymbolBinding> bindings, bool symbolsAreUniform) {
   sym::ExprView view(expr);
   SmallVector<OrderedWideMulFactor, 8> factors;
   factors.reserve(view.getMulFactorCount());
@@ -1584,7 +1604,7 @@ collectOrderedWideMulFactors(sym::ExprHandle expr, Operation *user,
     sym::MulFactor factor = view.getMulFactor(i);
     factors.push_back(
         {factor,
-         wideMaterializationKind(factor.base, bindings, symbolsAreUniform),
+         wideMaterializationKind(S, factor.base, bindings, symbolsAreUniform),
          wideMaterializationLoopDepth(factor.base, user, bindings)});
   }
   llvm::stable_sort(factors, [](const OrderedWideMulFactor &lhs,
@@ -1736,7 +1756,7 @@ static FailureOr<Value> materializeWideAddLaneFirst(
           uniformAcc)))
     return failure();
   SmallVector<OrderedWideAddTerm, 8> terms = collectOrderedWideAddTerms(
-      expr, user, bindings, symbolsAreUniform, IndexExprAddOrder::LaneFirst);
+      S, expr, user, bindings, symbolsAreUniform, IndexExprAddOrder::LaneFirst);
   for (const OrderedWideAddTerm &ordered : terms)
     if (failed(appendWideLaneFirstAddTerm(S, context, user, ordered, bindings,
                                           symbolsAreUniform, laneAcc,
@@ -1761,8 +1781,9 @@ static FailureOr<Value> materializeWideAddUniformFirst(
       return failure();
     acc = *seed;
   }
-  SmallVector<OrderedWideAddTerm, 8> terms = collectOrderedWideAddTerms(
-      expr, user, bindings, symbolsAreUniform, IndexExprAddOrder::UniformFirst);
+  SmallVector<OrderedWideAddTerm, 8> terms =
+      collectOrderedWideAddTerms(S, expr, user, bindings, symbolsAreUniform,
+                                 IndexExprAddOrder::UniformFirst);
   for (const OrderedWideAddTerm &ordered : terms) {
     FailureOr<Value> term = materializeWideAddTerm(
         S, context, ordered.term, user, bindings, symbolsAreUniform,
@@ -1826,7 +1847,7 @@ materializeWideMul(WaveAMDMachineSelector &S,
     acc = *seed;
   }
   SmallVector<OrderedWideMulFactor, 8> factors =
-      collectOrderedWideMulFactors(expr, user, bindings, symbolsAreUniform);
+      collectOrderedWideMulFactors(S, expr, user, bindings, symbolsAreUniform);
   for (const OrderedWideMulFactor &ordered : factors) {
     FailureOr<Value> factor =
         materializeWideMulFactor(S, context, ordered.factor, user, bindings,
@@ -2212,6 +2233,13 @@ static FailureOr<WideRationalValue> materializeWideRationalIndexExprNode(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
     sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform) {
+  if (std::optional<UniformThreadQuotient> quotient =
+          matchWideUniformThreadQuotient(S, expr, bindings)) {
+    Value narrow =
+        materializeUniformThreadQuotient(S, user->getLoc(), *quotient);
+    Value wide = ensureSGPR2(S, user->getLoc(), narrow);
+    return WideRationalValue{wide, 1};
+  }
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
@@ -2370,6 +2398,13 @@ static FailureOr<Value> materializeWideIndexExprNode(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
     sym::ExprHandle expr, Operation *user, ArrayRef<WideSymbolBinding> bindings,
     bool symbolsAreUniform, IndexExprAddOrder addOrder) {
+  if (std::optional<UniformThreadQuotient> quotient =
+          matchWideUniformThreadQuotient(S, expr, bindings)) {
+    Value narrow =
+        materializeUniformThreadQuotient(S, user->getLoc(), *quotient);
+    Value wide = ensureSGPR2(S, user->getLoc(), narrow);
+    return wide;
+  }
   if (needsIntegerRationalMaterialization(expr)) {
     sym::Analysis *analysis = context.getAnalysis();
     if (analysis && analysis->integerValued(expr) == sym::CheckResult::True)
@@ -2504,9 +2539,9 @@ TermKind classifyPointerOffset(WaveAMDMachineSelector &S,
                                const PointerOffset &offset) {
   if (!offset.expr)
     return TermKind::Const;
-  llvm::StringMap<TermKind> symKinds;
+  llvm::StringMap<IndexExprBinding> symKinds;
   for (const PointerOffsetBinding &binding : offset.bindings)
-    symKinds[binding.name] = binding.kind;
+    symKinds[binding.name] = {binding.value, binding.kind};
   return classifyTerm(S, offset.expr, symKinds);
 }
 
@@ -2562,9 +2597,9 @@ static FailureOr<sym::ExprHandle> appendAddressExpr(sym::Analysis &analysis,
 static TermKind classifyPlanExpr(WaveAMDMachineSelector &S,
                                  const AddressPlan &plan,
                                  sym::ExprHandle expr) {
-  llvm::StringMap<TermKind> symKinds;
+  llvm::StringMap<IndexExprBinding> symKinds;
   for (const PointerOffsetBinding &binding : plan.bindings)
-    symKinds[binding.name] = binding.kind;
+    symKinds[binding.name] = {binding.value, binding.kind};
   return classifyTerm(S, expr, symKinds);
 }
 
@@ -8344,9 +8379,9 @@ static LogicalResult requireUniformDmaDest(WaveAMDMachineSelector &S,
                                            const PointerOffset &offset) {
   if (!offset.expr)
     return success();
-  llvm::StringMap<TermKind> symKinds;
+  llvm::StringMap<IndexExprBinding> symKinds;
   for (const PointerOffsetBinding &binding : offset.bindings)
-    symKinds[binding.name] = binding.kind;
+    symKinds[binding.name] = {binding.value, binding.kind};
   TermKind kind = classifyTerm(S, offset.expr, symKinds);
   if (kind == TermKind::Lane)
     return op.emitError("DMA LDS destination must be uniform");

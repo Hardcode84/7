@@ -14,6 +14,8 @@
 
 #include "WaveAMDMachineSelector.h"
 
+#include "mlir/Dialect/Wave/Transforms/WaveAMDEntryRegs.h"
+
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -109,6 +111,67 @@ static bool isProvablyNonNegative(WaveAMDMachineSelector &S,
                                   ArrayRef<sym::PredHandle> assumptions);
 static bool isProvablyNonNegative(sym::Analysis &analysis,
                                   sym::ExprHandle expr);
+
+static bool hasWaveAlignedX(WaveAMDMachineSelector &S) {
+  for (StringRef name : {"wave.workgroup_size", "gpu.known_block_size"}) {
+    DenseI32ArrayAttr shape = S.func->getAttrOfType<DenseI32ArrayAttr>(name);
+    if (!shape)
+      continue;
+    ArrayRef<int32_t> dims = shape.asArrayRef();
+    if (dims.empty() || dims.size() > 3 ||
+        llvm::any_of(dims, [](int32_t size) { return size <= 0; }))
+      return false;
+    // X rows must not split waves; a single row also permits a partial wave.
+    return dims.front() % S.wavefrontSize == 0 ||
+           llvm::all_of(dims.drop_front(),
+                        [](int32_t size) { return size == 1; });
+  }
+  return false;
+}
+
+static bool isWorkitemX(WaveAMDMachineSelector &S, Value value) {
+  while (auto assume = value.getDefiningOp<AssumeOp>())
+    value = assume.getValue();
+  if (auto workitem = value.getDefiningOp<WorkitemIdOp>())
+    return workitem.getAxis() == 0;
+  if (auto mask = value.getDefiningOp<waveamdmachine::VAndB32Op>()) {
+    if (S.getImmediateValue(mask.getRhs()) != 0x3ff)
+      return false;
+    value = mask.getLhs();
+  }
+  auto workitem = value.getDefiningOp<waveamdmachine::VWorkitemIdXOp>();
+  if (!workitem)
+    return false;
+  auto axis =
+      workitem->getAttrOfType<IntegerAttr>(getWaveAMDWorkitemIdAxisAttrName());
+  return !axis || axis.getInt() == 0;
+}
+
+struct ThreadQuotient {
+  StringRef symbol;
+  int64_t divisor;
+};
+
+static std::optional<ThreadQuotient> matchThreadQuotient(sym::ExprHandle expr) {
+  sym::ExprView rounded(expr);
+  if (rounded.getKind() != sym::ExprKind::Floor &&
+      rounded.getKind() != sym::ExprKind::Trunc)
+    return std::nullopt;
+  sym::ExprView product(rounded.getUnaryArg());
+  if (product.getKind() != sym::ExprKind::Mul ||
+      product.getMulFactorCount() != 1)
+    return std::nullopt;
+  std::optional<sym::RationalLiteral> scale =
+      sym::ExprView(product.getMulCoefficient()).getRational();
+  if (!scale || scale->numerator != 1 ||
+      !isPositivePowerOfTwo(scale->denominator))
+    return std::nullopt;
+  sym::MulFactor factor = product.getMulFactor(0);
+  sym::ExprView symbol(factor.base);
+  if (factor.exponent != 1 || symbol.getKind() != sym::ExprKind::Symbol)
+    return std::nullopt;
+  return ThreadQuotient{symbol.getSymbolName(), scale->denominator};
+}
 
 static bool isHoistScope(Operation *op) { return isa<LoopLikeOpInterface>(op); }
 
@@ -238,6 +301,9 @@ static TermKind compoundMaterializationKind(WaveAMDMachineSelector &S,
 static TermKind materializationKind(WaveAMDMachineSelector &S,
                                     sym::ExprHandle expr,
                                     const llvm::StringMap<Value> &subs) {
+  if (matchUniformThreadQuotient(
+          S, expr, [&](StringRef name) { return subs.lookup(name); }))
+    return TermKind::Uniform;
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -2728,6 +2794,18 @@ static FailureOr<RationalIndexValue> materializeRationalIndexExprNode(
     WaveAMDMachineSelector &S, sym::Analysis &analysis, sym::ExprHandle expr,
     Operation *user, const llvm::StringMap<Value> &subs,
     ArrayRef<sym::PredHandle> assumptions) {
+  if (std::optional<UniformThreadQuotient> quotient =
+          matchUniformThreadQuotient(
+              S, expr, [&](StringRef name) { return subs.lookup(name); })) {
+    FailureOr<sym::ExprHandle> denominator =
+        composeRationalInteger(analysis, 1, user);
+    if (failed(denominator))
+      return failure();
+    Value value =
+        materializeUniformThreadQuotient(S, user->getLoc(), *quotient);
+    return RationalIndexValue{value, getIntFoldResult(S, 1), expr,
+                              *denominator};
+  }
   sym::ExprKind kind = sym::ExprView(expr).getKind();
   if (kind == sym::ExprKind::Integer || kind == sym::ExprKind::Rational ||
       kind == sym::ExprKind::Symbol)
@@ -2792,7 +2870,7 @@ static FailureOr<Value> materializeTrunc(WaveAMDMachineSelector &S,
 }
 
 TermKind classifyAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                     const llvm::StringMap<TermKind> &symKinds) {
+                     const llvm::StringMap<IndexExprBinding> &symKinds) {
   sym::ExprView view(expr);
   TermKind k = classifyTerm(S, view.getAddConstant(), symKinds);
   uint32_t n = view.getAddTermCount();
@@ -2802,7 +2880,7 @@ TermKind classifyAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 }
 
 TermKind classifyMul(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                     const llvm::StringMap<TermKind> &symKinds) {
+                     const llvm::StringMap<IndexExprBinding> &symKinds) {
   sym::ExprView view(expr);
   TermKind k = classifyTerm(S, view.getMulCoefficient(), symKinds);
   uint32_t n = view.getMulFactorCount();
@@ -3045,7 +3123,7 @@ static LogicalResult appendPlanExpr(sym::Analysis &analysis,
 }
 
 static void appendPlanAddend(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                             const llvm::StringMap<TermKind> &symKinds,
+                             const llvm::StringMap<IndexExprBinding> &symKinds,
                              SmallVectorImpl<AddressPlanAddend> &addends) {
   if (!isZeroExpr(expr))
     addends.push_back({expr, classifyTerm(S, expr, symKinds)});
@@ -3054,7 +3132,7 @@ static void appendPlanAddend(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 static FailureOr<bool>
 collectShallowMulAddends(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                          sym::Analysis &analysis,
-                         const llvm::StringMap<TermKind> &symKinds,
+                         const llvm::StringMap<IndexExprBinding> &symKinds,
                          SmallVectorImpl<AddressPlanAddend> &addends) {
   sym::ExprView mul(expr);
   if (mul.getKind() != sym::ExprKind::Mul || mul.getMulFactorCount() != 1)
@@ -3090,7 +3168,7 @@ collectShallowMulAddends(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 static LogicalResult
 collectPlanAddend(WaveAMDMachineSelector &S, sym::ExprHandle term,
                   sym::Analysis &analysis, sym::ExprHandle termCoeff,
-                  const llvm::StringMap<TermKind> &symKinds,
+                  const llvm::StringMap<IndexExprBinding> &symKinds,
                   SmallVectorImpl<AddressPlanAddend> &addends) {
   FailureOr<sym::ExprHandle> scaled =
       scalePlanAddend(analysis, term, termCoeff);
@@ -3108,7 +3186,7 @@ collectPlanAddend(WaveAMDMachineSelector &S, sym::ExprHandle term,
 static LogicalResult
 collectPlanAddends(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                    sym::Analysis &analysis,
-                   const llvm::StringMap<TermKind> &symKinds,
+                   const llvm::StringMap<IndexExprBinding> &symKinds,
                    SmallVectorImpl<AddressPlanAddend> &addends) {
   sym::ExprView view(expr);
   if (view.getKind() != sym::ExprKind::Add)
@@ -3301,7 +3379,8 @@ buildDecomposedAddressPlan(WaveAMDMachineSelector &S, sym::Analysis &analysis,
 static FailureOr<AddressPlan> buildDecomposedAddressPlanForExpr(
     WaveAMDMachineSelector &S, sym::Analysis &analysis,
     const waveamdmachine::AddressFieldSpec &spec, sym::ExprHandle expr,
-    const llvm::StringMap<TermKind> &symKinds, const AddressPlan &base) {
+    const llvm::StringMap<IndexExprBinding> &symKinds,
+    const AddressPlan &base) {
   SmallVector<AddressPlanAddend, 8> addends;
   if (failed(collectPlanAddends(S, expr, analysis, symKinds, addends)))
     return failure();
@@ -3311,7 +3390,7 @@ static FailureOr<AddressPlan> buildDecomposedAddressPlanForExpr(
 static FailureOr<AddressPlan>
 buildWholeAddressPlan(WaveAMDMachineSelector &S, sym::Analysis &analysis,
                       const waveamdmachine::AddressFieldSpec &spec,
-                      const llvm::StringMap<TermKind> &symKinds,
+                      const llvm::StringMap<IndexExprBinding> &symKinds,
                       sym::ExprHandle materialExpr, const AddressPlan &base) {
   AddressPlan plan = base;
   TermKind wholeKind = classifyTerm(S, materialExpr, symKinds);
@@ -3343,10 +3422,12 @@ struct AddressPlanCandidates {
   bool wholeFits = false;
 };
 
-static FailureOr<AddressPlanCandidates> buildAddressPlanCandidates(
-    WaveAMDMachineSelector &S, sym::Analysis &analysis,
-    const waveamdmachine::AddressFieldSpec &spec, sym::ExprHandle materialExpr,
-    const llvm::StringMap<TermKind> &symKinds, const AddressPlan &base) {
+static FailureOr<AddressPlanCandidates>
+buildAddressPlanCandidates(WaveAMDMachineSelector &S, sym::Analysis &analysis,
+                           const waveamdmachine::AddressFieldSpec &spec,
+                           sym::ExprHandle materialExpr,
+                           const llvm::StringMap<IndexExprBinding> &symKinds,
+                           const AddressPlan &base) {
   bool wholeFits = S.slotFitsU32(analysis, materialExpr);
   FailureOr<AddressPlan> decomposed = buildDecomposedAddressPlanForExpr(
       S, analysis, spec, materialExpr, symKinds, base);
@@ -3488,10 +3569,11 @@ getCheckedBufferOffset(WaveAMDMachineSelector &S, sym::Analysis &analysis,
                                 sym::ExprBinaryOp::Add, *instOffset);
 }
 
-static llvm::StringMap<TermKind> getPlanTermKinds(const AddressPlan &plan) {
-  llvm::StringMap<TermKind> symKinds;
+static llvm::StringMap<IndexExprBinding>
+getPlanTermKinds(const AddressPlan &plan) {
+  llvm::StringMap<IndexExprBinding> symKinds;
   for (const PointerOffsetBinding &binding : plan.bindings)
-    symKinds[binding.name] = binding.kind;
+    symKinds[binding.name] = {binding.value, binding.kind};
   return symKinds;
 }
 
@@ -3529,6 +3611,35 @@ foldFirstBufferLaneAddend(sym::Analysis &analysis, AddressPlan &plan,
 
 } // namespace
 
+std::optional<UniformThreadQuotient>
+matchUniformThreadQuotient(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                           function_ref<Value(StringRef)> lookup) {
+  std::optional<ThreadQuotient> quotient = matchThreadQuotient(expr);
+  if (!quotient || !S.wavefrontSize || quotient->divisor < S.wavefrontSize)
+    return std::nullopt;
+  Value value = lookup(quotient->symbol);
+  if (!value || !isWorkitemX(S, value) || !hasWaveAlignedX(S))
+    return std::nullopt;
+  return UniformThreadQuotient{
+      value, static_cast<unsigned>(llvm::Log2_64(quotient->divisor))};
+}
+
+Value materializeUniformThreadQuotient(WaveAMDMachineSelector &S, Location loc,
+                                       UniformThreadQuotient quotient) {
+  if (quotient.shift >= 32)
+    return createImm(S.builder, loc, 0);
+  unsigned waveShift = llvm::Log2_32(S.wavefrontSize);
+  Value &waveId = S.workitemWaveIds[quotient.threadId];
+  if (!waveId) {
+    // Source dominates all consumers; capture before their EXEC changes.
+    OpBuilder::InsertionGuard guard(S.builder);
+    S.builder.setInsertionPointAfter(quotient.threadId.getDefiningOp());
+    Value firstThread = S.ensureSGPR1(loc, quotient.threadId);
+    waveId = S.shrPow2(loc, firstThread, waveShift);
+  }
+  return S.shrPow2(loc, waveId, quotient.shift - waveShift);
+}
+
 // ---- public surface (declared in WaveAMDMachineSelector.h) ----------------
 
 bool needsWideAddressMaterialization(sym::ExprHandle expr,
@@ -3553,7 +3664,7 @@ LogicalResult foldBufferLaneStrideIntoDescriptor(WaveAMDMachineSelector &S,
   if (!exprProvablyInRange(**analysis, *checkedOffset, 0, maxCheckedByteOffset))
     return success();
 
-  llvm::StringMap<TermKind> symKinds = getPlanTermKinds(plan);
+  llvm::StringMap<IndexExprBinding> symKinds = getPlanTermKinds(plan);
   SmallVector<AddressPlanAddend, 8> addends;
   if (failed(collectPlanAddends(S, plan.voffsetExpr, **analysis, symKinds,
                                 addends)))
@@ -3620,6 +3731,10 @@ FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
                                           const llvm::StringMap<Value> &subs,
                                           ArrayRef<sym::PredHandle> assumptions,
                                           IndexExprAddOrder addOrder) {
+  if (std::optional<UniformThreadQuotient> quotient =
+          matchUniformThreadQuotient(
+              S, expr, [&](StringRef name) { return subs.lookup(name); }))
+    return materializeUniformThreadQuotient(S, user->getLoc(), *quotient);
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -3642,7 +3757,7 @@ FailureOr<Value> materializeIndexExprNode(WaveAMDMachineSelector &S,
 
 static TermKind
 classifyPredicateTerm(WaveAMDMachineSelector &S, sym::PredHandle pred,
-                      const llvm::StringMap<TermKind> &symKinds) {
+                      const llvm::StringMap<IndexExprBinding> &symKinds) {
   sym::PredView view(pred);
   switch (view.getKind()) {
   case sym::PredKind::True:
@@ -3666,8 +3781,9 @@ classifyPredicateTerm(WaveAMDMachineSelector &S, sym::PredHandle pred,
   }
 }
 
-static TermKind classifyAssocTerm(WaveAMDMachineSelector &S, sym::ExprView view,
-                                  const llvm::StringMap<TermKind> &symKinds) {
+static TermKind
+classifyAssocTerm(WaveAMDMachineSelector &S, sym::ExprView view,
+                  const llvm::StringMap<IndexExprBinding> &symKinds) {
   TermKind kind = TermKind::Const;
   for (uint32_t i : llvm::seq<uint32_t>(0, view.getAssocArgCount()))
     kind = std::max(kind, classifyTerm(S, view.getAssocArg(i), symKinds));
@@ -3676,7 +3792,7 @@ static TermKind classifyAssocTerm(WaveAMDMachineSelector &S, sym::ExprView view,
 
 static TermKind
 classifyPiecewiseTerm(WaveAMDMachineSelector &S, sym::ExprView view,
-                      const llvm::StringMap<TermKind> &symKinds) {
+                      const llvm::StringMap<IndexExprBinding> &symKinds) {
   TermKind kind = TermKind::Const;
   for (uint32_t i = 0, e = view.getPiecewiseCaseCount(); i != e; ++i) {
     sym::PiecewiseCase piece = view.getPiecewiseCase(i);
@@ -3688,7 +3804,7 @@ classifyPiecewiseTerm(WaveAMDMachineSelector &S, sym::ExprView view,
 
 static TermKind
 classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                     const llvm::StringMap<TermKind> &symKinds) {
+                     const llvm::StringMap<IndexExprBinding> &symKinds) {
   sym::ExprView view(expr);
   auto kind = view.getKind();
   if (view.getKind() == sym::ExprKind::Add)
@@ -3711,7 +3827,10 @@ classifyCompoundTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 }
 
 TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                      const llvm::StringMap<TermKind> &symKinds) {
+                      const llvm::StringMap<IndexExprBinding> &symKinds) {
+  if (matchUniformThreadQuotient(
+          S, expr, [&](StringRef name) { return symKinds.lookup(name).value; }))
+    return TermKind::Uniform;
   sym::ExprView view(expr);
   switch (view.getKind()) {
   case sym::ExprKind::Integer:
@@ -3720,7 +3839,7 @@ TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   case sym::ExprKind::Symbol: {
     StringRef name = view.getSymbolName();
     auto it = symKinds.find(name);
-    return it == symKinds.end() ? TermKind::Lane : it->second;
+    return it == symKinds.end() ? TermKind::Lane : it->second.kind;
   }
   default:
     return classifyCompoundTerm(S, expr, symKinds);
@@ -3737,9 +3856,9 @@ planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
   if (!offset.expr)
     return plan;
 
-  llvm::StringMap<TermKind> symKinds;
+  llvm::StringMap<IndexExprBinding> symKinds;
   for (const PointerOffsetBinding &binding : offset.bindings)
-    symKinds[binding.name] = binding.kind;
+    symKinds[binding.name] = {binding.value, binding.kind};
 
   sym::ExprHandle materialExpr = offset.expr;
   FailureOr<std::unique_ptr<sym::Analysis>> analysis =
