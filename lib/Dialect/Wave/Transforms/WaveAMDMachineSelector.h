@@ -53,6 +53,11 @@ enum class IndexExprAddOrder { UniformFirst, LaneFirst };
 
 enum class CmpRelation { Eq, Ne, Lt, Le, Gt, Ge };
 
+struct IndexExprBinding {
+  Value value;
+  TermKind kind = TermKind::Lane;
+};
+
 struct PointerOffsetBinding {
   std::string name;
   Value value;
@@ -153,6 +158,18 @@ inline Value createImm(OpBuilder &builder, Location loc, int64_t value) {
 
 class WaveAMDMachineSelector;
 
+struct UniformThreadQuotient {
+  Value threadId;
+  unsigned shift;
+};
+
+std::optional<UniformThreadQuotient>
+matchUniformThreadQuotient(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                           function_ref<Value(StringRef)> lookup);
+
+Value materializeUniformThreadQuotient(WaveAMDMachineSelector &S, Location loc,
+                                       UniformThreadQuotient quotient);
+
 // Index-expression helpers share selector factories, bindings, and symbol
 // store.
 
@@ -177,7 +194,7 @@ FailureOr<PointerOffset> mergePointerOffsets(WaveAMDMachineSelector &S,
                                              const PointerOffset &add);
 
 TermKind classifyTerm(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                      const llvm::StringMap<TermKind> &symKinds);
+                      const llvm::StringMap<IndexExprBinding> &symKinds);
 
 FailureOr<AddressPlan>
 planAddressFields(WaveAMDMachineSelector &S, const PointerOffset &offset,
@@ -306,6 +323,7 @@ public:
   OpBuilder builder;
   DataFlowSolver &rangeSolver;
   DenseMap<Value, Value> values;
+  DenseMap<Value, Value> workitemWaveIds;
   DenseMap<Value, Value> pointerBases;
   DenseMap<Value, Value> pointerGlobalBases;
   DenseMap<Value, PointerOffset> pointerIndexOffsets;
@@ -326,6 +344,7 @@ public:
   Value lastDmaDstBase;
   Value dmaIssueSkipFlag;
   Value dmaIssueSkipCondition;
+  unsigned wavefrontSize = 0;
   unsigned maxWorkitemIdAxis = 0;
   unsigned nextLabel = 0;
   unsigned bufferResourceBaseBits = 0;
