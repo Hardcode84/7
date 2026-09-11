@@ -271,6 +271,8 @@ class WaveAMDMachine_VOP2AnyVGPRLegality
     : WaveAMDMachine_OperandLegality<"0", "0x3">;
 class WaveAMDMachine_VOP2ValueVGPRLegality
     : WaveAMDMachine_OperandLegality<"0", "0", "0x1">;
+class WaveAMDMachine_VOP2RhsVGPRLegality
+    : WaveAMDMachine_OperandLegality<"0", "0", "0x2">;
 class WaveAMDMachine_VOP2CndmaskVccLegality
     : WaveAMDMachine_OperandLegality<"0x3", "0", "0x2">;
 class WaveAMDMachine_VOP3IntLegality
@@ -1177,6 +1179,18 @@ def WaveAMDMachine_UpdateTupleOp
 def WaveAMDMachine_VAddU32Op
     : WaveAMDMachine_BinaryU32Result<"v_add_u32">,
       WaveAMDMachine_VOP2AnyVGPRLegality;
+def WaveAMDMachine_VSubU32Op
+    : WaveAMDMachine_BinaryU32Result<"v_sub_u32">,
+      WaveAMDMachine_VOP2RhsVGPRLegality;
+def WaveAMDMachine_VSubU32VccOp
+    : WaveAMDMachine_Op<"v_sub_u32_vcc", [WaveAMDMachine_VALU, Pure]>,
+      WaveAMDMachine_VOP2RhsVGPRLegality {
+  let summary = "vector 32-bit subtract (sets VCC)";
+  let arguments = (ins WaveAMDMachine_RegOrImm:$lhs,
+                       WaveAMDMachine_RegOrImm:$rhs);
+  let results = (outs WaveAMDMachine_VGPR1:$result, WaveAMDMachine_VCC:$vcc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
 def WaveAMDMachine_VAddU32VccOp
     : WaveAMDMachine_Op<"v_add_u32_vcc", [WaveAMDMachine_VALU, Pure]>,
       WaveAMDMachine_VOP2AnyVGPRLegality {
@@ -3801,6 +3815,17 @@ def WaveAMDMachine_SBarrierSignalIsFirstOp
 def WaveAMDMachine_SAddI32Op
     : WaveAMDMachine_Op<"s_add_i32", [WaveAMDMachine_SALU, Pure]> {
   let summary = "scalar 32-bit add (sets SCC)";
+  let arguments = (ins
+    WaveAMDMachine_SGPR1:$lhs,
+    WaveAMDMachine_SGPR1OrImm:$rhs
+  );
+  let results = (outs WaveAMDMachine_SGPR1:$result, WaveAMDMachine_SCC:$scc);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` functional-type(operands, results)";
+}
+
+def WaveAMDMachine_SSubI32Op
+    : WaveAMDMachine_Op<"s_sub_i32", [WaveAMDMachine_SALU, Pure]> {
+  let summary = "scalar 32-bit subtract (sets SCC)";
   let arguments = (ins
     WaveAMDMachine_SGPR1:$lhs,
     WaveAMDMachine_SGPR1OrImm:$rhs

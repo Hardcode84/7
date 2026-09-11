@@ -8,8 +8,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: %[[MUL:.*]] = waveamdmachine.s_mul_i32 %[[FIRST]], %[[X]]
 // SELECT: %[[SHL:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[MUL]],
 // SELECT: %[[XOR:[^,]+]], %{{.*}} = waveamdmachine.s_xor_b32 %[[SHL]],
-// SELECT: %[[NEG:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32
-// SELECT: %[[SUB:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[XOR]], %[[NEG]]
+// SELECT: %[[SUB:[^,]+]], %{{.*}} = waveamdmachine.s_sub_i32 %[[XOR]], %[[X]]
 // SELECT: waveamdmachine.s_mul_hi_u32 %[[SUB]], %[[X]]
 func.func @scalar_i32_arith_read_first_operands(%x: i32)
     attributes {wave.kernel} {

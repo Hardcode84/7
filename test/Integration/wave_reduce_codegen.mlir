@@ -9,11 +9,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-LABEL: reduce_ordered_cross_wave:
 // ASM: buffer_load_dwordx3
 // ASM: ds_write_b32
-// ASM: v_xad_u32
 // ASM: s_barrier
 // ASM: ds_read_b32
-// ASM: v_xad_u32
-// ASM: v_add3_u32
+// ASM: v_sub_u32_e32
+// ASM: v_sub_u32_e32
 // ASM: buffer_store_dword
 // ASM: .amdhsa_group_segment_fixed_size 512
 // LOWER-LABEL: func.func @reduce_ordered_cross_wave(

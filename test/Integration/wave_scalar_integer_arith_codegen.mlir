@@ -10,7 +10,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ASM-LABEL: scalar_integer_arith_codegen:
-// ASM: s_xor_b32
+// ASM: s_sub_i32
 // ASM: s_lshr_b32
 // ASM: s_and_b32
 // ASM: s_add_i32

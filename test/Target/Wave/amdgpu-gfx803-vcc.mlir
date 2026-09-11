@@ -14,10 +14,14 @@ func.func @legacy_vcc_ops(%a: !waveamdmachine.reg<vgpr, 1, 0>,
   %sum, %vcc0 = waveamdmachine.v_add_u32_vcc %a, %b
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>)
         -> (!waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vcc, 1>)
+  // CHECK: v_sub_u32
+  %difference, %vcc_sub = waveamdmachine.v_sub_u32_vcc %sum, %c
+      : (!waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vgpr, 1, 2>)
+        -> (!waveamdmachine.reg<vgpr, 1, 4>, !waveamdmachine.reg<vcc, 1>)
   // CHECK: v_cmp_lt_u32
   // CHECK: s_mov_b32 s4, vcc_lo
-  %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %sum, %c
-      : (!waveamdmachine.reg<vgpr, 1, 3>, !waveamdmachine.reg<vgpr, 1, 2>)
+  %vcc1 = waveamdmachine.v_cmp_lt_u32_vcc %difference, %c
+      : (!waveamdmachine.reg<vgpr, 1, 4>, !waveamdmachine.reg<vgpr, 1, 2>)
         -> !waveamdmachine.reg<vcc, 1>
   %mask = waveamdmachine.s_read_vcc_b32 %vcc1
       : (!waveamdmachine.reg<vcc, 1>) -> !waveamdmachine.reg<sgpr, 1, 4>

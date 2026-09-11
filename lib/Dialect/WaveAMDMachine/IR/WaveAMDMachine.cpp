@@ -265,6 +265,12 @@ void VAddU32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                   normalizeMachineU32Ranges(argRanges)));
 }
 
+void VSubU32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
+                                  SetIntRangeFn setResultRange) {
+  setResultRange(getResult(), mlir::intrange::inferSub(
+                                  normalizeMachineU32Ranges(argRanges)));
+}
+
 void VAndB32Op::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                   SetIntRangeFn setResultRange) {
   setResultRange(getResult(), mlir::intrange::inferAnd(

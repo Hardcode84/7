@@ -785,6 +785,7 @@ private:
 
   unsigned sMovB32() const { return opcodes.sMovB32; }
   unsigned sAddI32() const { return opcodes.sAddI32; }
+  unsigned sSubI32() const { return opcodes.sSubI32; }
   unsigned sMulI32() const { return opcodes.sMulI32; }
   unsigned sLshlB32() const { return opcodes.sLshlB32; }
   unsigned sLshrB32() const { return opcodes.sLshrB32; }
@@ -4246,6 +4247,27 @@ private:
     return emitMC(postVIOpcode(llvm::AMDGPU::V_ADD_U32_e32), {dst, lhs, rhs});
   }
 
+  LogicalResult emitVSubU32(llvm::MCOperand dst, llvm::MCOperand lhs,
+                            llvm::MCOperand rhs, Operation &op) {
+    if (isaVersion.Major == 8)
+      return op.emitError("v_sub_u32 without VCC result unsupported on gfx8");
+    if (isaVersion.Major == 9)
+      return emitMC(llvm::AMDGPU::V_SUB_U32_e32_gfx9, {dst, lhs, rhs});
+    return emitMC(postVIOpcode(llvm::AMDGPU::V_SUB_U32_e32), {dst, lhs, rhs});
+  }
+
+  LogicalResult emitVSubU32Vcc(llvm::MCOperand dst, llvm::MCOperand lhs,
+                               llvm::MCOperand rhs) {
+    if (isaVersion.Major == 8)
+      return emitMC(llvm::AMDGPU::V_SUB_U32_e32_vi, {dst, lhs, rhs});
+    if (isaVersion.Major == 9)
+      return emitMC(llvm::AMDGPU::V_SUB_CO_U32_e32_gfx9, {dst, lhs, rhs});
+    llvm::MCOperand vccLo = llvm::MCOperand::createReg(namedPhysReg("vcc_lo"));
+    llvm::MCOperand clamp = llvm::MCOperand::createImm(0);
+    return emitMC(postVIOpcode(llvm::AMDGPU::V_SUB_CO_U32_e64),
+                  {dst, vccLo, lhs, rhs, clamp});
+  }
+
   LogicalResult emitVAddU32Vcc(llvm::MCOperand dst, llvm::MCOperand lhs,
                                llvm::MCOperand rhs) {
     if (isaVersion.Major == 8)
@@ -4879,6 +4901,18 @@ private:
       waveamdmachine::putVGPROperandLast(lhs, rhs);
       return emitVAddU32(toMCOperand(result()), toMCB32(lhs), toMCB32(rhs), op);
     }
+    if (isa<waveamdmachine::VSubU32Op>(op)) {
+      if (failed(requireOperandLegality(op, "v_sub_u32")))
+        return failure();
+      return emitVSubU32(toMCOperand(result()), toMCB32(op.getOperand(0)),
+                         toMCB32(op.getOperand(1)), op);
+    }
+    if (isa<waveamdmachine::VSubU32VccOp>(op)) {
+      if (failed(requireOperandLegality(op, "v_sub_u32_vcc")))
+        return failure();
+      return emitVSubU32Vcc(toMCOperand(result()), toMCB32(op.getOperand(0)),
+                            toMCB32(op.getOperand(1)));
+    }
     if (isa<waveamdmachine::VAddU32VccOp>(op)) {
       Value lhs = op.getOperand(0);
       Value rhs = op.getOperand(1);
@@ -5168,6 +5202,10 @@ private:
     }
     if (isa<waveamdmachine::SAddI32Op>(op))
       return emitMC(sAddI32(), {toMCOperand(op.getResult(0)),
+                                toMCOperand(op.getOperand(0)),
+                                toMCOperand(op.getOperand(1))});
+    if (isa<waveamdmachine::SSubI32Op>(op))
+      return emitMC(sSubI32(), {toMCOperand(op.getResult(0)),
                                 toMCOperand(op.getOperand(0)),
                                 toMCOperand(op.getOperand(1))});
     if (auto add = dyn_cast<waveamdmachine::SAddM0I32Op>(op)) {

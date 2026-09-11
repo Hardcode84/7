@@ -132,8 +132,7 @@ func.func @uniform_i32_add_lhs_immediate(%out: !wave.ptr<#wave.global, i32>) att
 }
 
 // SELECT-LABEL: func.func @uniform_i32_sub_div_rem
-// SELECT: waveamdmachine.s_xor_b32
-// SELECT: waveamdmachine.s_add_i32
+// SELECT: waveamdmachine.s_sub_i32
 // SELECT: waveamdmachine.s_lshr_b32
 // SELECT: waveamdmachine.s_and_b32
 func.func @uniform_i32_sub_div_rem(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
@@ -395,8 +394,7 @@ func.func @uniform_i32_unsigned_high_bit_div_rem(%out: !wave.ptr<#wave.global, i
 }
 
 // SELECT-LABEL: func.func @simd_i32_sub_div_rem
-// SELECT: waveamdmachine.v_xor_b32
-// SELECT: waveamdmachine.v_add_u32
+// SELECT: waveamdmachine.v_sub_u32
 // SELECT: waveamdmachine.v_lshrrev_b32
 // SELECT: waveamdmachine.v_and_b32
 func.func @simd_i32_sub_div_rem(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
@@ -619,12 +617,20 @@ func.func @scalar_arith_cmpi_i64_ordered(%a: i64, %b: i64) -> i32 {
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 
-// gfx8 v_add_u32 writes VCC; keep that clobber explicit in machine IR.
+// gfx8 v_add_u32 and v_sub_u32 write VCC; keep that clobber explicit.
 // SELECT-LABEL: func.func @gfx8_simd_i32_addi
 // SELECT: waveamdmachine.v_add_u32_vcc {{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
 func.func @gfx8_simd_i32_addi(%a: !wave.simd<i32, 64>,
                               %b: !wave.simd<i32, 64>) attributes {wave.kernel} {
   %sum = wave.binary addi %a, %b : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
+  return
+}
+
+// SELECT-LABEL: func.func @gfx8_simd_i32_subi
+// SELECT: waveamdmachine.v_sub_u32_vcc {{.*}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vcc, 1>)
+func.func @gfx8_simd_i32_subi(%a: !wave.simd<i32, 64>,
+                              %b: !wave.simd<i32, 64>) attributes {wave.kernel} {
+  %difference = wave.binary subi %a, %b : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.simd<i32, 64>
   return
 }
 

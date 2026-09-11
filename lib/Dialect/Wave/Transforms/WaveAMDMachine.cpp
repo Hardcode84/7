@@ -3638,18 +3638,13 @@ static Value buildScalarBinaryI32(OpBuilder &builder, Location loc,
 
 static Value subUniformI32(WaveAMDMachineSelector &S, Location loc, Value lhs,
                            Value rhs) {
-  Value notRhs;
-  lhs = S.ensureSGPR1(loc, lhs);
+  lhs = S.materializeSGPR1(loc, lhs);
   rhs = S.ensureSGPR1(loc, rhs);
-  if (std::optional<int64_t> rhsImm = S.getImmediateValue(rhs))
-    notRhs = createImm(S.builder, loc, ~*rhsImm);
-  else
-    notRhs = buildScalarBinaryI32(
-        S.builder, loc,
-        getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
-        BinaryKind::XOrI, rhs, createImm(S.builder, loc, -1));
-  Value negRhs = S.addUniformBytes(loc, notRhs, createImm(S.builder, loc, 1));
-  return S.addUniformBytes(loc, lhs, negRhs);
+  return waveamdmachine::SSubI32Op::create(
+             S.builder, loc,
+             getRegType(S.builder.getContext(), waveamdmachine::RegClass::SGPR),
+             getSCCType(S.builder.getContext()), lhs, rhs)
+      .getResult();
 }
 
 enum class VALUOperandShape { AnyVGPR, VOP2Commutative, ValueVGPR };
@@ -3888,13 +3883,15 @@ LogicalResult WaveAMDMachineSelector::selectBinarySubI32(BinaryOp op) {
     return success();
   }
   rhs = ensureVGPRForVSrc1(op.getLoc(), rhs);
-  Value notRhs = buildVectorBinaryI32(
-      builder, op.getLoc(),
-      getRegType(op.getContext(), waveamdmachine::RegClass::VGPR),
-      BinaryKind::XOrI, rhs, createImm(builder, op.getLoc(), -1));
-  Value negRhs =
-      addByteOffsets(op.getLoc(), notRhs, createImm(builder, op.getLoc(), 1));
-  values[op.getResult()] = addByteOffsets(op.getLoc(), lhs, negRhs);
+  Type resultType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR);
+  if (target && target->isa.Major == 8)
+    values[op.getResult()] = waveamdmachine::VSubU32VccOp::create(
+                                 builder, op.getLoc(), resultType,
+                                 getVCCType(op.getContext()), lhs, rhs)
+                                 .getResult();
+  else
+    values[op.getResult()] = waveamdmachine::VSubU32Op::create(
+        builder, op.getLoc(), resultType, lhs, rhs);
   eraseIfTopLevel(op);
   return success();
 }
