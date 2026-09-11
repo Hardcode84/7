@@ -175,9 +175,9 @@ class _MmaVariant:
     kind: str
     ab_registers: int
     acc_registers: int
-    wave_size: int = 32
-    lane_k_elems: int = 0
-    k_tile: int = 16
+    wave_size: int
+    lane_k_elems: int
+    k_tile: int
 
     @property
     def lds_dwords_per_frag(self) -> int:
@@ -185,10 +185,10 @@ class _MmaVariant:
 
 
 _MMA_VARIANTS = {
-    ("wmma", "f16"): _MmaVariant("wmma", "wmma.f32.16x16x16.f16", 8, 8),
-    ("wmma", "bf16"): _MmaVariant("wmma", "wmma.f32.16x16x16.bf16", 8, 8),
-    ("mfma", "f16"): _MmaVariant("mfma", "mfma.f32.16x16x16.f16", 2, 4),
-    ("mfma", "bf16"): _MmaVariant("mfma", "mfma.f32.16x16x16.bf16", 2, 4),
+    ("wmma", "f16"): _MmaVariant("wmma", "wmma.f32.16x16x16.f16", 8, 8, 32, 0, 16),
+    ("wmma", "bf16"): _MmaVariant("wmma", "wmma.f32.16x16x16.bf16", 8, 8, 32, 0, 16),
+    ("mfma", "f16"): _MmaVariant("mfma", "mfma.f32.16x16x16.f16", 2, 4, 64, 4, 16),
+    ("mfma", "bf16"): _MmaVariant("mfma", "mfma.f32.16x16x16.bf16", 2, 4, 64, 4, 16),
     ("mfma_gfx950", "f16"): _MmaVariant(
         "mfma_gfx950", "mfma.f32.16x16x32.f16", 4, 4, 64, 8, 32
     ),

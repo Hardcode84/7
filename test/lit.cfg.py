@@ -118,8 +118,8 @@ if _chip:
     if _matrix_family == "gfx1250":
         config.available_features.add("host-supports-amdgpu-gfx1250")
         config.available_features.add("host-supports-amdgpu-gfx1250-wmma")
-    if _capabilities and _capabilities.get("target") == "gfx950":
-        config.available_features.add("host-supports-amdgpu-gfx950")
+    if _capabilities and _capabilities.get("target") in ("gfx942", "gfx950"):
+        config.available_features.add(f"host-supports-amdgpu-{_capabilities['target']}")
 
 # Runtime shared libs for the MLIR GPU integration tests.
 for name, env_key in [

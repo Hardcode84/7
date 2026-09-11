@@ -1068,7 +1068,7 @@ print(static_bld.module)
 # CHECK: f16-ref-rounding -132.5625 -132.5
 # CHECK: mxfp4-random-module ok
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
-# CHECK-SAME: wave.lds_size = 2048
+# CHECK-SAME: wave.lds_size = 4096
 # CHECK-SAME: waveamdmachine.enable_multi_wave_specialization
 # CHECK-NOT: wavemeta.
 # CHECK: %[[TRIP:.*]] = wave.assume %arg3 as "x" {{\[.*\]}} : i32
