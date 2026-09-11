@@ -877,43 +877,37 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
   lhs = asType(builder, loc, lhs, type);
   rhs = asType(builder, loc, rhs, type);
   unsigned bits = elementBits(type);
-  Value zero = createConstantLike(builder, loc, type, 0);
-  Value lhsNeg =
-      createCompare(builder, loc, arith::CmpIPredicate::slt, lhs, zero, type);
-  Value absLhs = createSelect(builder, loc, type, lhsNeg,
-                              createNeg(builder, loc, type, lhs), lhs);
+  Value signShift = createShiftAmount(builder, loc, type, bits - 1);
+  Value lhsSign = createShrS(builder, loc, type, lhs, signShift);
+  Value absLhs = createSub(
+      builder, loc, type, createXor(builder, loc, type, lhs, lhsSign), lhsSign);
 
   std::optional<APInt> rhsConst = getConstantAPInt(rhs, bits);
   Value absRhs;
+  Value quotientSign = lhsSign;
   if (divisorPositive)
     absRhs = rhs;
   else if (rhsConst)
     absRhs = createConstantLike(builder, loc, type,
                                 signedAbs(*rhsConst).getZExtValue());
   else {
-    Value rhsNeg =
-        createCompare(builder, loc, arith::CmpIPredicate::slt, rhs, zero, type);
-    absRhs = createSelect(builder, loc, type, rhsNeg,
-                          createNeg(builder, loc, type, rhs), rhs);
+    Value rhsSign = createShrS(builder, loc, type, rhs, signShift);
+    absRhs = createSub(builder, loc, type,
+                       createXor(builder, loc, type, rhs, rhsSign), rhsSign);
+    quotientSign = createXor(builder, loc, type, lhsSign, rhsSign);
   }
 
   DivRemValues unsignedResult =
       createUnsignedDivRem(builder, loc, type, absLhs, absRhs,
                            /*useNativeI32ConstMulHi=*/rhsConst.has_value());
-  Value quotientNeg = lhsNeg;
-  if (!divisorPositive) {
-    Value signBits = createXor(builder, loc, type, lhs, rhs);
-    quotientNeg = createCompare(builder, loc, arith::CmpIPredicate::slt,
-                                signBits, zero, type);
-  }
-  Value quotient =
-      createSelect(builder, loc, type, quotientNeg,
-                   createNeg(builder, loc, type, unsignedResult.quotient),
-                   unsignedResult.quotient);
-  Value remainder =
-      createSelect(builder, loc, type, lhsNeg,
-                   createNeg(builder, loc, type, unsignedResult.remainder),
-                   unsignedResult.remainder);
+  Value quotient = createSub(
+      builder, loc, type,
+      createXor(builder, loc, type, unsignedResult.quotient, quotientSign),
+      quotientSign);
+  Value remainder = createSub(
+      builder, loc, type,
+      createXor(builder, loc, type, unsignedResult.remainder, lhsSign),
+      lhsSign);
   return DivRemValues{quotient, remainder};
 }
 

@@ -1,5 +1,5 @@
 // RUN: wave-opt --wave-expand-integer-div-rem --canonicalize --cse %s \
-// RUN:   | FileCheck %s --check-prefix=IR --implicit-check-not="wave.binary xori" \
+// RUN:   | FileCheck %s --check-prefix=IR \
 // RUN:       --implicit-check-not="wave.cmpi slt" --implicit-check-not="arith.cmpi slt"
 // RUN: wave-translate --wave-to-amdgpu-asm %s > %t.s
 // RUN: FileCheck %s --check-prefix=ASM < %t.s
@@ -8,13 +8,16 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // IR-LABEL: func.func @positive_divisor_scalar
-// IR: [[NEG:%.*]] = arith.cmpi slt,
+// IR: [[SIGN:%.*]] = wave.binary shrsi
+// IR: wave.binary xori {{.*}}, [[SIGN]]
+// IR: wave.binary subi {{.*}}, [[SIGN]]
 // IR: wave.urecip
-// IR: wave.select [[NEG]],
-// IR: wave.select [[NEG]],
+// IR: wave.binary xori {{.*}}, [[SIGN]]
+// IR: wave.binary subi {{.*}}, [[SIGN]]
 // ASM-LABEL: positive_divisor_scalar:
-// ASM: s_cmp_lt_i32
-// ASM-NOT: s_cmp_lt_i32
+// ASM: s_ashr_i32
+// ASM: s_xor_b32
+// ASM: s_sub_i32
 // ASM: v_rcp_iflag_f32
 // ASM-NOT: s_cmp_lt_i32
 // ASM: .amdhsa_kernel positive_divisor_scalar
@@ -46,13 +49,16 @@ func.func @positive_divisor_scalar(%out: !wave.ptr<#wave.global, i32>,
 }
 
 // IR-LABEL: func.func @positive_divisor_narrow
-// IR: [[NEG:%.*]] = arith.cmpi slt,
+// IR: [[SIGN:%.*]] = wave.binary shrsi
+// IR: wave.binary xori {{.*}}, [[SIGN]]
+// IR: wave.binary subi {{.*}}, [[SIGN]]
 // IR: wave.urecip
-// IR: wave.select [[NEG]],
-// IR: wave.select [[NEG]],
+// IR: wave.binary xori {{.*}}, [[SIGN]]
+// IR: wave.binary subi {{.*}}, [[SIGN]]
 // ASM-LABEL: positive_divisor_narrow:
-// ASM: s_cmp_lt_i32
-// ASM-NOT: s_cmp_lt_i32
+// ASM: s_ashr_i32
+// ASM: s_xor_b32
+// ASM: s_sub_i32
 // ASM: v_rcp_iflag_f32
 // ASM-NOT: s_cmp_lt_i32
 // ASM: .amdhsa_kernel positive_divisor_narrow
@@ -89,13 +95,16 @@ func.func @positive_divisor_narrow(%out: !wave.ptr<#wave.global, i32>,
 }
 
 // IR-LABEL: func.func @positive_divisor_simd
-// IR: [[NEG:%.*]] = wave.cmpi slt
+// IR: [[SIGN:%.*]] = wave.binary shrsi
+// IR: wave.binary xori {{.*}}, [[SIGN]]
+// IR: wave.binary subi {{.*}}, [[SIGN]]
 // IR: wave.urecip
-// IR: wave.select [[NEG]],
-// IR: wave.select [[NEG]],
+// IR: wave.binary xori {{.*}}, [[SIGN]]
+// IR: wave.binary subi {{.*}}, [[SIGN]]
 // ASM-LABEL: positive_divisor_simd:
-// ASM: v_cmp_lt_i32
-// ASM-NOT: v_cmp_lt_i32
+// ASM: v_ashrrev_i32
+// ASM: v_xor_b32
+// ASM: v_sub_nc_u32
 // ASM: v_rcp_iflag_f32
 // ASM-NOT: v_cmp_lt_i32
 // ASM: .amdhsa_kernel positive_divisor_simd

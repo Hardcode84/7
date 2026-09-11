@@ -37,12 +37,11 @@ func.func @const_magic_i32(%x: i32) -> (i32, i32) {
 // -----
 
 // CHECK-LABEL: func.func @signed_simd_i32
-// CHECK: wave.cmpi slt
+// CHECK: wave.binary shrsi
 // CHECK: wave.urecip
 // CHECK: wave.binary mulhui
 // CHECK: wave.cmpi uge
 // CHECK: wave.binary xori
-// CHECK: wave.select
 // CHECK-NOT: divsi
 func.func @signed_simd_i32(%x: !wave.simd<i32, 32>, %d: i32)
     -> !wave.simd<i32, 32> {
@@ -94,8 +93,9 @@ func.func @signed_const_i32_rem3_nonnegative(%x: i32) -> i32 {
 
 // CHECK-LABEL: func.func @signed_const_i32_divrem_unknown_sign
 // CHECK-SAME: ([[X:%.*]]: i32)
-// CHECK: [[NEG:%.*]] = arith.cmpi slt, [[X]]
-// CHECK: [[ABS:%.*]] = wave.select [[NEG]]
+// CHECK: [[SIGN:%.*]] = wave.binary shrsi [[X]]
+// CHECK: [[XOR:%.*]] = wave.binary xori [[X]], [[SIGN]]
+// CHECK: [[ABS:%.*]] = wave.binary subi [[XOR]], [[SIGN]]
 // CHECK-NOT: wave.binary andi
 // CHECK: [[HI:%.*]] = wave.binary mulhui [[ABS]]
 // CHECK-NOT: wave.binary andi
@@ -116,8 +116,9 @@ func.func @signed_const_i32_divrem_unknown_sign(%x: i32) -> (i32, i32) {
 
 // CHECK-LABEL: func.func @signed_const_simd_i32_rem_negative_divisor
 // CHECK-SAME: ([[X:%.*]]: !wave.simd<i32, 32>)
-// CHECK: [[NEG:%.*]] = wave.cmpi slt [[X]]
-// CHECK: [[ABS:%.*]] = wave.select [[NEG]]
+// CHECK: [[SIGN:%.*]] = wave.binary shrsi [[X]]
+// CHECK: [[XOR:%.*]] = wave.binary xori [[X]], [[SIGN]]
+// CHECK: [[ABS:%.*]] = wave.binary subi [[XOR]], [[SIGN]]
 // CHECK-NOT: wave.binary andi
 // CHECK: [[HI:%.*]] = wave.binary mulhui [[ABS]]
 // CHECK-NOT: wave.binary andi
@@ -477,7 +478,7 @@ func.func @signed_unsigned_loop_i32_rem3_bounded_nonnegative() -> i32 {
 
 // CHECK-LABEL: func.func @signed_unsigned_loop_i32_rem3_high_unsigned_bound
 // CHECK: scf.for unsigned [[IV:%[^ ]+]] =
-// CHECK: arith.cmpi slt
+// CHECK: wave.binary shrsi
 // CHECK-NOT: remsi
 func.func @signed_unsigned_loop_i32_rem3_high_unsigned_bound() -> i32 {
   %c0 = arith.constant 0 : i32
@@ -654,7 +655,9 @@ func.func @normalize_workgroup_divrem() -> (i32, i32) {
 // CHECK-LABEL: func.func @positive_assumption_sibling
 // CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
 // CHECK: [[POS:%.*]] = wave.assume [[D]]
-// CHECK: wave.binary xori [[X]], [[D]]
+// CHECK: [[XSIGN:%.*]] = wave.binary shrsi [[X]]
+// CHECK: [[DSIGN:%.*]] = wave.binary shrsi [[D]]
+// CHECK: wave.binary xori [[XSIGN]], [[DSIGN]]
 // CHECK: return {{%.*}}, [[POS]] : i32, i32
 // NORMALIZE-LABEL: func.func @positive_assumption_sibling
 // NORMALIZE: wave.binary divsi
@@ -669,7 +672,9 @@ func.func @positive_assumption_sibling(%x: i32, %d: i32) -> (i32, i32) {
 // CHECK-LABEL: func.func @nonnegative_divisor_not_positive
 // CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
 // CHECK: [[NONNEG:%.*]] = wave.assume [[D]]
-// CHECK: wave.binary xori [[X]], [[NONNEG]]
+// CHECK: [[XSIGN:%.*]] = wave.binary shrsi [[X]]
+// CHECK: [[DSIGN:%.*]] = wave.binary shrsi [[NONNEG]]
+// CHECK: wave.binary xori [[XSIGN]], [[DSIGN]]
 // NORMALIZE-LABEL: func.func @nonnegative_divisor_not_positive
 // NORMALIZE: wave.binary divsi
 func.func @nonnegative_divisor_not_positive(%x: i32, %d: i32) -> i32 {

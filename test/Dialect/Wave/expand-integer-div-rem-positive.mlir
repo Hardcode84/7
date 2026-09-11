@@ -1,13 +1,13 @@
 // RUN: wave-opt --split-input-file --wave-expand-integer-div-rem --canonicalize --cse %s \
 // RUN:   | FileCheck %s --implicit-check-not="arith.cmpi slt" \
-// RUN:       --implicit-check-not="wave.cmpi slt" --implicit-check-not="wave.binary xori"
+// RUN:       --implicit-check-not="wave.cmpi slt"
 
 // CHECK-LABEL: func.func @positive_divisor_scalar
-// CHECK: [[NEG:%.*]] = arith.cmpi slt,
+// CHECK: [[SIGN:%.*]] = wave.binary shrsi
+// CHECK: wave.binary xori {{.*}}, [[SIGN]]
+// CHECK: wave.binary subi {{.*}}, [[SIGN]]
 // CHECK: wave.urecip
-// CHECK: [[Q:%.*]] = wave.select [[NEG]],
-// CHECK: [[R:%.*]] = wave.select [[NEG]],
-// CHECK: return [[Q]], [[R]] : i32, i32
+// CHECK: return {{%.*}}, {{%.*}} : i32, i32
 func.func @positive_divisor_scalar(%x: i32, %d: i32) -> (i32, i32) {
   %pos = wave.assume %d as "d" [#wave.pred<"d >= 1">] : i32
   %q = wave.binary divsi %x, %pos : i32, i32 -> i32
@@ -18,11 +18,11 @@ func.func @positive_divisor_scalar(%x: i32, %d: i32) -> (i32, i32) {
 // -----
 
 // CHECK-LABEL: func.func @positive_divisor_simd
-// CHECK: [[NEG:%.*]] = wave.cmpi slt
+// CHECK: [[SIGN:%.*]] = wave.binary shrsi
+// CHECK: wave.binary xori {{.*}}, [[SIGN]]
+// CHECK: wave.binary subi {{.*}}, [[SIGN]]
 // CHECK: wave.urecip
-// CHECK: [[Q:%.*]] = wave.select [[NEG]],
-// CHECK: [[R:%.*]] = wave.select [[NEG]],
-// CHECK: return [[Q]], [[R]] : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+// CHECK: return {{%.*}}, {{%.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32>
 func.func @positive_divisor_simd(%x: !wave.simd<i32, 32>, %d: i32)
       -> (!wave.simd<i32, 32>, !wave.simd<i32, 32>) {
   %pos = wave.assume %d as "d" [#wave.pred<"d >= 1">] : i32
@@ -37,11 +37,11 @@ func.func @positive_divisor_simd(%x: !wave.simd<i32, 32>, %d: i32)
 // -----
 
 // CHECK-LABEL: func.func @positive_divisor_narrow_i64
-// CHECK: [[NEG:%.*]] = arith.cmpi slt,
+// CHECK: [[SIGN:%.*]] = wave.binary shrsi
+// CHECK: wave.binary xori {{.*}}, [[SIGN]]
+// CHECK: wave.binary subi {{.*}}, [[SIGN]]
 // CHECK: wave.urecip
-// CHECK: [[Q:%.*]] = wave.select [[NEG]],
-// CHECK: [[R:%.*]] = wave.select [[NEG]],
-// CHECK: return [[Q]], [[R]] : i32, i32
+// CHECK: return {{%.*}}, {{%.*}} : i32, i32
 func.func @positive_divisor_narrow_i64(%x: i64, %d: i64) -> (i32, i32) {
   %bx = wave.assume %x as "x"
       [#wave.pred<"x >= -2147483648">, #wave.pred<"x <= 2147483647">] : i64
@@ -57,11 +57,11 @@ func.func @positive_divisor_narrow_i64(%x: i64, %d: i64) -> (i32, i32) {
 // -----
 
 // CHECK-LABEL: func.func @positive_divisor_narrow_index
-// CHECK: [[NEG:%.*]] = arith.cmpi slt,
+// CHECK: [[SIGN:%.*]] = wave.binary shrsi
+// CHECK: wave.binary xori {{.*}}, [[SIGN]]
+// CHECK: wave.binary subi {{.*}}, [[SIGN]]
 // CHECK: wave.urecip
-// CHECK: [[Q:%.*]] = wave.select [[NEG]],
-// CHECK: [[R:%.*]] = wave.select [[NEG]],
-// CHECK: return [[Q]], [[R]] : i32, i32
+// CHECK: return {{%.*}}, {{%.*}} : i32, i32
 func.func @positive_divisor_narrow_index(%x: index, %d: index) -> (i32, i32) {
   %bx = wave.assume %x as "x"
       [#wave.pred<"x >= -2147483648">, #wave.pred<"x <= 2147483647">] : index
@@ -77,11 +77,11 @@ func.func @positive_divisor_narrow_index(%x: index, %d: index) -> (i32, i32) {
 // -----
 
 // CHECK-LABEL: func.func @positive_constant_divisor
-// CHECK: [[NEG:%.*]] = arith.cmpi slt,
+// CHECK: [[SIGN:%.*]] = wave.binary shrsi
+// CHECK: wave.binary xori {{.*}}, [[SIGN]]
+// CHECK: wave.binary subi {{.*}}, [[SIGN]]
 // CHECK: wave.binary mulhui
-// CHECK: [[Q:%.*]] = wave.select [[NEG]],
-// CHECK: [[R:%.*]] = wave.select [[NEG]],
-// CHECK: return [[Q]], [[R]] : i32, i32
+// CHECK: return {{%.*}}, {{%.*}} : i32, i32
 func.func @positive_constant_divisor(%x: i32) -> (i32, i32) {
   %three = arith.constant 3 : i32
   %q = wave.binary divsi %x, %three : i32, i32 -> i32
