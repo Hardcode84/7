@@ -125,9 +125,9 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-Integration tests under `test/Integration/` need a real AMDGPU device
-and `mlir-runner` with the ROCm runtime; the rest of the lit suite is
-host-only.
+GPU runtime tests under `test/Integration/` need an AMDGPU device or the
+[Mirage/RocJITsu simulator](docs/AMDGPUEmulatorTesting.md), plus the ROCm
+runtime. Compilation tests can run without a GPU.
 
 Perf-sensitive assembly goldens live under `test/PerfGolden/`. Each
 kernel has a small `test_*.py` script, checked-in `.s` golden, and
