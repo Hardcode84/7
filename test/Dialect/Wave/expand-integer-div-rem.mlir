@@ -74,6 +74,28 @@ func.func @signed_dynamic_i32_nonnegative_positive(%x: i32, %d: i32)
 
 // -----
 
+// A positive divisor cannot change the quotient sign.  Keep the dividend
+// sign test, but do not materialize a divisor sign test or lhs/rhs xor.
+// CHECK-LABEL: func.func @signed_dynamic_i32_positive_divisor
+// CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
+// CHECK: [[ZERO:%.*]] = arith.constant 0
+// CHECK: [[POS:%.*]] = wave.assume [[D]]
+// CHECK: [[NEG:%.*]] = arith.cmpi slt, [[X]], [[ZERO]]
+// CHECK-NOT: arith.cmpi slt
+// CHECK-NOT: wave.binary xori
+// CHECK: wave.urecip [[POS]]
+// CHECK: wave.select [[NEG]]
+// CHECK: return
+// NORMALIZE-LABEL: func.func @signed_dynamic_i32_positive_divisor
+// NORMALIZE: wave.binary divsi
+func.func @signed_dynamic_i32_positive_divisor(%x: i32, %d: i32) -> i32 {
+  %pos = wave.assume %d as "d" [#wave.pred<"d >= 1">] : i32
+  %q = wave.binary divsi %x, %pos : i32, i32 -> i32
+  return %q : i32
+}
+
+// -----
+
 // CHECK-LABEL: func.func @signed_const_i32_rem3_nonnegative
 // CHECK-SAME: ([[X:%.*]]: i32)
 // CHECK: [[NONNEG:%.*]] = wave.assume [[X]]

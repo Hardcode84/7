@@ -362,7 +362,9 @@ def WaveExpandIntegerDivRem : Pass<"wave-expand-integer-div-rem"> {
     before machine selection. Constant unsigned divisors use magic-number
     quotient formation; proven dynamic power-of-two divisors use CTZ plus
     shifts/masks; dynamic i32 divisors use reciprocal refinement. Signed
-    operations divide magnitudes and repair quotient/remainder signs.
+    operations divide magnitudes and repair quotient/remainder signs. When the
+    divisor is proven positive, the signed expansion reuses the dividend sign
+    and omits redundant divisor normalization and quotient-sign arithmetic.
   }];
   let dependentDialects = [
     "arith::ArithDialect",

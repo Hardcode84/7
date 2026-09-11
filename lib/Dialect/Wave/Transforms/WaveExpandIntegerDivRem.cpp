@@ -872,7 +872,8 @@ tryCreateSignedPositivePow2Value(OpBuilder &builder, Location loc, Type type,
 }
 
 static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
-                                       Type type, Value lhs, Value rhs) {
+                                       Type type, Value lhs, Value rhs,
+                                       bool divisorPositive) {
   lhs = asType(builder, loc, lhs, type);
   rhs = asType(builder, loc, rhs, type);
   unsigned bits = elementBits(type);
@@ -884,7 +885,9 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
 
   std::optional<APInt> rhsConst = getConstantAPInt(rhs, bits);
   Value absRhs;
-  if (rhsConst) {
+  if (divisorPositive) {
+    absRhs = rhs;
+  } else if (rhsConst) {
     absRhs = createConstantLike(builder, loc, type,
                                 signedAbs(*rhsConst).getZExtValue());
   } else {
@@ -897,9 +900,12 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
   DivRemValues unsignedResult =
       createUnsignedDivRem(builder, loc, type, absLhs, absRhs,
                            /*useNativeI32ConstMulHi=*/rhsConst.has_value());
-  Value signBits = createXor(builder, loc, type, lhs, rhs);
-  Value quotientNeg = createCompare(builder, loc, arith::CmpIPredicate::slt,
-                                    signBits, zero, type);
+  Value quotientNeg = lhsNeg;
+  if (!divisorPositive) {
+    Value signBits = createXor(builder, loc, type, lhs, rhs);
+    quotientNeg = createCompare(builder, loc, arith::CmpIPredicate::slt,
+                                signBits, zero, type);
+  }
   Value quotient =
       createSelect(builder, loc, type, quotientNeg,
                    createNeg(builder, loc, type, unsignedResult.quotient),
@@ -961,7 +967,9 @@ createNarrowDivRem(IRRewriter &rewriter, BinaryOp op, Value lhs, Value rhs,
       !isProvenSignedI32RangeWithLowerBound(solver, store, op.getRhs(),
                                             signedI32Min))
     return std::nullopt;
-  DivRemValues result = createSignedDivRem(rewriter, loc, i32, lhs, rhs);
+  bool divisorPositive = isProvenPositive(solver, store, op.getRhs());
+  DivRemValues result = createSignedDivRem(rewriter, loc, i32, lhs, rhs,
+                                           divisorPositive);
   Value value = kind == BinaryKind::DivSI ? result.quotient : result.remainder;
   return NarrowDivRemResult{value, CastExtension::Sign};
 }
@@ -1366,7 +1374,9 @@ static Value expandDivRem(IRRewriter &rewriter, BinaryOp op,
     return *signedPow2;
   DivRemValues result =
       isSignedDivRem(kind)
-          ? createSignedDivRem(rewriter, loc, type, op.getLhs(), op.getRhs())
+          ? createSignedDivRem(
+                rewriter, loc, type, op.getLhs(), op.getRhs(),
+                isProvenPositive(solver, store, op.getRhs()))
           : createUnsignedDivRem(rewriter, loc, type, op.getLhs(), op.getRhs());
   if (kind == BinaryKind::DivUI || kind == BinaryKind::DivSI)
     return result.quotient;
