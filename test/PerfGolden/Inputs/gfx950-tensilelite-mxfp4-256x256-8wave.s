@@ -1958,7 +1958,7 @@ wmma_f16_matmul_tiled:
 		v_mov_b32_e32 v65, v1
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
-		s_add_i32 s0, s12, -1
+		s_sub_i32 s0, s12, 1
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[8:11], v[16:19], v[32:35], v[8:11], v6, v14 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_and_b32 s0, s0, 1
 		s_lshl_b32 s0, s0, 16
