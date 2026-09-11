@@ -153,6 +153,13 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 - New generated golden file types need REUSE coverage. Python helpers must
   pass Black and Ruff before commit.
 
+## Simulator Tests
+
+- Run `python build_tools/amdgpu_simulator.py setup`, then
+  `python build_tools/amdgpu_simulator.py test` for gfx942, gfx950, and gfx1250
+  correctness checks without a GPU. See [the simulator guide](docs/AMDGPUEmulatorTesting.md).
+- Use target hardware for performance measurements.
+
 ## Local Performance Repro
 
 - Before GEMM perf calibration, especially after branch switch or rebase,
