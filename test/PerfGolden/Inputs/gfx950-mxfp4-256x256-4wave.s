@@ -626,6 +626,8 @@ wmma_f16_matmul_tiled:
 		v_add3_u32 v255, v18, v1, s5
 .Lwmma_f16_matmul_tiled.exec_endif_5:
 		s_mov_b64 exec, s[42:43]
+		s_waitcnt vmcnt(8)
+		s_barrier
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[52:55], a[4:7], a[84:87], v[52:55], v236, v248 op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_mov_b32 m0, s1
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[56:59], a[4:7], a[88:91], v[56:59], v236, v248 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
@@ -758,10 +760,6 @@ wmma_f16_matmul_tiled:
 		s_add_i32 m0, m0, 0x2000
 		v_add3_u32 v19, v19, v22, v10
 		buffer_load_dwordx4 v38, s[24:27], 0 offen lds
-		s_add_u32 s24, s24, 0x80
-		s_addc_u32 s25, s25, 0
-		s_cmp_lt_i32 s30, 30
-		s_barrier
 		ds_read_b128 a[4:7], v2
 		ds_read_b128 a[8:11], v2 offset:1024
 		ds_read_b128 a[12:15], v2 offset:2048
@@ -794,6 +792,9 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 a[120:123], v19 offset:54272
 		ds_read_b128 a[124:127], v19 offset:55296
 		ds_read_b128 a[128:131], v19 offset:56320
+		s_add_u32 s24, s24, 0x80
+		s_addc_u32 s25, s25, 0
+		s_cmp_lt_i32 s30, 30
 		s_cbranch_scc1 .Lwmma_f16_matmul_tiled.loop_head_0
 .Lwmma_f16_matmul_tiled.loop_exit_0:
 		s_waitcnt lgkmcnt(0)

@@ -5371,8 +5371,12 @@ def _use_mxfp4_shared_scale_barrier(cfg: _MatmulConfig) -> bool:
     return regional and batched_regs
 
 
-def _use_reuse_data_dma_issue(cfg: _MatmulConfig) -> bool:
+def _use_early_data_dma_issue(cfg: _MatmulConfig) -> bool:
     return cfg.use_dma_lds and cfg.virtual_k_steps > 2
+
+
+def _can_issue_data_dma_after_reuse(cfg: _MatmulConfig) -> bool:
+    return cfg.use_dma_lds and _dma_buffer_count(cfg) > 2
 
 
 def _emit_dma_step(
@@ -5430,7 +5434,9 @@ def _emit_dma_step(
 
     def dma_after_token() -> dsl.Value:
         return (
-            state.reuse_token if _use_reuse_data_dma_issue(cfg) else get_ready_token()
+            state.reuse_token
+            if _can_issue_data_dma_after_reuse(cfg)
+            else get_ready_token()
         )
 
     def issue_next_dma() -> dsl.Value:
@@ -5506,7 +5512,7 @@ def _emit_dma_step(
             state.scale_token,
         )
         next_a_ready = get_data_ready_token()
-        if _use_reuse_data_dma_issue(cfg):
+        if _use_early_data_dma_issue(cfg):
             issue_next_dma()
         next_b_ptrs = _aiter_b_fragment_ptrs(bld, cfg, coords, next_scale_step)
         ready_a_ptrs = _offset_ptrs(bld, staging.a_dma_read_ptrs, ready_lds_offset)
@@ -5736,6 +5742,8 @@ def _emit_dma_step(
                         scale_reuse_token,
                         barrier_after=False,
                     )
+                    if _use_early_data_dma_issue(cfg):
+                        issue_next_dma()
                 new_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
                     bld,
                     cfg,
@@ -5785,7 +5793,7 @@ def _emit_dma_step(
                 _offset_ptrs(bld, staging.a_dma_read_ptrs, ready_lds_offset),
                 _offset_ptrs(bld, staging.b_dma_read_ptrs, ready_lds_offset),
             )
-        if _use_reuse_data_dma_issue(cfg):
+        if _use_early_data_dma_issue(cfg):
             issue_next_dma()
         if (
             not cfg.uses_packed_mxfp4

@@ -63,11 +63,12 @@ _PHASED_DMA_SCHEDULE_ARGS: dict[str, dict[str, int | bool]] = {
     _PHASED_DMA_PROFILE: {
         "issue_group_size": 7,
         "initial_delay_cycles": 68,
-        "loop_delay_cycles": 46,
-        "loop_overlap_cycles": 33,
+        "loop_delay_cycles": 0,
+        "loop_overlap_cycles": 0,
         "delayed_waves": 4,
         "fetch_alignment": 32,
         "fetch_phase": 16,
+        "spatial_subpanel_pipeline": True,
     },
     _SPATIAL_DMA_PROFILE: {
         "issue_group_size": 7,

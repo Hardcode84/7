@@ -6,7 +6,7 @@
 // RUN:   | FileCheck %s --check-prefix=F4R
 // RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-4wave --m=1024 --n=512 --k=256 --variants=scheduled --iters=2 --warmup=1 --repeats=1 --hpl --multi-wave-specialize \
 // RUN:   | FileCheck %s --check-prefix=F4H
-// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-8wave --m=1024 --n=512 --k=256 --variants=scheduled --iters=2 --warmup=1 --repeats=1 --rand-int --multi-wave-specialize \
+// RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-8wave --m=1024 --n=512 --k=512 --variants=scheduled --iters=2 --warmup=1 --repeats=1 --rand-int --multi-wave-specialize \
 // RUN:   | FileCheck %s --check-prefix=F8
 // RUN: %python %S/../../tools/wave-matmul-calibrate/wave-matmul-calibrate.py --chip=%chip --build-dir=%wave_obj_root --kernel-profile=gfx950-f16-256x256-8wave-spatial --m=1024 --n=512 --k=256 --variants=scheduled --iters=2 --warmup=1 --repeats=1 --seed=23 \
 // RUN:   | FileCheck %s --check-prefix=F8S
