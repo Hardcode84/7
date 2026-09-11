@@ -39,6 +39,12 @@ else:
 config.test_source_root = str(Path(__file__).parent)
 config.test_exec_root = str(Path(config.wave_mlir_obj_root) / "test")
 
+_simulator = Path(config.wave_mlir_obj_root) / "simulator"
+if (_simulator / "sdk-venv/bin/rocm-sdk").is_file() and (
+    _simulator / "libmlir_rocm_runtime.so"
+).is_file():
+    config.available_features.add("host-has-amdgpu-simulator")
+
 llvm_config.with_environment("WAVE_BUILD_DIR", config.wave_mlir_obj_root)
 llvm_config.with_environment("WAVE_LLVM_TOOLS_DIR", config.llvm_tools_dir)
 config.substitutions.append(("%PATH%", config.environment["PATH"]))

@@ -147,8 +147,13 @@ def default_shared_libs(
     root = repo_root() if root is None else root
     build_dir = default_build_dir(root) if build_dir is None else build_dir
     llvm_lib_dir = llvm_install_dir(build_dir) / "lib"
+    rocm_runtime = os.environ.get("MLIR_ROCM_RUNTIME")
     return [
-        llvm_lib_dir / "libmlir_rocm_runtime.so",
+        (
+            Path(rocm_runtime)
+            if rocm_runtime
+            else llvm_lib_dir / "libmlir_rocm_runtime.so"
+        ),
         llvm_lib_dir / "libmlir_runner_utils.so",
         build_dir / "lib" / "libwave_runtime.so",
     ]
