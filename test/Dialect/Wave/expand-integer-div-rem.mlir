@@ -648,3 +648,32 @@ func.func @normalize_workgroup_divrem() -> (i32, i32) {
   %r = wave.binary remsi %wg, %eight : i32, i32 -> i32
   return %q, %r : i32, i32
 }
+
+// -----
+
+// CHECK-LABEL: func.func @positive_assumption_sibling
+// CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
+// CHECK: [[POS:%.*]] = wave.assume [[D]]
+// CHECK: wave.binary xori [[X]], [[D]]
+// CHECK: return {{%.*}}, [[POS]] : i32, i32
+// NORMALIZE-LABEL: func.func @positive_assumption_sibling
+// NORMALIZE: wave.binary divsi
+func.func @positive_assumption_sibling(%x: i32, %d: i32) -> (i32, i32) {
+  %pos = wave.assume %d as "d" [#wave.pred<"d >= 1">] : i32
+  %q = wave.binary divsi %x, %d : i32, i32 -> i32
+  return %q, %pos : i32, i32
+}
+
+// -----
+
+// CHECK-LABEL: func.func @nonnegative_divisor_not_positive
+// CHECK-SAME: ([[X:%.*]]: i32, [[D:%.*]]: i32)
+// CHECK: [[NONNEG:%.*]] = wave.assume [[D]]
+// CHECK: wave.binary xori [[X]], [[NONNEG]]
+// NORMALIZE-LABEL: func.func @nonnegative_divisor_not_positive
+// NORMALIZE: wave.binary divsi
+func.func @nonnegative_divisor_not_positive(%x: i32, %d: i32) -> i32 {
+  %nonneg = wave.assume %d as "d" [#wave.pred<"d >= 0">] : i32
+  %q = wave.binary divsi %x, %nonneg : i32, i32 -> i32
+  return %q : i32
+}
