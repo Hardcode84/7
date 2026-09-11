@@ -1280,6 +1280,13 @@ static FailureOr<DmaSymbols> buildDmaSymbols(sym::Store &store) {
     return failure();
   return DmaSymbols{*formal, *group, *within, *zero, *one};
 }
+static FailureOr<sym::ExprHandle>
+buildDmaWaveId(sym::Store &store, sym::ExprHandle item, int64_t waveWidth) {
+  FailureOr<sym::ExprHandle> quotient =
+      composeIntBinary(store, item, sym::ExprBinaryOp::Div, waveWidth);
+  return failed(quotient) ? FailureOr<sym::ExprHandle>(failure())
+                          : sym::composeExprFloor(store, *quotient);
+}
 struct DmaExpressions {
   DmaSymbols symbols;
   sym::ExprHandle physicalItem, physicalWaveId, physicalWave, lane, withinBits,
@@ -1291,15 +1298,8 @@ static FailureOr<DmaExpressions> buildDmaExpressions(const DmaPlanShape &shape,
   if (failed(symbols))
     return failure();
   sym::ExprHandle physicalItem = *shape.source->axes.item;
-  FailureOr<sym::ExprHandle> width =
-      sym::composeExprInt(store, shape.waveWidth);
-  FailureOr<sym::ExprHandle> quotient =
-      failed(width) ? FailureOr<sym::ExprHandle>(failure())
-                    : sym::composeExprBinary(store, physicalItem,
-                                             sym::ExprBinaryOp::Div, *width);
   FailureOr<sym::ExprHandle> physicalWaveId =
-      failed(quotient) ? FailureOr<sym::ExprHandle>(failure())
-                       : sym::composeExprFloor(store, *quotient);
+      buildDmaWaveId(store, physicalItem, shape.waveWidth);
   FailureOr<sym::ExprHandle> physicalWave =
       failed(physicalWaveId)
           ? FailureOr<sym::ExprHandle>(failure())
@@ -2537,30 +2537,10 @@ static LogicalResult remapDmaOwnership(const DmaPlanShape &shape,
                        : remapDmaOwnershipAtPoint(shape, expressions, *point,
                                                   families, store, memo);
 }
-static FailureOr<bool> factorDmaWaveId(Transaction &source,
-                                       const DmaPlanShape &shape,
-                                       const DmaExpressions &expressions,
-                                       sym::Store &store) {
-  auto execution = llvm::find_if(source.map.inputs, [&](const auto &input) {
-    return input.variable == expressions.physicalItem;
-  });
-  if (execution == source.map.inputs.end())
-    return failure();
-  if (execution->extent && *execution->extent <= shape.waveWidth)
-    return false;
-  FailureOr<sym::ExprHandle> width =
-      sym::composeExprInt(store, shape.waveWidth);
-  FailureOr<sym::ExprHandle> ratio =
-      failed(width) ? FailureOr<sym::ExprHandle>(failure())
-                    : sym::composeExprBinary(store, expressions.symbols.formal,
-                                             sym::ExprBinaryOp::Div, *width);
-  FailureOr<sym::ExprHandle> waveId =
-      failed(ratio) ? FailureOr<sym::ExprHandle>(failure())
-                    : sym::composeExprFloor(store, *ratio);
-  if (failed(waveId))
-    return failure();
-  std::array<sym::ExprSubstitution, 1> substitution{
-      sym::ExprSubstitution{expressions.physicalWaveId, *waveId}};
+static FailureOr<bool>
+substituteDmaSource(Transaction &source,
+                    ArrayRef<sym::ExprSubstitution> substitution,
+                    sym::Store &store) {
   bool changed = false;
   auto replace = [&](sym::ExprHandle &expression) -> LogicalResult {
     FailureOr<sym::ExprHandle> replacement =
@@ -2585,13 +2565,34 @@ static FailureOr<bool> factorDmaWaveId(Transaction &source,
     return failure();
   changed |= !(*active == source.active);
   source.active = *active;
-  if (!changed)
-    return false;
-  source.map.inputs.push_back({expressions.symbols.formal,
-                               execution->extent,
-                               {},
-                               SymbolicOffsetBindingKind::Uniform});
-  return true;
+  return changed;
+}
+static LogicalResult factorDmaWaveId(Transaction &source,
+                                     const DmaPlanShape &shape,
+                                     const DmaExpressions &expressions,
+                                     sym::Store &store) {
+  auto execution = llvm::find_if(source.map.inputs, [&](const auto &input) {
+    return input.variable == expressions.physicalItem;
+  });
+  if (execution == source.map.inputs.end())
+    return failure();
+  if (execution->extent && *execution->extent <= shape.waveWidth)
+    return success();
+  FailureOr<sym::ExprHandle> waveId =
+      buildDmaWaveId(store, expressions.symbols.formal, shape.waveWidth);
+  if (failed(waveId))
+    return failure();
+  std::array<sym::ExprSubstitution, 1> substitution{
+      sym::ExprSubstitution{expressions.physicalWaveId, *waveId}};
+  FailureOr<bool> changed = substituteDmaSource(source, substitution, store);
+  if (failed(changed))
+    return failure();
+  if (*changed)
+    source.map.inputs.push_back({expressions.symbols.formal,
+                                 execution->extent,
+                                 {},
+                                 SymbolicOffsetBindingKind::Uniform});
+  return success();
 }
 static FailureOr<DmaPlan>
 instantiateDmaPlan(const DmaPlanShape &shape, const DmaExpressions &expressions,
@@ -2611,9 +2612,7 @@ instantiateDmaPlan(const DmaPlanShape &shape, const DmaExpressions &expressions,
         *shape.destination, *families.destination, group, false, store);
     if (failed(source) || failed(destination))
       return failure();
-    FailureOr<bool> factored =
-        factorDmaWaveId(*source, shape, expressions, store);
-    if (failed(factored))
+    if (failed(factorDmaWaveId(*source, shape, expressions, store)))
       return failure();
     source->activity =
         zeroFillInactive ? source->activity : expressions.symbols.one;
@@ -2645,9 +2644,9 @@ static LogicalResult applySpecializedDmaGroupActivity(
   source.condition = activities[group]->condition;
   return success();
 }
-static bool failedDmaTransactionPair(
-    const FailureOr<std::optional<Transaction>> &source,
-    const FailureOr<std::optional<Transaction>> &destination) {
+template <typename T>
+static bool failedDmaTransactionPair(const FailureOr<T> &source,
+                                     const FailureOr<T> &destination) {
   return failed(source) || failed(destination);
 }
 static FailureOr<std::optional<DmaTransaction>> buildSpecializedDmaTransaction(
@@ -2694,16 +2693,14 @@ static FailureOr<std::optional<DmaTransaction>> buildSpecializedDmaTransaction(
       instantiateTransaction(sourceAccess, **source, 0, false, store);
   FailureOr<Transaction> destinationTransaction =
       instantiateTransaction(destinationAccess, **destination, 0, false, store);
-  if (failed(sourceTransaction) || failed(destinationTransaction))
+  if (failedDmaTransactionPair(sourceTransaction, destinationTransaction))
     return failure();
   if (failed(applySpecializedDmaGroupActivity(*sourceTransaction,
                                               groupActivities, group, store)))
     return failure();
   sourceTransaction->activity =
       zeroFillInactive ? sourceTransaction->activity : expressions.symbols.one;
-  FailureOr<bool> factored =
-      factorDmaWaveId(*sourceTransaction, shape, expressions, store);
-  if (failed(factored))
+  if (failed(factorDmaWaveId(*sourceTransaction, shape, expressions, store)))
     return failure();
   return std::optional<DmaTransaction>{DmaTransaction{
       std::move(*sourceTransaction), std::move(*destinationTransaction)}};

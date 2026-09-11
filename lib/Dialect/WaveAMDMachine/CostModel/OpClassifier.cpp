@@ -131,7 +131,6 @@ static SchedClass classifyMappedOp(Operation *op) {
           [](auto) { return SchedClass::Write32Bit; })
       .Case<VExpF32Op, VRcpF32Op, VRcpIFlagF32Op>(
           [](auto) { return SchedClass::WriteTrans32; })
-      // Scalar arithmetic, bitwise, shifts, compares, and moves use SALU.
       .Case<SAddI32Op, SSubI32Op, SAddM0I32Op, SAddU64Op, SAddU64U32Op,
             DmaIssueDelayOp,
             SAndB32Op, SAndB64Op,
