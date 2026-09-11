@@ -887,10 +887,13 @@ static DivRemValues createSignedDivRem(OpBuilder &builder, Location loc,
   Value quotientSign = lhsSign;
   if (divisorPositive)
     absRhs = rhs;
-  else if (rhsConst)
+  else if (rhsConst) {
     absRhs = createConstantLike(builder, loc, type,
                                 signedAbs(*rhsConst).getZExtValue());
-  else {
+    if (rhsConst->isNegative())
+      quotientSign = createXor(builder, loc, type, lhsSign,
+                               createConstantLike(builder, loc, type, -1));
+  } else {
     Value rhsSign = createShrS(builder, loc, type, rhs, signShift);
     absRhs = createSub(builder, loc, type,
                        createXor(builder, loc, type, rhs, rhsSign), rhsSign);
