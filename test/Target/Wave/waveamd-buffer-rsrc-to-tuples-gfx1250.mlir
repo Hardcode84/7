@@ -13,9 +13,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 // CHECK: %[[RANGE_LOW:.*]], %{{.*}} = waveamdmachine.s_lshl_b64 %[[RANGE_MASKED]], %[[SHIFT57]]
 // CHECK: %[[LOW:.*]], %{{.*}} = waveamdmachine.s_or_b64 %[[BASE_MASKED]], %[[RANGE_LOW]]
 // CHECK: %[[SHIFT7:.*]] = waveamdmachine.imm 7
-// CHECK: %[[RANGE_HIGH:.*]], %{{.*}} = waveamdmachine.s_lshr_b64 %[[RANGE_MASKED]], %[[SHIFT7]]
-// CHECK: %[[FLAGS:.*]] = waveamdmachine.s_mov_b64_imm 3531209135951446016
-// CHECK: %[[HIGH:.*]], %{{.*}} = waveamdmachine.s_or_b64 %[[RANGE_HIGH]], %[[FLAGS]]
+// CHECK: %[[HIGH:.*]], %{{.*}} = waveamdmachine.s_lshr_b64 %[[RANGE_MASKED]], %[[SHIFT7]]
+// CHECK-NOT: waveamdmachine.s_or_b64
 // CHECK: %[[DESC:.*]] = waveamdmachine.tuple_from_elements %[[LOW]], %[[HIGH]]
 // CHECK-NOT: waveamdmachine.make_buffer_rsrc
 func.func @make_buffer_rsrc_gfx1250(
@@ -45,8 +44,8 @@ func.func @make_buffer_rsrc_wide_imm(
 // CHECK: %[[BASE:.*]] = waveamdmachine.s_mov_b64_imm 144115188075855871
 // CHECK: %[[RANGE:.*]] = waveamdmachine.s_mov_b64_imm 35184372088831
 // CHECK: %[[LOW:.*]] = waveamdmachine.s_mov_b64_imm -1
-// dword3 0x3101603f: range high 0x3f, format 0x16, level 1, OOB 3.
-// CHECK: %[[HIGH:.*]] = waveamdmachine.s_mov_b64_imm 3531209410829352959
+// High 38 range bits; stride, swizzle, and OOB mode remain zero.
+// CHECK: %[[HIGH:.*]] = waveamdmachine.s_mov_b64_imm 274877906943
 // CHECK: waveamdmachine.tuple_from_elements %[[LOW]], %[[HIGH]]
 // CHECK-NOT: waveamdmachine.s_and_b64
 func.func @make_buffer_rsrc_field_maxima() {

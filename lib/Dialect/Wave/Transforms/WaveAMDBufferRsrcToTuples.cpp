@@ -29,14 +29,10 @@ using namespace mlir::waveamdmachine;
 
 namespace {
 
-static constexpr uint32_t getDefaultBufferRsrcFlags() {
+static uint32_t getLegacyBufferRsrcFlags(MakeBufferRsrcOp make) {
   constexpr uint32_t gfx11Format32Float =
       llvm::AMDGPU::UfmtGFX11::UFMT_32_FLOAT;
-  return (gfx11Format32Float << 12) | (1u << 24) | (3u << 28);
-}
-
-static uint32_t getLegacyBufferRsrcFlags(MakeBufferRsrcOp make) {
-  uint32_t flags = getDefaultBufferRsrcFlags();
+  uint32_t flags = (gfx11Format32Float << 12) | (1u << 24) | (3u << 28);
   if (!make.getConstAddTidEnable())
     return flags;
   constexpr uint32_t dataFormatMask = 0xfu << 15;
@@ -211,9 +207,9 @@ convertConstantWideMakeBufferRsrc(MakeBufferRsrcOp make, IRRewriter &rewriter,
                                   RegType descriptorType, uint64_t base,
                                   uint64_t range, unsigned baseBits,
                                   unsigned lowNumRecordsBits) {
-  constexpr uint64_t flags = uint64_t{getDefaultBufferRsrcFlags()} << 32;
   uint64_t low = base | (range << baseBits);
-  uint64_t high = (range >> lowNumRecordsBits) | flags;
+  // Raw wide descriptors keep stride, swizzle, and OOB mode zero.
+  uint64_t high = range >> lowNumRecordsBits;
   Value lowImm = SMovB64ImmOp::create(
       rewriter, make.getLoc(), getTuplePartType(descriptorType, 0, 2),
       rewriter.getI64IntegerAttr(static_cast<int64_t>(low)));
@@ -237,7 +233,6 @@ static FailureOr<Value> convertDynamicWideMakeBufferRsrc(
   if (failed(range))
     return failure();
 
-  constexpr uint64_t flags = uint64_t{getDefaultBufferRsrcFlags()} << 32;
   uint64_t baseMask = getFieldMask(baseBits);
   uint64_t rangeMask = getFieldMask(numRecordsBits);
   RegType pairType = getVirtualSGPRType(make.getContext(), 2);
@@ -254,12 +249,10 @@ static FailureOr<Value> convertDynamicWideMakeBufferRsrc(
   auto low = SOrB64Op::create(rewriter, make.getLoc(),
                               getTuplePartType(descriptorType, 0, 2), sccType,
                               maskedBase.getResult(), rangeLow.getResult());
-  auto rangeHigh = SLshrB64Op::create(
-      rewriter, make.getLoc(), pairType, sccType, maskedRange.getResult(),
-      getImm(rewriter, make.getLoc(), lowNumRecordsBits));
-  auto high = SOrB64Op::create(
+  auto high = SLshrB64Op::create(
       rewriter, make.getLoc(), getTuplePartType(descriptorType, 2, 2), sccType,
-      rangeHigh.getResult(), getWideImm(rewriter, make.getLoc(), flags));
+      maskedRange.getResult(),
+      getImm(rewriter, make.getLoc(), lowNumRecordsBits));
   auto tuple = TupleFromElementsOp::create(
       rewriter, make.getLoc(), descriptorType,
       ValueRange{low.getResult(), high.getResult()});
