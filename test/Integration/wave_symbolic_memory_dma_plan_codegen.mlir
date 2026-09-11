@@ -21,6 +21,18 @@
 // ASM-NOT: global_load_dword
 // ASM: s_endpgm
 
+// LOWER-LABEL: func.func @symbolic_memory_multiwave_dma_plan_codegen(
+// LOWER: [[WAVE_BASE:%.*]] = wave.read_first
+// LOWER: wave.index_expr <{{.*}}dma_wave_base{{.*}}> {{.*}}["dma_wave_base"]([[WAVE_BASE]])
+// LOWER: waveamd.dma_load_lds
+// LOWER-NOT: wave.gather
+// LOWER-NOT: wave.scatter
+
+// ASM-LABEL: symbolic_memory_multiwave_dma_plan_codegen:
+// ASM: buffer_load_dwordx4 {{.*}} lds
+// ASM-NOT: global_load_dword
+// ASM: s_endpgm
+
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @symbolic_memory_dma_plan_codegen(
       %source: !wave.ptr<#wave.global, i32>)
@@ -36,6 +48,33 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %dependency = wave.token : !wave.mem.token
     %value, %loaded = wave.gather %source mapping
         <bit_offset = <"32*(4*item + slot)">>
+        bindings ["item"](%bounded_item)
+        after %dependency
+        : (!wave.ptr<#wave.global, i32>, !wave.simd<index, 64>,
+           !wave.mem.token)
+        -> (!wave.simd<vector<4xi32>, 64>, !wave.mem.token)
+    %stored = wave.scatter %value to %destination mapping
+        <bit_offset = <"32*(4*item + slot)">>
+        bindings ["item"](%bounded_item) after %loaded
+        : (!wave.simd<vector<4xi32>, 64>, !wave.ptr<#wave.shared, i32>,
+           !wave.simd<index, 64>, !wave.mem.token) -> !wave.mem.token
+    return
+  }
+
+  func.func @symbolic_memory_multiwave_dma_plan_codegen(
+      %source: !wave.ptr<#wave.global, i32>)
+      attributes {wave.kernel, wave.lds_size = 4096 : i64,
+                  wave.workgroup_size = array<i32: 256, 1, 1>,
+                  wave.waves_per_workgroup = 4 : i64} {
+    %destination = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+    %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+    %bounded_item = wave.index_expr <"item"> assuming
+        [#wave.pred<"item >= 0">, #wave.pred<"item <= 255">]
+        ["item"](%item)
+        : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+    %dependency = wave.token : !wave.mem.token
+    %value, %loaded = wave.gather %source mapping
+        <bit_offset = <"32*(4*Mod(item, 64) + 512*floor(item/64) + slot)">>
         bindings ["item"](%bounded_item)
         after %dependency
         : (!wave.ptr<#wave.global, i32>, !wave.simd<index, 64>,
