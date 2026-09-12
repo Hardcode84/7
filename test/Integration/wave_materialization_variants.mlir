@@ -1,5 +1,5 @@
 // RUN: split-file %s %t
-// RUN: not wave-opt %t/live.mlir --waveamd-to-machine 2>&1 | FileCheck %s --check-prefix=LIVE
+// RUN: wave-opt %t/live.mlir --waveamd-to-machine | FileCheck %s --check-prefix=SELECT
 // RUN: not wave-translate %t/live.mlir --wave-to-amdgpu-asm 2>&1 | FileCheck %s --check-prefix=LIVE
 // RUN: wave-translate %t/single.mlir --wave-to-amdgpu-asm | FileCheck %s --check-prefix=SINGLE
 // RUN: wave-translate %t/single.mlir --wave-to-amdgpu-asm | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
@@ -7,8 +7,16 @@
 // RUN: wave-translate %t/single.mlir --wave-to-amdgpu-asm -o %t/single.s
 // RUN: diff %t/single.s %t/chained.s
 // RUN: wave-translate %t/dead.mlir --wave-to-amdgpu-asm | FileCheck %s --check-prefix=DEAD
+// RUN: wave-opt %t/chained.mlir --waveamd-to-machine -o %t/selected.mlir
+// RUN: FileCheck %s --check-prefix=SELECT < %t/selected.mlir
+// RUN: wave-opt %t/selected.mlir --canonicalize --cse --canonicalize | wave-translate --wave-to-amdgpu-asm | FileCheck %s --check-prefix=SELECTED
 
-// LIVE: 'wave.materialization_variants' op must be resolved before WaveAMDMachine selection
+
+// SELECT: waveamdmachine.materialization_variants
+// LIVE: waveamd-machine-schedule unsupported op: waveamdmachine.materialization_variants
+// SELECTED-LABEL: single_variant:
+// SELECTED: global_store_b32
+// SELECTED: s_endpgm
 // SINGLE-LABEL: single_variant:
 // SINGLE: buffer_store_b32
 // SINGLE: s_endpgm

@@ -3057,10 +3057,8 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   if (parentOp == func || isa<waveamdmachine::UniformLoopOp>(parentOp))
     builder.setInsertionPoint(op);
   return llvm::TypeSwitch<Operation *, LogicalResult>(op)
-      .Case<MaterializationVariantsOp>([](auto choice) {
-        return choice.emitOpError(
-            "must be resolved before WaveAMDMachine selection");
-      })
+      .Case<MaterializationVariantsOp>(
+          [&](auto choice) { return selectMaterializationVariants(choice); })
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
       .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
       .Case<ConstantOp>([&](auto o) { return selectConstant(o); })
@@ -3585,6 +3583,17 @@ LogicalResult WaveAMDMachineSelector::selectSplat(SplatOp op) {
 // The selected value passes straight through.
 LogicalResult WaveAMDMachineSelector::selectAssume(AssumeOp op) {
   values[op.getResult()] = expect(op.getValue(), op);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectMaterializationVariants(
+    MaterializationVariantsOp op) {
+  SmallVector<Value> choices;
+  for (Value choice : op.getChoices())
+    choices.push_back(expect(choice, op));
+  values[op.getResult()] = waveamdmachine::MaterializationVariantsOp::create(
+      builder, op.getLoc(), choices.front().getType(), choices);
   eraseIfTopLevel(op);
   return success();
 }
