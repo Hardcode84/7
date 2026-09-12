@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -174,43 +175,10 @@ OpFoldResult MaterializationVariantsOp::fold(FoldAdaptor) {
   return {};
 }
 
-namespace {
-struct FlattenMaterializationVariants
-    : OpRewritePattern<MaterializationVariantsOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(MaterializationVariantsOp op,
-                                PatternRewriter &rewriter) const override {
-    SmallVector<Value> worklist =
-        llvm::to_vector(llvm::reverse(op.getChoices()));
-    SmallVector<Value> choices;
-    llvm::SmallDenseSet<Value, 8> seen;
-    bool changed = false;
-    while (!worklist.empty()) {
-      Value value = worklist.pop_back_val();
-      // Visit shared subgraphs once; retain first-seen leaf order.
-      if (!seen.insert(value).second) {
-        changed = true;
-        continue;
-      }
-      if (auto nested = value.getDefiningOp<MaterializationVariantsOp>()) {
-        llvm::append_range(worklist, llvm::reverse(nested.getChoices()));
-        changed = true;
-      } else
-        choices.push_back(value);
-    }
-    if (!changed)
-      return failure();
-    rewriter.modifyOpInPlace(op,
-                             [&]() { op.getChoicesMutable().assign(choices); });
-    return success();
-  }
-};
-} // namespace
-
 void MaterializationVariantsOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
-  patterns.add<FlattenMaterializationVariants>(context);
+  patterns.add<FlattenMaterializationVariants<MaterializationVariantsOp>>(
+      context);
 }
 
 LogicalResult ConstantOp::verify() {

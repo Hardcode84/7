@@ -1940,6 +1940,30 @@ def WaveAMDMachine_SSendmsgDeallocVgprsOp
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
 def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
 
+// AllTypesMatch's default predicate handles fixed operands only.
+def WaveAMDMachine_MaterializationVariantsTypesMatch : AllTypesMatch<["choices", "result"]> {
+  let predicate = CPred<"::llvm::all_equal(::llvm::concat<::mlir::Type>("
+                        "$_op.getOperandTypes(), $_op.getResultTypes()))">;
+}
+
+def WaveAMDMachine_MaterializationVariantsOp : WaveAMDMachine_Op<"materialization_variants", [
+    Pure, WaveAMDMachine_MaterializationVariantsTypesMatch,
+    PredOpTrait<"at least one choice", CPred<"$_op.getNumOperands() != 0">>]> {
+  let summary = "independent choice between equivalent materializations";
+  let description = [{
+    Each operand is an exact replacement for the result at every use.
+    All choices are equivalent. Each operation defines an independent choice.
+    A single operand is valid and folds to that operand.
+    Producers must prove equivalence and must be safe at their actual placement.
+    This operation has no runtime meaning. Resolve it before code generation.
+  }];
+  let arguments = (ins Variadic<AnyType>:$choices);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$choices attr-dict `:` type($result)";
+  let hasFolder = 1;
+  let hasCanonicalizer = 1;
+}
+
 def WaveAMDMachine_CandidateYieldOp : WaveAMDMachine_Op<"candidate_yield", [
   Pure, ReturnLike, Terminator,
   ParentOneOf<["MaterializationCandidatesOp"]>,

@@ -1451,11 +1451,14 @@ static LogicalResult materializeAcyclicRegionJoinCopies(func::FuncOp func) {
 
 static LogicalResult
 verifyMaterializationCandidatesCollapsed(func::FuncOp func) {
-  WalkResult candidates =
-      func.walk([](waveamdmachine::MaterializationCandidatesOp op) {
-        op.emitOpError("must be collapsed before register allocation");
-        return WalkResult::interrupt();
-      });
+  WalkResult candidates = func.walk([](Operation *op) {
+    if (isa<waveamdmachine::MaterializationVariantsOp,
+            waveamdmachine::MaterializationCandidatesOp>(op)) {
+      op->emitOpError("must be resolved before register allocation");
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
   return failure(candidates.wasInterrupted());
 }
 

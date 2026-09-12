@@ -14,7 +14,9 @@ schedules each concrete graph without alternative-specific policy.
 The first experiment compares induction-variable rematerialization with a
 loop-carried modular offset from `wave-extract-loop-strides`. Each source
 `wave.materialization_variants` operation records one independent value
-choice. Construction partitions interacting choices into loop-based search
+choice. Machine selection preserves it as
+`waveamdmachine.materialization_variants`. Common machine optimizations can add
+choices. Construction then partitions interacting choices into loop-based search
 scopes and builds a complete specialized candidate block for each assignment
 in a scope.
 
@@ -271,35 +273,33 @@ pipeline runs once on the resulting function.
 `wave-extract-loop-strides` preserves the original rematerialization and
 builds the proved recurrence. It joins corresponding values with independent
 source variants operations. It does not select by consumer identity or
-memory-operation kind. No use-sensitive cleanup or lowering runs on the
-combined value-choice graph before candidate construction.
+memory-operation kind.
 
-Construct candidates immediately after that producer, before DMA zero-fill
-formation, loop-invariant code motion (LICM), mask optimization, div/rem
-expansion, or machine conversion. For this early boundary, use
-`wave.materialization_candidates` and `wave.candidate_yield` with the same
-isolation, signature, effect, and region-branch contract as the machine forms.
-This Wave wrapper contains actual candidate blocks, not deferred recipes. In
-each cloned block, collapse all source variants to one complete assignment and
-remove rejected trees and dead carries.
+Machine instruction selection converts source choices to
+`waveamdmachine.materialization_variants`. The machine operation has the same
+exact-type constraint, equivalent-choice contract, singleton fold, and
+canonicalizers as the source operation. Selection must give all operands and
+the result one common machine representation. Pointer metadata and split
+machine values must preserve the independent-choice contract.
 
-Lower each specialized candidate with the production Wave lowering passes.
-Convert the Wave wrapper and yield to the machine wrapper and yield through
-normal dialect conversion, including block signatures and result types. Run
-wrapper signature conversion serially; parallel workers cannot change the
-shared input or result contract. No source `wave.materialization_variants`
-survives into this lowering. The machine wrapper contains only fully
-specialized machine bodies before the first scheduling-related pass.
-Machine-level producers can construct that wrapper directly at their own
-decision boundary.
+Common machine optimizations run on this choice graph and can add choices.
+They must preserve all alternatives. A use-count profitability heuristic must
+record a choice instead of discarding an equivalent form. Semantic legality
+checks remain required.
+
+After common optimizations, form search scopes and expand the machine choices
+into `waveamdmachine.materialization_candidates`. Create private block
+arguments, clone each complete assignment, resolve its value choices, and
+remove rejected computations and dead carries. No Wave candidate wrapper is
+required. Each machine candidate must be fully specialized before scheduling.
 
 ```text
-common prefix through source alternative construction
-  -> form independent search scopes
-  -> create wrapper operands, destination regions, and private block arguments
-  -> clone each candidate with its own IRMapping; collapse source choices
-  -> candidate-local Wave cleanup and production lowering
-  -> machine candidate wrapper with fully specialized blocks
+Wave alternative construction
+  -> machine selection, preserving choices as machine value-choice ops
+  -> common machine optimizations, including new alternative producers
+  -> form independent search scopes and enumerate assignments
+  -> create machine wrappers, destination regions, and private block arguments
+  -> clone each candidate with its own IRMapping; resolve machine choices
   -> candidate-local machine cleanup and dead-carry removal
   -> candidate-local split barriers, MMA reuse, scalar masks, hazard repair
   -> candidate-local multi-wave specialization
@@ -339,8 +339,9 @@ before production enablement.
 Without alternatives, run the ordinary pipeline once without a wrapper or
 clone. The initial experiment accepts only the scheduled pipeline entry. An
 unscheduled entry must reject candidate wrappers until it has an explicit
-selection contract. Source value choices must not reach machine conversion.
-Neither wrapper nor yield may reach register allocation or emission.
+selection contract. Source choices become machine choices during selection.
+Resolve machine choices before scheduling. Neither value choices, wrappers,
+nor yields may reach register allocation or emission.
 
 ## Fusion as a materialization choice
 
@@ -381,11 +382,11 @@ selected graph needs it. Search consumers together when their costs interact.
 Stable ordering and the total search bound still apply.
 
 Machine fusion needs a construction boundary before its destructive rewrite.
-Construct complete fused and unfused blocks in the machine candidate wrapper
-before the fusion decision can affect later graph-sensitive passes. The suffix
-must not rerun the same profitability heuristic and overwrite the selected
-unfused form. Candidate construction replaces that heuristic at the fusion
-decision point.
+Record fused and unfused results with machine value-choice operations.
+Expand these choices with the other machine choices before scheduling. The
+suffix must not rerun the same profitability heuristic and overwrite the
+selected unfused form. The choice producer replaces that heuristic at the
+fusion decision point.
 
 Combining machine fusion with Wave loop-offset choices requires joint
 enumeration: each collapsed Wave choice determines the machine graph and its
@@ -508,10 +509,9 @@ silent search cutoff is permitted.
 
 ## Dead carry cleanup
 
-Prune rejected recurrences before the remaining Wave lowering. An unused loop
-result is not sufficient: a body argument, update, and yield can form a dead
-cycle. The same issue exists in `waveamdmachine.uniform_loop` after
-conversion. Reuse MLIR dataflow liveness and region-branch canonicalization.
+Prune rejected recurrences after machine choices expand into regions. An
+unused loop result is not sufficient: a body argument, update, and yield can
+form a dead cycle in `waveamdmachine.uniform_loop`. Reuse MLIR dataflow liveness and region-branch canonicalization.
 Do not add a separate carry-liveness algorithm or producer-shaped matching.
 
 The `remove-dead-values` pass uses dataflow liveness to replace dead forwarded
@@ -697,8 +697,9 @@ boundary.
 
 Integration tests compile both GLU witnesses through the full production
 suffix. Check baseline reproduction, final carry and instruction shapes, and
-absence of source choices at machine conversion and all candidate wrappers and
-yields at allocation and emission. Separate forced-choice validation runs
+conversion of source choices to machine choices, absence of value choices at
+scheduling, and absence of candidate wrappers and yields at allocation and
+emission. Separate forced-choice validation runs
 check final binaries for every candidate in the bounded corpus. Check selected
 binaries for every protected sweep configuration. Simulator checks support
 this evidence; target hardware is required for performance.
@@ -711,12 +712,13 @@ Build the full bounded candidate-processing path before testing it on GLU.
 Keep candidate production and automatic selection opt-in. Implement these
 components in dependency order:
 
-1. Source value choices, Wave and machine candidate wrappers and yields, local
-   verifiers, isolation, recursive effects, and region-branch interfaces.
+1. Source and machine value choices, machine candidate wrappers and yields,
+   local verifiers, isolation, recursive effects, and region-branch interfaces.
+   Preserve value choices through machine selection and common optimizations.
 2. Search-scope formation, stable enumeration, private argument mapping, and
    parallel cloning and specialization within the candidate-count bound.
 3. MLIR dead-value and loop-carry cleanup, including segment-aware operand
-   erasure, plus structural conversion from Wave candidates to machine candidates.
+   erasure, within each specialized machine candidate.
 4. Candidate-local production prescheduling and multi-wave specialization, with
    explicit state ownership and checked parallel mutation boundaries.
 5. Parallel scheduling, strict regional cycle scoring, deterministic diagnostic

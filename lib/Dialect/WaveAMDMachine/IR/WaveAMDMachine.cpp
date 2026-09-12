@@ -10,6 +10,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
@@ -638,6 +639,18 @@ template <typename TDMOp> static LogicalResult verifyTDMTransfer(TDMOp op) {
 LogicalResult TDMLoadOp::verify() { return verifyTDMTransfer(*this); }
 
 LogicalResult TDMStoreOp::verify() { return verifyTDMTransfer(*this); }
+
+OpFoldResult MaterializationVariantsOp::fold(FoldAdaptor) {
+  if (getChoices().size() == 1)
+    return getChoices().front();
+  return {};
+}
+
+void MaterializationVariantsOp::getCanonicalizationPatterns(
+    RewritePatternSet &patterns, MLIRContext *context) {
+  patterns.add<FlattenMaterializationVariants<MaterializationVariantsOp>>(
+      context);
+}
 
 LogicalResult MaterializationCandidatesOp::verify() {
   for (Region &region : getCandidates()) {
