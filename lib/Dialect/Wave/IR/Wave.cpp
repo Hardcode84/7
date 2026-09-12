@@ -168,6 +168,51 @@ void ConstantOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
   setResultRange(getResult(), ConstantIntRanges::constant(value));
 }
 
+OpFoldResult MaterializationVariantsOp::fold(FoldAdaptor) {
+  if (getChoices().size() == 1)
+    return getChoices().front();
+  return {};
+}
+
+namespace {
+struct FlattenMaterializationVariants
+    : OpRewritePattern<MaterializationVariantsOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MaterializationVariantsOp op,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<Value> worklist =
+        llvm::to_vector(llvm::reverse(op.getChoices()));
+    SmallVector<Value> choices;
+    llvm::SmallDenseSet<Value, 8> seen;
+    bool changed = false;
+    while (!worklist.empty()) {
+      Value value = worklist.pop_back_val();
+      // Visit shared subgraphs once; retain first-seen leaf order.
+      if (!seen.insert(value).second) {
+        changed = true;
+        continue;
+      }
+      if (auto nested = value.getDefiningOp<MaterializationVariantsOp>()) {
+        llvm::append_range(worklist, llvm::reverse(nested.getChoices()));
+        changed = true;
+      } else
+        choices.push_back(value);
+    }
+    if (!changed)
+      return failure();
+    rewriter.modifyOpInPlace(op,
+                             [&]() { op.getChoicesMutable().assign(choices); });
+    return success();
+  }
+};
+} // namespace
+
+void MaterializationVariantsOp::getCanonicalizationPatterns(
+    RewritePatternSet &patterns, MLIRContext *context) {
+  patterns.add<FlattenMaterializationVariants>(context);
+}
+
 LogicalResult ConstantOp::verify() {
   if (isBuildableWith(getValue(), getType()))
     return success();

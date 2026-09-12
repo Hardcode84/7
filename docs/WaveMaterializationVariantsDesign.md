@@ -40,7 +40,7 @@ production gates pass.
 
 - IR means intermediate representation. A block is an ordered sequence of
   operations; a region contains blocks owned by an operation.
-- A source choice is one result with two or more exact replacement values.
+- A source choice is one result with one or more exact replacement values.
 - A search scope contains all choices whose costs interact. It usually contains
   a loop, its initialization, and its exit computations.
 - A candidate is one complete assignment of choices in a scope, materialized as
@@ -149,17 +149,23 @@ index-expression planner is required.
 ## Source value-choice contract
 
 ```mlir
-%value = "wave.materialization_variants"(%rematerialized, %carried)
-    : (!wave.simd<i32>, !wave.simd<i32>) -> !wave.simd<i32>
+%value = wave.materialization_variants %rematerialized, %carried
+    : !wave.simd<i32>
 ```
 
-The operation has one result and two or more operands. Every operand has the
-result type and is an exact replacement at every result use. Operand zero is
-the baseline. The operation is pure, always speculatable, and has no runtime
-meaning. Its producer computations must be safe at their actual placement;
-purity alone does not permit speculation of a trapping or immediately
-undefined computation. Proof assumptions follow defining SSA values, not
+The operation has one result and one or more operands. Every operand has the
+exact result type and is an exact replacement at every result use. All choices
+are equivalent; no operand has a distinct semantic role. A single-operand
+operation folds to that operand. The operation is pure, always speculatable,
+and has no runtime meaning. Its producer computations must be safe at their
+actual placement; purity alone does not permit speculation of a trapping or
+immediately undefined computation. Proof assumptions follow defining SSA values, not
 nearby operations.
+
+Canonicalization removes duplicate SSA choices and flattens choices produced
+by another `wave.materialization_variants` operation. It preserves first-seen
+leaf order. Shared producers remain when other operations still use them.
+One remaining choice folds to its value.
 
 Each variants operation defines one independent choice. Any combination of
 operand selections across operations must preserve program semantics. Shared
@@ -181,9 +187,9 @@ def-use analysis.
 The machine wrapper is `waveamdmachine.materialization_candidates`. It has a
 variadic input list, a result list, and one or more single-block candidate
 regions. A candidate block can contain nested loops and other structured ops.
-Region order is stable; region zero is the all-baseline assignment. Every
-candidate is a complete semantic replacement for the scope, including memory
-effects, explicit token dependencies, and yielded values.
+Region order is stable and breaks score ties. All candidates are equivalent.
+Every candidate is a complete semantic replacement for the scope, including
+memory effects, explicit token dependencies, and yielded values.
 
 Each region has its own block arguments with the same count and types as the
 wrapper inputs. Every captured SSA dependency, including memory tokens, passes
@@ -445,8 +451,8 @@ regalloc.
 Assign scope IDs in stable lexical order before cloning. Within each scope,
 assign choice ordinals by a stable operation walk and use operand order for
 alternatives. Enumerate the Cartesian product with the first choice changing
-slowest. Candidate zero selects all baseline operands. Each source variants op
-remains an independent choice; there is no grouping attribute.
+slowest. Candidate zero selects the first operand at each choice. Each source
+variants op remains an independent choice; there is no grouping attribute.
 
 Four binary choices permit at most 16 candidate regions per wrapper. For scope
 choice counts `c_1, ..., c_R`, the candidate count is `sum(2^c_i)`, bounded by

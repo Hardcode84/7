@@ -3057,6 +3057,10 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   if (parentOp == func || isa<waveamdmachine::UniformLoopOp>(parentOp))
     builder.setInsertionPoint(op);
   return llvm::TypeSwitch<Operation *, LogicalResult>(op)
+      .Case<MaterializationVariantsOp>([](auto choice) {
+        return choice.emitOpError(
+            "must be resolved before WaveAMDMachine selection");
+      })
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
       .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
       .Case<ConstantOp>([&](auto o) { return selectConstant(o); })
