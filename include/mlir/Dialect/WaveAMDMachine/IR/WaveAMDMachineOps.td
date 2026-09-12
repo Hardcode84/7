@@ -1668,6 +1668,10 @@ def WaveAMDMachine_SMovVccB32Op
                                  WaveAMDMachine_VCC, [WaveAMDMachine_SALU]>,
       WaveAMDMachine_InstructionIssueCount<"wavefrontSize == 64 ? 2 : 1">;
 
+def WaveAMDMachine_SMovVccB64Op
+    : WaveAMDMachine_UnaryResult<"s_mov_vcc_b64", WaveAMDMachine_SGPR2,
+                                 WaveAMDMachine_VCC, [WaveAMDMachine_SALU]>;
+
 // Value-producing scalar move: materialises an SGPR1 holding the
 // given Imm or copies an existing SGPR1/RegOrImm into a fresh
 // allocator-assigned SGPR. Used by the selector to lift loop-IV
@@ -4302,6 +4306,7 @@ def WaveAMDMachine_UniformLoopOp : WaveAMDMachine_Op<"uniform_loop", [
     attr-dict (`->` type($results)^)?
   }];
 
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 

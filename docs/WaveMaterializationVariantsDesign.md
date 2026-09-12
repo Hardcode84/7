@@ -529,28 +529,29 @@ operands, and results together. Its `operandSegmentSizes` property records the
 sizes of operand segments, including the optional entry condition and carry
 list. Carry erasure must update that property.
 
-The generic `RemoveDeadRegionBranchOpSuccessorInputs` rewrite uses raw
-`Operation::eraseOperands`. That erasure does not update the loop's operand
-segment sizes. Directly registering the rewrite on this loop can therefore
-leave the IR inconsistent: the next successor-mapping query asserts because
-operand and input counts differ. Both pre-tested and post-tested loops need
-segment-aware mutation before these patterns can be registered safely.
+The shared `RemoveDeadRegionBranchOpSuccessorInputs` rewrite must erase
+segmented operands through `MutableOperandRange`. Raw
+`Operation::eraseOperands` does not update segment sizes. The LLVM patch in
+`build_tools/llvm_patches` uses one range per operand segment and removes
+segments from last to first to preserve offsets. The build helper applies the
+patch and includes its contents in the install fingerprint.
 
-A development probe combined dataflow dead-value removal with region-branch
-canonicalization and repaired segment sizes after mutation. Twelve cases
-passed IR verification and output checks: unused, forwarded, and arithmetic
-carries in both entry modes; live control carries in both modes; mutually
-dependent dead carries; nested dead carries; a live pre-tested result; and a
-DMA loop with a live token recurrence and dead numeric recurrences. Cleanup
-removed dead numeric carries, retained live control and DMA dependencies,
-preserved tested loop attributes, and left no poison operations.
+Register the full `populateRegionBranchOpInterfaceCanonicalizationPatterns`
+set for `uniform_loop`. This set also forwards invariant carries and merges
+duplicate carries. Keep these transformations enabled. Register preservation
+must handle values that become loop captures after canonicalization and loop
+invariant code motion, including 64-bit VCC saves and restores.
 
-The production fix must use a segment-aware mutation API or an interface hook
-that maintains operand segments during erasure. Do not use a rewrite listener
-to repair invalid IR after mutation. Add permanent regression tests for these
-cases and verify the Wave and structured-control-flow loop boundaries before
-enabling candidate cleanup. A broken internal mapping terminates compilation;
-it is not a rejected candidate.
+Permanent tests cover unused, forwarded, and arithmetic carries in both entry
+modes; live controls in both modes; mutually dependent and nested dead carries;
+live pre-tested results; interleaved live and dead positions; and a DMA loop
+with a live token recurrence. Cleanup must preserve loop attributes and leave
+no poison operations. Test the final assembly as well as IR verification.
+
+Do not use a rewrite listener to repair invalid IR after mutation. Verify the
+Wave and structured-control-flow loop boundaries before enabling candidate
+cleanup. A broken internal mapping terminates compilation; it is not a rejected
+candidate.
 
 Explicit wait-token dependencies participate in liveness. A token consumed by
 a live wait, effect, or result keeps its carry alive. Do not infer alias

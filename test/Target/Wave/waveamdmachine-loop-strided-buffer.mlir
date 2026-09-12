@@ -37,8 +37,8 @@ func.func @strided_buf(%a: !wave.ptr<#wave.global, f16>, %n: i32, %r: i32)
 // CHECK: continue_if
 
 // CHECK-LABEL: func.func @strided_dma_buf
-// CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %{{.*}}: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK: %[[DESC:.*]] = waveamdmachine.update_buffer_rsrc_base {{%.*}}, %[[BASE]]
 // CHECK: %[[ISSUE:.*]] = waveamdmachine.buffer_load_lds_b128 {{%.*}}, %[[DESC]],
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after %[[ISSUE]]

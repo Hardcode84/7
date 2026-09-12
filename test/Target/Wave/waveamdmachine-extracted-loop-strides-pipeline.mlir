@@ -8,9 +8,9 @@ func.func @load_source_dialects(%p: !wave.ptr<#wave.global, i32>, %range: i32) {
 }
 
 // LOWER-LABEL: func.func @pipeline_extracted_strided_kloop
-// LOWER: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
-// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
-// LOWER: global_load_b128 %[[VOFF]], %[[BASE]]
+// LOWER: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
+// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// LOWER: global_load_b128 %[[VOFF:.*]], %[[BASE]]
 // LOWER-NOT: waveamdmachine.v_add_u32
 // LOWER: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
 // LOWER: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
@@ -41,9 +41,9 @@ func.func @pipeline_extracted_strided_kloop(
 
 // LOWER-LABEL: func.func @pipeline_extracted_nested_symbolic_stride
 // LOWER: %[[STRIDE:.*]], %{{.*}} = waveamdmachine.s_lshl_b32
-// LOWER: %[[INNER:.*]]:3 = waveamdmachine.uniform_loop
-// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
-// LOWER: global_load_b128 %[[VOFF]], %[[BASE]]
+// LOWER: %[[INNER:.*]]:2 = waveamdmachine.uniform_loop
+// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// LOWER: global_load_b128 %[[VOFF:.*]], %[[BASE]]
 // LOWER-NOT: waveamdmachine.v_add_u32
 // LOWER: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
 // LOWER: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %[[STRIDE]]

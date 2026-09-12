@@ -5530,6 +5530,9 @@ private:
       return emitMC(sMovB64(),
                     {toMCOperand(result()),
                      llvm::MCOperand::createReg(namedPhysReg("vcc"))});
+    if (isa<waveamdmachine::SMovVccB64Op>(op))
+      return emitMC(sMovB64(), {llvm::MCOperand::createReg(namedPhysReg("vcc")),
+                                toMCOperand(op.getOperand(0))});
     if (isa<waveamdmachine::SMovVccB32Op>(op)) {
       if (failed(emitMC(sMovB32(),
                         {llvm::MCOperand::createReg(namedPhysReg("vcc_lo")),

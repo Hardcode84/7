@@ -31,9 +31,9 @@ func.func @cyclic_scalar_offset_carry_constant_init(
 }
 
 // CHECK-LABEL: func.func @extracted_strided_kloop
-// CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
-// CHECK: global_load_tuple_b32 %[[VOFF]], %[[BASE]]
+// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: global_load_tuple_b32 %[[VOFF:.*]], %[[BASE]]
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
 // CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
@@ -64,9 +64,9 @@ func.func @extracted_strided_kloop(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 }
 
 // CHECK-LABEL: func.func @extracted_scaled_nested_binding
-// CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
-// CHECK: global_load_tuple_b32 %[[VOFF]], %[[BASE]]
+// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: global_load_tuple_b32 %[[VOFF:.*]], %[[BASE]]
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
 // CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
@@ -102,9 +102,9 @@ func.func @extracted_scaled_nested_binding(
 
 // CHECK-LABEL: func.func @extracted_nested_symbolic_stride
 // CHECK: %[[STRIDE:.*]], %{{.*}} = waveamdmachine.s_lshl_b32
-// CHECK: %[[INNER:.*]]:3 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
-// CHECK: global_load_tuple_b32 %[[VOFF]], %[[BASE]]
+// CHECK: %[[INNER:.*]]:2 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: global_load_tuple_b32 %[[VOFF:.*]], %[[BASE]]
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
 // CHECK: %[[NEXT:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %[[STRIDE]]
@@ -140,8 +140,8 @@ func.func @extracted_nested_symbolic_stride(
 }
 
 // CHECK-LABEL: func.func @shared_dma_wide_iv_stride_pow2
-// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 2>, %[[CARRY:.*]]: !waveamdmachine.reg<sgpr, 1>):
+// CHECK: %[[LOOP:.*]] = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK-NOT: waveamdmachine.s_lshl_b32 %[[IV]]
 // CHECK: %[[SCALED:.*]], %{{.*}} = waveamdmachine.s_lshl_b64 %[[IV]], {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<scc, 1>)
 // CHECK: waveamdmachine.s_mov_m0
@@ -177,8 +177,8 @@ func.func @shared_dma_wide_iv_stride_pow2(
 }
 
 // CHECK-LABEL: func.func @shared_dma_wide_iv_stride_mul
-// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 2>, %[[CARRY:.*]]: !waveamdmachine.reg<sgpr, 1>):
+// CHECK: %[[LOOP:.*]] = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK-NOT: waveamdmachine.s_mul_i32 %[[IV]]
 // CHECK: %[[SCALED:.*]], %{{.*}}, %{{.*}} = waveamdmachine.s_mul_u64 %[[IV]], {{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
 // CHECK: waveamdmachine.s_mov_m0

@@ -84,6 +84,7 @@ int main(int argc, char **argv) {
         ctx->getOrLoadDialect<mlir::ROCDL::ROCDLDialect>();
       });
   mlir::registerCanonicalizerPass();
+  mlir::registerRemoveDeadValuesPass();
   mlir::registerCSEPass();
   mlir::registerLoopInvariantCodeMotionPass();
   mlir::registerSymbolDCEPass();

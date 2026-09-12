@@ -261,3 +261,28 @@ func.func @preserve_m0(%off: !waveamdmachine.reg<vgpr, 1>,
 }
 
 }
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @preserve_vcc_wave64
+// CHECK: %[[SUM0:.+]], %[[VCC0:.+]] = waveamdmachine.v_add_u64
+// CHECK: %[[SAVED:.+]] = waveamdmachine.s_read_vcc_b64 %[[VCC0]]
+// CHECK: %[[SUM1:.+]], %[[VCC1:.+]] = waveamdmachine.v_add_u64
+// CHECK: %[[RELOADED:.+]] = waveamdmachine.s_mov_vcc_b64 %[[SAVED]]
+// CHECK: return %[[RELOADED]]
+func.func @preserve_vcc_wave64(%a: !waveamdmachine.reg<vgpr, 2>,
+                        %b: !waveamdmachine.reg<vgpr, 2>,
+                        %c: !waveamdmachine.reg<vgpr, 2>)
+    -> !waveamdmachine.reg<vcc, 1> {
+  %sum0, %vcc0 = waveamdmachine.v_add_u64 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  %sum1, %vcc1 = waveamdmachine.v_add_u64 %a, %c
+      : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 2>)
+        -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vcc, 1>)
+  return %vcc0 : !waveamdmachine.reg<vcc, 1>
+}
+
+}

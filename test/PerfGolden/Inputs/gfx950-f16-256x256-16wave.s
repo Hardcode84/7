@@ -107,8 +107,8 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[32:35], v11 offset:17408
 		ds_read_b128 v[36:39], v11 offset:18432
 		ds_read_b128 v[40:43], v11 offset:19456
-		v_add_u32_e32 v11, 0x80, v9
-		v_add_u32_e32 v9, 0x80, v3
+		v_add_u32_e32 v9, 0x80, v9
+		v_add_u32_e32 v3, 0x80, v3
 		s_mov_b32 s1, 0
 		v_mov_b64_e32 v[44:45], 0
 		v_mov_b64_e32 v[46:47], 0
@@ -146,12 +146,12 @@ wmma_f16_matmul_tiled:
 		s_add_i32 m0, s4, 16
 		s_add_i32 s4, s4, 0x8000
 		s_waitcnt lgkmcnt(0)
-		buffer_load_dwordx4 v11, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v9, s[20:23], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[44:47], v[12:15], v[32:35], v[44:47]
 		s_add_i32 m0, m0, 0x4000
 		v_mfma_f32_16x16x32_f16 v[48:51], v[12:15], v[36:39], v[48:51]
 		v_mfma_f32_16x16x32_f16 v[52:55], v[12:15], v[40:43], v[52:55]
-		buffer_load_dwordx4 v9, s[24:27], 0 offen lds
+		buffer_load_dwordx4 v3, s[24:27], 0 offen lds
 		v_mfma_f32_16x16x32_f16 v[68:71], v[16:19], v[40:43], v[68:71]
 		v_mfma_f32_16x16x32_f16 v[56:59], v[16:19], v[28:31], v[56:59]
 		v_mfma_f32_16x16x32_f16 v[60:63], v[16:19], v[32:35], v[60:63]
@@ -174,18 +174,18 @@ wmma_f16_matmul_tiled:
 		s_addc_u32 s21, s21, 0
 		s_waitcnt vmcnt(2)
 		s_barrier
-		v_add3_u32 v3, s8, v10, v0
-		v_add_u32_e32 v3, 16, v3
-		ds_read_b128 v[12:15], v3
-		ds_read_b128 v[16:19], v3 offset:1024
-		ds_read_b128 v[20:23], v3 offset:2048
-		ds_read_b128 v[24:27], v3 offset:3072
-		v_add3_u32 v3, s5, v10, v0
-		v_add_u32_e32 v3, 16, v3
-		ds_read_b128 v[28:31], v3 offset:16384
-		ds_read_b128 v[32:35], v3 offset:17408
-		ds_read_b128 v[36:39], v3 offset:18432
-		ds_read_b128 v[40:43], v3 offset:19456
+		v_add3_u32 v11, s8, v10, v0
+		v_add_u32_e32 v11, 16, v11
+		ds_read_b128 v[12:15], v11
+		ds_read_b128 v[16:19], v11 offset:1024
+		ds_read_b128 v[20:23], v11 offset:2048
+		ds_read_b128 v[24:27], v11 offset:3072
+		v_add3_u32 v11, s5, v10, v0
+		v_add_u32_e32 v11, 16, v11
+		ds_read_b128 v[28:31], v11 offset:16384
+		ds_read_b128 v[32:35], v11 offset:17408
+		ds_read_b128 v[36:39], v11 offset:18432
+		ds_read_b128 v[40:43], v11 offset:19456
 		s_add_u32 s24, s24, 64
 		s_addc_u32 s25, s25, 0
 		s_cmp_lt_i32 s1, 0xfe

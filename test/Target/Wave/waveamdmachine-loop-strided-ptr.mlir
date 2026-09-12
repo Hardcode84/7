@@ -42,10 +42,10 @@ func.func @strided_kloop(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 // CHECK-LABEL: func.func @strided_kloop
 // CHECK: uniform_loop
 // CHECK-SAME: !waveamdmachine.reg<sgpr, 2>
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[V0:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[V1:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK-NOT: waveamdmachine.s_lshl_b32
-// CHECK: global_load_tuple_b32 %[[V0]], %[[B]]
-// CHECK: global_load_tuple_b32 %[[V1]], %[[B]]
+// CHECK: global_load_tuple_b32 %[[V0:.*]], %[[B]]
+// CHECK: global_load_tuple_b32 %[[V1:.*]], %[[B]]
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
 // CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
@@ -56,10 +56,10 @@ func.func @strided_kloop(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 // CHECK-LABEL: func.func @strided_two_base_kloop
 // CHECK: uniform_loop
 // CHECK-SAME: !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.reg<sgpr, 2>
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[AV:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[BV:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[AB:.*]]: !waveamdmachine.reg<sgpr, 2>, %[[BB:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[AB:.*]]: !waveamdmachine.reg<sgpr, 2>, %[[BB:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK-NOT: waveamdmachine.s_lshl_b32
-// CHECK: global_load_tuple_b32 %[[AV]], %[[AB]]
-// CHECK: global_load_tuple_b32 %[[BV]], %[[BB]]
+// CHECK: global_load_tuple_b32 %[[AV:.*]], %[[AB]]
+// CHECK: global_load_tuple_b32 %[[BV:.*]], %[[BB]]
 // CHECK: %[[ARETAINED:.*]] = waveamdmachine.reg_after %[[AB]] after
 // CHECK: %[[AN:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[ARETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
 // CHECK: %[[BRETAINED:.*]] = waveamdmachine.reg_after %[[BB]] after
@@ -117,9 +117,9 @@ func.func @strided_two_base_kloop(%a: !wave.ptr<#wave.global, f16>,
 // CHECK-LABEL: func.func @strided_non_normalized_kloop
 // CHECK: uniform_loop
 // CHECK-SAME: !waveamdmachine.reg<sgpr, 2>
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[V:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK-NOT: waveamdmachine.s_lshl_b32
-// CHECK: global_load_tuple_b32 %[[V]], %[[B]]
+// CHECK: global_load_tuple_b32 %[[V:.*]], %[[B]]
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
 // CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
@@ -158,10 +158,10 @@ func.func @strided_non_normalized_kloop(%a: !wave.ptr<#wave.global, f16>,
 
 // CHECK-LABEL: func.func @strided_dynamic_uniform_kloop
 // CHECK: %[[STRIDE:.*]], %{{.*}} = waveamdmachine.s_lshl_b32
-// CHECK: %[[LOOP:.*]]:4 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[V0:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[V1:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
-// CHECK: global_load_tuple_b32 %[[V0]], %[[B]]
-// CHECK: global_load_tuple_b32 %[[V1]], %[[B]]
+// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: global_load_tuple_b32 %[[V0:.*]], %[[B]]
+// CHECK: global_load_tuple_b32 %[[V1:.*]], %[[B]]
 // CHECK-NOT: waveamdmachine.v_add_u32
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
 // CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %[[STRIDE]]
@@ -257,15 +257,15 @@ func.func @strided_factored_uniform_kloop(
 }
 
 // CHECK-LABEL: func.func @strided_live_result
-// CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[V:.*]]: !waveamdmachine.reg<vgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
-// CHECK: global_load_tuple_b32 %[[V]], %[[B]]
+// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[B:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: global_load_tuple_b32 %[[V:.*]], %[[B]]
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[B]] after
 // CHECK: %[[NB:.*]], %{{.*}} = waveamdmachine.s_add_u64_u32 %[[RETAINED]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm)
 // CHECK: %[[BC:.*]] = waveamdmachine.s_cmp_lt_i32
 // CHECK-NEXT: waveamdmachine.continue_if %[[BC]]
 // CHECK-SAME: %[[NB]]
-// CHECK: global_load_tuple_b32 %[[LOOP]]#1, %[[LOOP]]#2
+// CHECK: global_load_tuple_b32 %[[V]], %[[LOOP]]#1
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @strided_live_result(%a: !wave.ptr<#wave.global, f16>, %n: i32)
     attributes {wave.kernel} {

@@ -25,6 +25,7 @@ LLVM_COMMIT
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shlex
 import subprocess
@@ -39,6 +40,8 @@ DEFAULT_BUILD_DIR = REPO_ROOT / "build" / "llvm-build"
 DEFAULT_INSTALL_DIR = REPO_ROOT / "build" / "llvm-install"
 DEFAULT_WAVE_BUILD_DIR = REPO_ROOT / "build"
 STAMP_FILE = ".wave-mlir-commit"
+PATCH_STAMP_FILE = ".wave-mlir-patches"
+PATCH_DIR = REPO_ROOT / "build_tools" / "llvm_patches"
 LLVM_DISTRIBUTION_COMPONENTS = (
     "FileCheck",
     "clang",
@@ -157,6 +160,30 @@ def resolve_source(default_source: Path, commit: str) -> Path:
     return default_source
 
 
+def patch_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for patch in sorted(PATCH_DIR.glob("*.patch")):
+        digest.update(patch.name.encode())
+        digest.update(b"\0")
+        digest.update(patch.read_bytes())
+    return digest.hexdigest()
+
+
+def apply_patches(source_dir: Path) -> None:
+    for patch in sorted(PATCH_DIR.glob("*.patch")):
+        reverse = subprocess.run(
+            ["git", "apply", "--reverse", "--check", str(patch)],
+            cwd=source_dir,
+            capture_output=True,
+            text=True,
+        )
+        if reverse.returncode == 0:
+            print(f"LLVM patch already applied: {patch.name}")
+            continue
+        run(["git", "apply", "--check", str(patch)], cwd=source_dir)
+        run(["git", "apply", str(patch)], cwd=source_dir)
+
+
 def required_install_files(
     install_dir: Path,
     enable_python_bindings: bool,
@@ -200,6 +227,12 @@ def already_installed(
 ) -> bool:
     stamp = install_dir / STAMP_FILE
     if not stamp.is_file() or stamp.read_text().strip() != commit:
+        return False
+    patch_stamp = install_dir / PATCH_STAMP_FILE
+    if (
+        not patch_stamp.is_file()
+        or patch_stamp.read_text().strip() != patch_fingerprint()
+    ):
         return False
     for package in ("llvm", "mlir", "clang", "lld"):
         if not (install_dir / "lib" / "cmake" / package).is_dir():
@@ -371,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     source_dir = resolve_source(args.source_dir.resolve(), commit)
+    apply_patches(source_dir)
     llvm_build_dir = args.build_dir.resolve()
     configure_and_build(
         source_dir=source_dir,
@@ -382,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         enable_rocm_runner=args.rocm_runner,
     )
     (install_dir / STAMP_FILE).write_text(commit + "\n")
+    (install_dir / PATCH_STAMP_FILE).write_text(patch_fingerprint() + "\n")
     print(f"\nLLVM/MLIR installed at {install_dir} (commit {commit[:12]})")
     if not args.no_refresh_wave_build:
         refresh_wave_build(

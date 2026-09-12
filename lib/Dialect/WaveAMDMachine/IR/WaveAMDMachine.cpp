@@ -1305,6 +1305,12 @@ static LogicalResult verifyUniformLoopFetchPlacement(UniformLoopOp loop) {
   return verifyUniformLoopFetchPhase(loop);
 }
 
+void UniformLoopOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *context) {
+  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns,
+                                                          getOperationName());
+}
+
 LogicalResult UniformLoopOp::verify() {
   if (failed(verifyUniformLoopFetchPlacement(*this)))
     return failure();

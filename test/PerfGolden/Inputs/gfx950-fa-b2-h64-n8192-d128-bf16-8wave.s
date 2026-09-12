@@ -367,8 +367,8 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[116:119], v[52:55], v[224:239]
 		v_add_u32_e32 v49, 0x14000, v2
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[132:135], v[56:59], v[224:239]
-		v_add_u32_e32 v50, 0x14080, v2
-		v_fma_f32 v2, v160, v40, v44
+		v_add_u32_e32 v2, 0x14080, v2
+		v_fma_f32 v50, v160, v40, v44
 		v_fma_f32 v51, v161, v40, v44
 		v_fma_f32 v52, v162, v40, v44
 		v_fma_f32 v53, v163, v40, v44
@@ -379,7 +379,7 @@ flash_attention_bf16_gfx950:
 		v_pk_fma_f32 v[60:61], v[170:171], v[40:41], v[44:45]
 		v_pk_fma_f32 v[62:63], v[172:173], v[40:41], v[44:45]
 		v_pk_fma_f32 v[80:81], v[174:175], v[40:41], v[44:45]
-		v_exp_f32_e32 v96, v2
+		v_exp_f32_e32 v96, v50
 		v_exp_f32_e32 v97, v51
 		v_exp_f32_e32 v98, v52
 		v_exp_f32_e32 v99, v53
@@ -395,20 +395,20 @@ flash_attention_bf16_gfx950:
 		v_exp_f32_e32 v109, v63
 		v_exp_f32_e32 v110, v80
 		v_exp_f32_e32 v111, v81
-		v_pk_fma_f32 v[52:53], v[64:65], v[40:41], v[44:45]
-		v_pk_fma_f32 v[54:55], v[66:67], v[40:41], v[44:45]
-		v_pk_fma_f32 v[56:57], v[68:69], v[40:41], v[44:45]
+		v_pk_fma_f32 v[50:51], v[64:65], v[40:41], v[44:45]
+		v_pk_fma_f32 v[52:53], v[66:67], v[40:41], v[44:45]
+		v_pk_fma_f32 v[54:55], v[68:69], v[40:41], v[44:45]
 		v_pk_fma_f32 v[86:87], v[70:71], v[40:41], v[44:45]
 		v_pk_fma_f32 v[88:89], v[72:73], v[40:41], v[44:45]
 		v_pk_fma_f32 v[90:91], v[74:75], v[40:41], v[44:45]
 		v_pk_fma_f32 v[92:93], v[76:77], v[40:41], v[44:45]
 		v_pk_fma_f32 v[94:95], v[78:79], v[40:41], v[44:45]
-		v_exp_f32_e32 v80, v52
-		v_exp_f32_e32 v81, v53
-		v_exp_f32_e32 v82, v54
-		v_exp_f32_e32 v83, v55
-		v_exp_f32_e32 v84, v56
-		v_mov_b32_e32 v85, v57
+		v_exp_f32_e32 v80, v50
+		v_exp_f32_e32 v81, v51
+		v_exp_f32_e32 v82, v52
+		v_exp_f32_e32 v83, v53
+		v_exp_f32_e32 v84, v54
+		v_mov_b32_e32 v85, v55
 		s_cbranch_scc0 .Lflash_attention_bf16_gfx950.if_else_1
 		s_mov_b32 s24, s4
 		s_mov_b32 s25, s5
@@ -452,7 +452,7 @@ flash_attention_bf16_gfx950:
 		ds_read_b128 v[136:139], v0 offset:42176
 		ds_read_b128 v[140:143], v4 offset:41696
 		ds_read_b128 v[144:147], v0 offset:42208
-		v_exp_f32_e32 v2, v85
+		v_exp_f32_e32 v50, v85
 		v_exp_f32_e32 v51, v86
 		v_exp_f32_e32 v85, v87
 		v_exp_f32_e32 v86, v88
@@ -490,28 +490,28 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v80, v80, v83
 		v_cvt_pk_bf16_f32 v105, v82, v83
 		v_add_f32_e32 v80, v80, v84
-		v_add_f32_e32 v80, v80, v2
-		v_cvt_pk_bf16_f32 v106, v84, v2
-		v_add_f32_e32 v2, v80, v51
-		v_add_f32_e32 v2, v2, v85
+		v_add_f32_e32 v80, v80, v50
+		v_cvt_pk_bf16_f32 v106, v84, v50
+		v_add_f32_e32 v50, v80, v51
+		v_add_f32_e32 v50, v50, v85
 		v_cvt_pk_bf16_f32 v107, v51, v85
-		v_add_f32_e32 v2, v2, v86
-		v_add_f32_e32 v2, v2, v87
+		v_add_f32_e32 v50, v50, v86
+		v_add_f32_e32 v50, v50, v87
 		v_cvt_pk_bf16_f32 v80, v86, v87
-		v_add_f32_e32 v2, v2, v88
-		v_add_f32_e32 v2, v2, v89
+		v_add_f32_e32 v50, v50, v88
+		v_add_f32_e32 v50, v50, v89
 		v_cvt_pk_bf16_f32 v81, v88, v89
-		v_add_f32_e32 v2, v2, v90
-		v_add_f32_e32 v2, v2, v91
+		v_add_f32_e32 v50, v50, v90
+		v_add_f32_e32 v50, v50, v91
 		v_cvt_pk_bf16_f32 v82, v90, v91
-		v_add_f32_e32 v2, v2, v92
-		v_add_f32_e32 v84, v2, v93
+		v_add_f32_e32 v50, v50, v92
+		v_add_f32_e32 v84, v50, v93
 		v_cvt_pk_bf16_f32 v83, v92, v93
 		v_mov_b32_e32 v85, v84
 		v_cvt_pk_bf16_f32 v148, v96, v97
 		v_cvt_pk_bf16_f32 v149, v98, v99
 		v_permlane32_swap_b32_e32 v84, v85
-		v_add_f32_e32 v2, v84, v85
+		v_add_f32_e32 v50, v84, v85
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_mov_b32 m0, s10
@@ -631,14 +631,14 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[112:115], v[80:83], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[116:119], v[80:83], v[208:223]
 		s_add_i32 m0, s3, 0x1d000
-		v_add_f32_e32 v2, v47, v2
+		v_add_f32_e32 v47, v47, v50
 		buffer_load_dwordx4 v42, s[24:27], 0 offen lds
-		v_fma_f32 v47, v160, v40, v44
+		v_fma_f32 v50, v160, v40, v44
 		s_add_i32 m0, m0, 0x2200
 		v_fma_f32 v85, v161, v40, v44
 		buffer_load_dwordx4 v43, s[24:27], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[120:123], v[80:83], v[224:239]
-		v_exp_f32_e32 v47, v47
+		v_exp_f32_e32 v50, v50
 		v_exp_f32_e32 v80, v85
 		v_exp_f32_e32 v51, v51
 		s_waitcnt vmcnt(4)
@@ -670,7 +670,7 @@ flash_attention_bf16_gfx950:
 		v_exp_f32_e32 v79, v79
 		v_exp_f32_e32 v71, v71
 		v_exp_f32_e32 v81, v84
-		v_add_f32_e32 v82, v47, v80
+		v_add_f32_e32 v82, v50, v80
 		v_add_f32_e32 v82, v82, v51
 		v_add_f32_e32 v82, v82, v52
 		v_add_f32_e32 v82, v82, v53
@@ -715,10 +715,10 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v64, v55, v81
 		v_cvt_pk_bf16_f32 v63, v71, v81
 		v_mov_b32_e32 v65, v64
-		v_cvt_pk_bf16_f32 v84, v47, v80
+		v_cvt_pk_bf16_f32 v84, v50, v80
 		v_cvt_pk_bf16_f32 v85, v51, v52
 		v_permlane32_swap_b32_e32 v64, v65
-		v_add_f32_e32 v47, v64, v65
+		v_add_f32_e32 v50, v64, v65
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0x4100
@@ -838,14 +838,14 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[132:135], v[60:63], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[136:139], v[60:63], v[208:223]
 		s_add_i32 m0, s3, 0x10400
-		v_add_f32_e32 v2, v2, v47
+		v_add_f32_e32 v47, v47, v50
 		buffer_load_dwordx4 v46, s[24:27], 0 offen lds
-		v_fma_f32 v47, v64, v40, v44
+		v_fma_f32 v50, v64, v40, v44
 		s_add_i32 m0, m0, 0x2200
 		v_fma_f32 v56, v65, v40, v44
 		buffer_load_dwordx4 v48, s[24:27], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[140:143], v[60:63], v[224:239]
-		v_exp_f32_e32 v47, v47
+		v_exp_f32_e32 v50, v50
 		v_exp_f32_e32 v56, v56
 		v_exp_f32_e32 v51, v51
 		s_waitcnt vmcnt(4)
@@ -877,7 +877,7 @@ flash_attention_bf16_gfx950:
 		v_exp_f32_e32 v84, v89
 		v_exp_f32_e32 v81, v81
 		v_exp_f32_e32 v85, v90
-		v_add_f32_e32 v86, v47, v56
+		v_add_f32_e32 v86, v50, v56
 		v_add_f32_e32 v86, v86, v51
 		v_add_f32_e32 v86, v86, v52
 		v_add_f32_e32 v86, v86, v53
@@ -922,10 +922,10 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v58, v55, v85
 		v_cvt_pk_bf16_f32 v75, v81, v85
 		v_mov_b32_e32 v59, v58
-		v_cvt_pk_bf16_f32 v88, v47, v56
+		v_cvt_pk_bf16_f32 v88, v50, v56
 		v_cvt_pk_bf16_f32 v89, v51, v52
 		v_permlane32_swap_b32_e32 v58, v59
-		v_add_f32_e32 v47, v58, v59
+		v_add_f32_e32 v50, v58, v59
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0x8200
@@ -1045,14 +1045,14 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[116:119], v[72:75], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[120:123], v[72:75], v[208:223]
 		s_add_i32 m0, s3, 0x14800
-		v_add_f32_e32 v2, v2, v47
+		v_add_f32_e32 v47, v47, v50
 		buffer_load_dwordx4 v49, s[24:27], 0 offen lds
-		v_fma_f32 v47, v160, v40, v44
+		v_fma_f32 v50, v160, v40, v44
 		s_add_i32 m0, m0, 0x2200
 		v_fma_f32 v68, v161, v40, v44
-		buffer_load_dwordx4 v50, s[24:27], 0 offen lds
+		buffer_load_dwordx4 v2, s[24:27], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[124:127], v[72:75], v[224:239]
-		v_exp_f32_e32 v47, v47
+		v_exp_f32_e32 v50, v50
 		v_exp_f32_e32 v68, v68
 		v_exp_f32_e32 v51, v51
 		s_waitcnt vmcnt(4)
@@ -1084,7 +1084,7 @@ flash_attention_bf16_gfx950:
 		v_exp_f32_e32 v84, v87
 		v_exp_f32_e32 v79, v79
 		v_exp_f32_e32 v85, v88
-		v_add_f32_e32 v86, v47, v68
+		v_add_f32_e32 v86, v50, v68
 		v_add_f32_e32 v86, v86, v51
 		v_add_f32_e32 v86, v86, v52
 		v_add_f32_e32 v86, v86, v53
@@ -1129,23 +1129,23 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v64, v55, v85
 		v_cvt_pk_bf16_f32 v63, v79, v85
 		v_mov_b32_e32 v65, v64
-		v_cvt_pk_bf16_f32 v88, v47, v68
+		v_cvt_pk_bf16_f32 v88, v50, v68
 		v_cvt_pk_bf16_f32 v89, v51, v52
 		v_permlane32_swap_b32_e32 v64, v65
-		v_add_f32_e32 v47, v64, v65
-		v_add_f32_e32 v47, v2, v47
+		v_add_f32_e32 v50, v64, v65
+		v_add_f32_e32 v47, v47, v50
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0xc300
 		s_lshl_b32 s0, s13, 14
 		s_add_i32 s9, s1, s0
-		v_add_u32_e32 v2, s9, v6
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
+		v_add_u32_e32 v50, s9, v6
+		buffer_load_dwordx4 v50, s[20:23], 0 offen lds
 		s_add_i32 s0, s11, s0
-		v_add_u32_e32 v2, s0, v6
+		v_add_u32_e32 v50, s0, v6
 		s_add_i32 m0, m0, 0x2080
 		v_cvt_pk_bf16_f32 v90, v53, v54
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v50, s[20:23], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[160:175], v[72:75], v[8:11], 0
 		v_mfma_f32_32x32x16_bf16 v[64:79], v[92:95], v[8:11], 0
 		v_mfma_f32_32x32x16_bf16 v[160:175], v[96:99], v[12:15], v[160:175]
@@ -1202,7 +1202,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[80:83], v[88:91], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[84:87], v[88:91], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[92:95], v[88:91], v[224:239]
-		v_fma_f32 v2, v160, v40, v44
+		v_fma_f32 v50, v160, v40, v44
 		v_fma_f32 v51, v161, v40, v44
 		v_fma_f32 v52, v162, v40, v44
 		v_fma_f32 v53, v163, v40, v44
@@ -1215,7 +1215,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[176:191], v[96:99], v[152:155], v[176:191]
 		v_fma_f32 v88, v174, v40, v44
 		v_fma_f32 v89, v175, v40, v44
-		v_exp_f32_e32 v96, v2
+		v_exp_f32_e32 v96, v50
 		v_exp_f32_e32 v97, v51
 		v_exp_f32_e32 v98, v52
 		v_exp_f32_e32 v99, v53
@@ -1233,9 +1233,9 @@ flash_attention_bf16_gfx950:
 		v_exp_f32_e32 v109, v87
 		v_exp_f32_e32 v110, v88
 		v_exp_f32_e32 v111, v89
-		v_pk_fma_f32 v[52:53], v[64:65], v[40:41], v[44:45]
-		v_pk_fma_f32 v[54:55], v[66:67], v[40:41], v[44:45]
-		v_pk_fma_f32 v[64:65], v[68:69], v[40:41], v[44:45]
+		v_pk_fma_f32 v[50:51], v[64:65], v[40:41], v[44:45]
+		v_pk_fma_f32 v[52:53], v[66:67], v[40:41], v[44:45]
+		v_pk_fma_f32 v[54:55], v[68:69], v[40:41], v[44:45]
 		v_pk_fma_f32 v[86:87], v[70:71], v[40:41], v[44:45]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[116:119], v[152:155], v[224:239]
 		v_fma_f32 v88, v72, v40, v44
@@ -1245,12 +1245,12 @@ flash_attention_bf16_gfx950:
 		v_fma_f32 v92, v76, v40, v44
 		v_fma_f32 v93, v77, v40, v44
 		v_pk_fma_f32 v[94:95], v[78:79], v[40:41], v[44:45]
-		v_exp_f32_e32 v80, v52
-		v_exp_f32_e32 v81, v53
-		v_exp_f32_e32 v82, v54
+		v_exp_f32_e32 v80, v50
+		v_exp_f32_e32 v81, v51
+		v_exp_f32_e32 v82, v52
 		v_mfma_f32_32x32x16_bf16 v[176:191], v[120:123], v[56:59], v[176:191]
-		v_exp_f32_e32 v83, v55
-		v_exp_f32_e32 v84, v64
+		v_exp_f32_e32 v83, v53
+		v_exp_f32_e32 v84, v54
 		s_add_u32 s24, s24, 0x10000
 		s_addc_u32 s25, s25, 0
 		s_cmp_lt_i32 s8, 0x7e
@@ -1261,7 +1261,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[140:143], v[60:63], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[144:147], v[60:63], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[148:151], v[60:63], v[224:239]
-		v_mov_b32_e32 v85, v65
+		v_mov_b32_e32 v85, v55
 		s_cbranch_scc1 .Lflash_attention_bf16_gfx950.loop_head_0
 .Lflash_attention_bf16_gfx950.loop_exit_0:
 		s_branch .Lflash_attention_bf16_gfx950.if_end_1
@@ -1292,7 +1292,7 @@ flash_attention_bf16_gfx950:
 		buffer_load_dwordx4 v7, s[24:27], 0 offen lds
 		s_waitcnt vmcnt(4)
 		s_barrier
-		v_exp_f32_e32 v2, v85
+		v_exp_f32_e32 v50, v85
 		v_exp_f32_e32 v51, v86
 		v_exp_f32_e32 v52, v87
 		v_exp_f32_e32 v53, v88
@@ -1346,27 +1346,27 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v61, v61, v83
 		v_cvt_pk_bf16_f32 v105, v82, v83
 		v_add_f32_e32 v61, v61, v84
-		v_add_f32_e32 v61, v61, v2
-		v_cvt_pk_bf16_f32 v106, v84, v2
-		v_add_f32_e32 v2, v61, v51
-		v_add_f32_e32 v2, v2, v52
+		v_add_f32_e32 v61, v61, v50
+		v_cvt_pk_bf16_f32 v106, v84, v50
+		v_add_f32_e32 v50, v61, v51
+		v_add_f32_e32 v50, v50, v52
 		v_cvt_pk_bf16_f32 v107, v51, v52
-		v_add_f32_e32 v2, v2, v53
-		v_add_f32_e32 v2, v2, v54
-		v_add_f32_e32 v2, v2, v55
-		v_add_f32_e32 v2, v2, v56
+		v_add_f32_e32 v50, v50, v53
+		v_add_f32_e32 v50, v50, v54
+		v_add_f32_e32 v50, v50, v55
+		v_add_f32_e32 v50, v50, v56
 		v_cvt_pk_bf16_f32 v81, v55, v56
-		v_add_f32_e32 v2, v2, v57
-		v_add_f32_e32 v2, v2, v58
+		v_add_f32_e32 v50, v50, v57
+		v_add_f32_e32 v50, v50, v58
 		v_cvt_pk_bf16_f32 v82, v57, v58
-		v_add_f32_e32 v2, v2, v59
-		v_add_f32_e32 v56, v2, v60
+		v_add_f32_e32 v50, v50, v59
+		v_add_f32_e32 v56, v50, v60
 		v_cvt_pk_bf16_f32 v83, v59, v60
 		v_mov_b32_e32 v57, v56
 		v_cvt_pk_bf16_f32 v152, v96, v97
 		v_cvt_pk_bf16_f32 v153, v98, v99
 		v_permlane32_swap_b32_e32 v56, v57
-		v_add_f32_e32 v2, v56, v57
+		v_add_f32_e32 v50, v56, v57
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_mov_b32 m0, s10
@@ -1570,10 +1570,10 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v58, v54, v82
 		v_cvt_pk_bf16_f32 v67, v75, v82
 		v_mov_b32_e32 v59, v58
-		v_add_f32_e32 v2, v47, v2
+		v_add_f32_e32 v47, v47, v50
 		v_cvt_pk_bf16_f32 v148, v51, v52
 		v_permlane32_swap_b32_e32 v58, v59
-		v_add_f32_e32 v47, v58, v59
+		v_add_f32_e32 v50, v58, v59
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0x4100
@@ -1777,10 +1777,10 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v60, v55, v81
 		v_cvt_pk_bf16_f32 v71, v77, v81
 		v_mov_b32_e32 v61, v60
-		v_add_f32_e32 v2, v2, v47
+		v_add_f32_e32 v47, v47, v50
 		v_cvt_pk_bf16_f32 v152, v51, v52
 		v_permlane32_swap_b32_e32 v60, v61
-		v_add_f32_e32 v47, v60, v61
+		v_add_f32_e32 v50, v60, v61
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0x8200
@@ -1899,7 +1899,7 @@ flash_attention_bf16_gfx950:
 		v_exp_f32_e32 v80, v80
 		s_add_i32 m0, m0, 0x2200
 		v_cvt_pk_bf16_f32 v68, v63, v64
-		buffer_load_dwordx4 v50, s[24:27], 0 offen lds
+		buffer_load_dwordx4 v2, s[24:27], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[104:107], v[56:59], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[108:111], v[56:59], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[112:115], v[56:59], v[224:239]
@@ -1985,23 +1985,23 @@ flash_attention_bf16_gfx950:
 		v_add_f32_e32 v56, v55, v81
 		v_cvt_pk_bf16_f32 v79, v71, v81
 		v_mov_b32_e32 v57, v56
-		v_add_f32_e32 v2, v2, v47
+		v_add_f32_e32 v47, v47, v50
 		v_cvt_pk_bf16_f32 v152, v51, v52
 		v_permlane32_swap_b32_e32 v56, v57
-		v_add_f32_e32 v47, v56, v57
-		v_add_f32_e32 v47, v2, v47
+		v_add_f32_e32 v50, v56, v57
+		v_add_f32_e32 v47, v47, v50
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0xc300
 		s_lshl_b32 s0, s13, 14
 		s_add_i32 s9, s1, s0
-		v_add_u32_e32 v2, s9, v6
+		v_add_u32_e32 v50, s9, v6
 		s_add_i32 s0, s11, s0
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
-		v_add_u32_e32 v2, s0, v6
+		buffer_load_dwordx4 v50, s[20:23], 0 offen lds
+		v_add_u32_e32 v50, s0, v6
 		s_add_i32 m0, m0, 0x2080
 		v_cvt_pk_bf16_f32 v153, v53, v54
-		buffer_load_dwordx4 v2, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v50, s[20:23], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[160:175], v[84:87], v[8:11], 0
 		v_mfma_f32_32x32x16_bf16 v[240:255], v[88:91], v[8:11], 0
 		v_mfma_f32_32x32x16_bf16 v[160:175], v[96:99], v[12:15], v[160:175]
@@ -2058,7 +2058,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[56:59], v[152:155], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[60:63], v[152:155], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[64:67], v[152:155], v[224:239]
-		v_fma_f32 v2, v160, v40, v44
+		v_fma_f32 v50, v160, v40, v44
 		v_fma_f32 v51, v161, v40, v44
 		v_fma_f32 v52, v162, v40, v44
 		v_fma_f32 v53, v163, v40, v44
@@ -2071,7 +2071,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[176:191], v[68:71], v[156:159], v[176:191]
 		v_fma_f32 v64, v174, v40, v44
 		v_fma_f32 v65, v175, v40, v44
-		v_exp_f32_e32 v96, v2
+		v_exp_f32_e32 v96, v50
 		v_exp_f32_e32 v97, v51
 		v_exp_f32_e32 v98, v52
 		v_exp_f32_e32 v99, v53
@@ -2089,9 +2089,9 @@ flash_attention_bf16_gfx950:
 		v_exp_f32_e32 v109, v63
 		v_exp_f32_e32 v110, v64
 		v_exp_f32_e32 v111, v65
-		v_pk_fma_f32 v[52:53], v[240:241], v[40:41], v[44:45]
-		v_pk_fma_f32 v[54:55], v[242:243], v[40:41], v[44:45]
-		v_pk_fma_f32 v[56:57], v[244:245], v[40:41], v[44:45]
+		v_pk_fma_f32 v[50:51], v[240:241], v[40:41], v[44:45]
+		v_pk_fma_f32 v[52:53], v[242:243], v[40:41], v[44:45]
+		v_pk_fma_f32 v[54:55], v[244:245], v[40:41], v[44:45]
 		v_pk_fma_f32 v[86:87], v[246:247], v[40:41], v[44:45]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[88:91], v[156:159], v[224:239]
 		v_fma_f32 v88, v248, v40, v44
@@ -2101,12 +2101,12 @@ flash_attention_bf16_gfx950:
 		v_fma_f32 v92, v252, v40, v44
 		v_fma_f32 v93, v253, v40, v44
 		v_pk_fma_f32 v[94:95], v[254:255], v[40:41], v[44:45]
-		v_exp_f32_e32 v80, v52
-		v_exp_f32_e32 v81, v53
-		v_exp_f32_e32 v82, v54
+		v_exp_f32_e32 v80, v50
+		v_exp_f32_e32 v81, v51
+		v_exp_f32_e32 v82, v52
 		v_mfma_f32_32x32x16_bf16 v[176:191], v[112:115], v[72:75], v[176:191]
-		v_exp_f32_e32 v83, v55
-		v_exp_f32_e32 v84, v56
+		v_exp_f32_e32 v83, v53
+		v_exp_f32_e32 v84, v54
 		s_add_u32 s24, s24, 0x10000
 		s_addc_u32 s25, s25, 0
 		s_cmp_lt_i32 s8, 0x7e
@@ -2117,7 +2117,7 @@ flash_attention_bf16_gfx950:
 		v_mfma_f32_32x32x16_bf16 v[192:207], v[132:135], v[76:79], v[192:207]
 		v_mfma_f32_32x32x16_bf16 v[208:223], v[136:139], v[76:79], v[208:223]
 		v_mfma_f32_32x32x16_bf16 v[224:239], v[140:143], v[76:79], v[224:239]
-		v_mov_b32_e32 v85, v57
+		v_mov_b32_e32 v85, v55
 		s_cbranch_scc1 .Lflash_attention_bf16_gfx950.loop_head_1
 .Lflash_attention_bf16_gfx950.loop_exit_1:
 .Lflash_attention_bf16_gfx950.if_end_1:

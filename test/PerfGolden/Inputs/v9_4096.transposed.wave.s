@@ -299,16 +299,16 @@ v9_beyond_hotloop:
 		v_add_u32_e32 v83, v78, v11
 		v_add_u32_e32 v84, v78, v76
 		v_add_u32_e32 v85, v78, v77
-		v_add_u32_e32 v86, v78, v5
+		v_add_u32_e32 v78, v78, v5
 		v_add_u32_e32 v3, 0x180, v3
-		v_add_u32_e32 v78, v3, v7
-		v_add_u32_e32 v7, v3, v8
-		v_add_u32_e32 v8, v3, v10
-		v_add_u32_e32 v10, v3, v2
-		v_add_u32_e32 v2, v3, v11
-		v_add_u32_e32 v11, v3, v76
-		v_add_u32_e32 v76, v3, v77
-		v_add_u32_e32 v77, v3, v5
+		v_add_u32_e32 v7, v3, v7
+		v_add_u32_e32 v8, v3, v8
+		v_add_u32_e32 v10, v3, v10
+		v_add_u32_e32 v2, v3, v2
+		v_add_u32_e32 v11, v3, v11
+		v_add_u32_e32 v76, v3, v76
+		v_add_u32_e32 v77, v3, v77
+		v_add_u32_e32 v3, v3, v5
 		s_mov_b32 s24, s2
 		s_mov_b32 s25, s3
 		s_mov_b32 s28, s4
@@ -505,7 +505,7 @@ v9_beyond_hotloop:
 		s_nop 0
 		s_add_i32 m0, m0, 0x2100
 		s_nop 0
-		buffer_load_dwordx4 v86, s[28:31], 0 offen lds
+		buffer_load_dwordx4 v78, s[28:31], 0 offen lds
 		s_setprio 0
 		s_waitcnt lgkmcnt(0)
 		s_barrier
@@ -553,10 +553,6 @@ v9_beyond_hotloop:
 		ds_read_b128 v[72:75], v6 offset:65408
 		s_add_i32 m0, m0, 0xfffed740
 		s_nop 0
-		buffer_load_dwordx4 v78, s[24:27], 0 offen lds
-		s_nop 0
-		s_add_i32 m0, m0, 0x2100
-		s_nop 0
 		buffer_load_dwordx4 v7, s[24:27], 0 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0x2100
@@ -567,13 +563,17 @@ v9_beyond_hotloop:
 		s_nop 0
 		buffer_load_dwordx4 v10, s[24:27], 0 offen lds
 		s_nop 0
+		s_add_i32 m0, m0, 0x2100
+		s_nop 0
+		buffer_load_dwordx4 v2, s[24:27], 0 offen lds
+		s_nop 0
 		s_add_i32 m0, m0, 0x62e0
 		s_nop 0
-		buffer_load_dwordx4 v2, s[28:31], 0 offen lds
+		buffer_load_dwordx4 v11, s[28:31], 0 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0x2100
 		s_nop 0
-		buffer_load_dwordx4 v11, s[28:31], 0 offen lds
+		buffer_load_dwordx4 v76, s[28:31], 0 offen lds
 		s_setprio 0
 		s_waitcnt lgkmcnt(0)
 		s_barrier
@@ -630,11 +630,11 @@ v9_beyond_hotloop:
 		ds_read_b128 v[72:75], v6 offset:14752
 		s_add_i32 m0, m0, 0x62e0
 		s_nop 0
-		buffer_load_dwordx4 v76, s[28:31], 0 offen lds
+		buffer_load_dwordx4 v77, s[28:31], 0 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0x2100
 		s_nop 0
-		buffer_load_dwordx4 v77, s[28:31], 0 offen lds
+		buffer_load_dwordx4 v3, s[28:31], 0 offen lds
 		s_setprio 0
 		s_waitcnt lgkmcnt(0)
 		s_barrier

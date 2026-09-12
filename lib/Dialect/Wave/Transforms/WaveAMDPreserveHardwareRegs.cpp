@@ -384,10 +384,13 @@ private:
           .getResult();
     }
     if (kind == wave::HardwareResourceKind::VCC) {
-      if (wavefrontSize != 32)
-        return failureWithError(
-            before, "waveamd-preserve-hw-regs supports VCC preservation only "
-                    "for wave32");
+      if (wavefrontSize == 64)
+        return waveamdmachine::SReadVccB64Op::create(
+                   builder, loc,
+                   waveamdmachine::RegType::get(
+                       ctx, waveamdmachine::RegClass::SGPR, 2, -1),
+                   value)
+            .getResult();
       return waveamdmachine::SReadVccB32Op::create(builder, loc,
                                                    getSGPR1Type(ctx), value)
           .getResult();
@@ -440,10 +443,15 @@ private:
                                                  slot, zero.getResult())
           .getResult();
     }
-    if (kind == wave::HardwareResourceKind::VCC)
+    if (kind == wave::HardwareResourceKind::VCC) {
+      if (wavefrontSize == 64)
+        return waveamdmachine::SMovVccB64Op::create(builder, loc,
+                                                    getVCCType(ctx), slot)
+            .getResult();
       return waveamdmachine::SMovVccB32Op::create(builder, loc, getVCCType(ctx),
                                                   slot)
           .getResult();
+    }
     if (kind == wave::HardwareResourceKind::M0)
       return waveamdmachine::SMovM0Op::create(
                  builder, loc, waveamdmachine::M0Type::get(ctx), slot)

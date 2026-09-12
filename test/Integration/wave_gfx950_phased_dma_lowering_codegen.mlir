@@ -13,7 +13,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: s_cmp_ge_u32
 // ASM: s_cselect_b32
 // ASM: s_mov_b32 vcc_lo,
+// ASM: s_mov_b64 [[SAVED_VCC:s\[[0-9]+:[0-9]+\]]], vcc
 // ASM: buffer_load_dwordx4
+// ASM: s_mov_b64 vcc, [[SAVED_VCC]]
 // ASM: s_cbranch_vccnz [[SKIP:.Lgfx950_phased_dma_lowering_codegen.dma_issue_delay_0]]
 // ASM-NEXT: s_nop 15
 // ASM-NEXT: s_nop 0

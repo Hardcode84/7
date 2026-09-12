@@ -69,7 +69,7 @@ jobs:
           key: >-
             ${{ runner.os }}-python312-llvm-${{ env.LLVM_CACHE_VERSION }}-${{
             hashFiles('llvm-commit.txt', 'build_tools/build_llvm.py',
-            'build_tools/requirements.txt') }}
+            'build_tools/requirements.txt', 'build_tools/llvm_patches/*.patch') }}
 
       - name: Build LLVM
         if: steps.llvm-cache.outputs.cache-hit != 'true'
@@ -83,6 +83,7 @@ jobs:
       - name: Verify LLVM tree
         run: |
           test "$(cat build/llvm-install/.wave-mlir-commit)" = "$(cat llvm-commit.txt)"
+          test "$(cat build/llvm-install/.wave-mlir-patches)" = "$(python -c 'from build_tools.build_llvm import patch_fingerprint; print(patch_fingerprint())')"
           test -f build/_deps/llvm-project/llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.h
           test -f build/_deps/llvm-project/llvm/utils/lit/lit/main.py
           test -x build/llvm-build/bin/llvm-lit

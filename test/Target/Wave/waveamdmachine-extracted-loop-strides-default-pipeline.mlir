@@ -10,8 +10,8 @@ func.func @load_source_dialects(%p: !wave.ptr<#wave.global, i32>, %range: i32) {
 // DEFAULT-LABEL: func.func @default_pipeline_extracted_strided_kloop
 // DEFAULT: waveamdmachine.metadata
 // DEFAULT: waveamdmachine.uniform_loop
-// DEFAULT: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1{{.*}}>, %[[VOFF:.*]]: !waveamdmachine.reg<vgpr, 1{{.*}}>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2{{.*}}>):
-// DEFAULT: global_load_b128 %[[VOFF]], %[[BASE]]
+// DEFAULT: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1{{.*}}>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2{{.*}}>):
+// DEFAULT: global_load_b128 %[[VOFF:.*]], %[[BASE]]
 // DEFAULT-NOT: waveamdmachine.v_add_u32
 // DEFAULT: waveamdmachine.s_add_u64_u32 %[[BASE]], %{{.*}} : (!waveamdmachine.reg<sgpr, 2{{.*}}>, !waveamdmachine.imm)
 func.func @default_pipeline_extracted_strided_kloop(
