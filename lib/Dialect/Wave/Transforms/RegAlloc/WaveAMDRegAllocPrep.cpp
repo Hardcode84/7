@@ -1449,7 +1449,29 @@ static LogicalResult materializeAcyclicRegionJoinCopies(func::FuncOp func) {
 
 } // namespace
 
+static LogicalResult
+verifyMaterializationCandidatesCollapsed(func::FuncOp func) {
+  WalkResult candidates =
+      func.walk([](waveamdmachine::MaterializationCandidatesOp op) {
+        op.emitOpError("must be collapsed before register allocation");
+        return WalkResult::interrupt();
+      });
+  return failure(candidates.wasInterrupted());
+}
+
+static LogicalResult prepareRegionCopies(func::FuncOp func) {
+  if (failed(materializeAcyclicRegionJoinCopies(func)))
+    return failure();
+  if (failed(materializeRepetitiveRegionCycleCopies(func)))
+    return failure();
+  if (failed(splitDuplicateRepetitiveRegionInits(func)))
+    return failure();
+  return success();
+}
+
 LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
+  if (failed(verifyMaterializationCandidatesCollapsed(func)))
+    return failure();
   std::optional<WaveAMDRegisterLimits> targetLimits;
   if (waveamdmachine::findAMDGPUTargetModule(func)) {
     FailureOr<WaveAMDRegisterLimits> limits = getWaveAMDRegisterLimits(func);
@@ -1460,11 +1482,7 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
   eraseRegAfterOps(func);
   if (failed(splitLiveUpdateTupleBases(func)))
     return failure();
-  if (failed(materializeAcyclicRegionJoinCopies(func)))
-    return failure();
-  if (failed(materializeRepetitiveRegionCycleCopies(func)))
-    return failure();
-  if (failed(splitDuplicateRepetitiveRegionInits(func)))
+  if (failed(prepareRegionCopies(func)))
     return failure();
   if (failed(splitDuplicateMFMAAccumulatorInputs(func)))
     return failure();

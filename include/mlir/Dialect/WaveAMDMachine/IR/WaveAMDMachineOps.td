@@ -1940,6 +1940,43 @@ def WaveAMDMachine_SSendmsgDeallocVgprsOp
 def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
 def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
 
+def WaveAMDMachine_CandidateYieldOp : WaveAMDMachine_Op<"candidate_yield", [
+  Pure, ReturnLike, Terminator,
+  ParentOneOf<["MaterializationCandidatesOp"]>,
+  DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface,
+    ["getMutableSuccessorOperands"]>
+]> {
+  let summary = "return candidate results and optional cycle score";
+  let arguments = (ins Variadic<AnyType>:$values,
+                       OptionalAttr<WaveAMDMachine_NonNegativeI64Attr>:$cycles);
+  let assemblyFormat = "($values^ `:` type($values))? attr-dict";
+}
+
+def WaveAMDMachine_MaterializationCandidatesOp
+    : WaveAMDMachine_Op<"materialization_candidates", [
+  IsolatedFromAbove, RecursiveMemoryEffects,
+  PredOpTrait<"at least one candidate", CPred<"$_op.getNumRegions() != 0">>,
+  DeclareOpInterfaceMethods<RegionBranchOpInterface,
+    ["getEntrySuccessorOperands", "getSuccessorInputs",
+     "getRegionInvocationBounds"]>
+]> {
+  let summary = "equivalent specialized machine regions";
+  let description = [{
+    Each candidate receives the inputs through private block arguments and
+    returns the results with `candidate_yield`. Candidates must be equivalent.
+    Cycle scores do not change reachability. Collapse this operation to one
+    candidate after scheduling and before register allocation.
+  }];
+  let arguments = (ins Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region VariadicRegion<SizedRegion<1>>:$candidates);
+  let assemblyFormat = [{
+    ($inputs^ `:` type($inputs))? (`->` type($results)^)?
+    attr-dict-with-keyword regions
+  }];
+  let hasVerifier = 1;
+}
+
 def WaveAMDMachine_YieldOp : WaveAMDMachine_Op<"yield", [
   Pure,
   ReturnLike,

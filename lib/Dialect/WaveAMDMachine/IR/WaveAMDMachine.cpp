@@ -639,6 +639,52 @@ LogicalResult TDMLoadOp::verify() { return verifyTDMTransfer(*this); }
 
 LogicalResult TDMStoreOp::verify() { return verifyTDMTransfer(*this); }
 
+LogicalResult MaterializationCandidatesOp::verify() {
+  for (Region &region : getCandidates()) {
+    Block &block = region.front();
+    if (block.getArgumentTypes() != getInputs().getTypes())
+      return emitOpError("candidate argument types must match input types");
+    if (block.empty() || !isa<CandidateYieldOp>(block.back()))
+      return emitOpError("candidate must end with candidate_yield");
+    if (block.back().getOperandTypes() != getResultTypes())
+      return emitOpError("candidate yield types must match result types");
+  }
+  return success();
+}
+
+void MaterializationCandidatesOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  if (point.isParent()) {
+    for (Region &region : getCandidates())
+      regions.emplace_back(&region);
+    return;
+  }
+  regions.emplace_back(getOperation());
+}
+
+OperandRange MaterializationCandidatesOp::getEntrySuccessorOperands(
+    RegionSuccessor successor) {
+  return getInputs();
+}
+
+ValueRange
+MaterializationCandidatesOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.isOperation())
+    return getResults();
+  return successor.getSuccessor()->getArguments();
+}
+
+void MaterializationCandidatesOp::getRegionInvocationBounds(
+    ArrayRef<Attribute> operands,
+    SmallVectorImpl<InvocationBounds> &invocationBounds) {
+  invocationBounds.append(getNumRegions(), InvocationBounds(0, 1));
+}
+
+MutableOperandRange
+CandidateYieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
+  return getValuesMutable();
+}
+
 void UniformIfOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
   bool hasElse = !getElseRegion().empty();
