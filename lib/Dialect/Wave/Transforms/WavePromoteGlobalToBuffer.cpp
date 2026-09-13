@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 
@@ -117,6 +118,25 @@ scaleExpr(sym::Store &store, sym::ExprHandle expr, int64_t scale) {
     return failure();
   return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mul,
                                 *scaleExpr);
+}
+
+static FailureOr<sym::ExprHandle>
+wrapBufferElementOffset(sym::Store &store, sym::ExprHandle expr,
+                        int64_t elementBytes) {
+  if (!expr || elementBytes <= 0)
+    return failure();
+
+  // Buffer instructions retain only the low 32 bits of their byte offset.
+  // Express the equivalent quotient ring in element units at the point where
+  // the pointer acquires buffer semantics. Downstream symbolic transforms can
+  // then use that contract without inspecting the index expression's users.
+  constexpr int64_t byteRing = int64_t{1} << 32;
+  int64_t elementRing = byteRing / std::gcd(byteRing, elementBytes);
+  FailureOr<sym::ExprHandle> modulus =
+      sym::composeExprInt(store, elementRing);
+  if (failed(modulus))
+    return failure();
+  return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mod, *modulus);
 }
 
 static bool isIndexExprBindingType(Type type) {
@@ -361,12 +381,85 @@ public:
     });
     if (walkResult.wasInterrupted())
       return failure();
+    if (failed(normalizeBufferOffsets()))
+      return failure();
     if (changed)
       eraseDeadPointerOps();
     return success();
   }
 
 private:
+  static constexpr llvm::StringLiteral kAllowFullAddressAttr =
+      "allow_full_address";
+
+  static bool hasCanonicalBufferBase(Value value) {
+    if (auto buffer = value.getDefiningOp<waveamd::MakeBufferOp>())
+      return !buffer->hasAttr(kAllowFullAddressAttr);
+    if (auto add = value.getDefiningOp<PtrAddOp>())
+      return hasCanonicalBufferBase(add.getBase());
+    if (auto cast = value.getDefiningOp<PtrCastOp>())
+      return hasCanonicalBufferBase(cast.getSource());
+    return false;
+  }
+
+  LogicalResult normalizeBufferOffsets() {
+    SmallVector<PtrAddOp> adds;
+    func.walk([&](PtrAddOp add) {
+      if (hasCanonicalBufferBase(add.getBase()))
+        adds.push_back(add);
+    });
+
+    for (PtrAddOp add : adds) {
+      IndexExprOp index = add.getOffset().getDefiningOp<IndexExprOp>();
+      SplatOp splat;
+      if (!index) {
+        splat = add.getOffset().getDefiningOp<SplatOp>();
+        if (splat)
+          index = splat.getSource().getDefiningOp<IndexExprOp>();
+      }
+      // Raw i32 offsets already carry their wrapping semantics in their type.
+      // IndexExpr uses mathematical integers, so only serialized offsets need
+      // the buffer quotient ring made explicit.
+      if (!index)
+        continue;
+
+      std::optional<int64_t> elementBytes =
+          getPointerElementBytes(add.getBase().getType());
+      if (!elementBytes)
+        return add.emitError("cannot determine buffer pointer element size");
+      constexpr int64_t byteRing = int64_t{1} << 32;
+      int64_t elementRing = byteRing / std::gcd(byteRing, *elementBytes);
+      sym::ExprView expression(index.getExpr().getValue());
+      if (expression.getKind() == sym::ExprKind::Mod &&
+          sym::getIntegerLiteralValue(expression.getBinaryRhs()) ==
+              elementRing)
+        continue;
+
+      FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(index);
+      if (failed(symbolic))
+        return failure();
+      FailureOr<sym::ExprHandle> wrapped = wrapBufferElementOffset(
+          store, symbolic->expr, *elementBytes);
+      if (failed(wrapped))
+        return add.emitError("failed to express buffer offset wrapping");
+      symbolic->expr = *wrapped;
+
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(add);
+      FailureOr<Value> modular = materializeIndexExpr(
+          add.getOperation(), add.getLoc(), *symbolic, rewriter);
+      if (failed(modular))
+        return failure();
+      Value replacement = *modular;
+      if (splat)
+        replacement = SplatOp::create(rewriter, add.getLoc(),
+                                      add.getOffset().getType(), replacement);
+      rewriter.modifyOpInPlace(
+          add, [&] { add.getOffsetMutable().assign(replacement); });
+    }
+    return success();
+  }
+
   FailureOr<bool> promoteOperand(Operation *op, Value ptr,
                                  unsigned operandIndex, int64_t bytes) {
     if (!isGlobalPointerLike(ptr.getType()))
@@ -645,8 +738,9 @@ private:
     Value range = arith::ConstantIntOp::create(
         rewriter, base.getLoc(), rewriter.getI32Type(), kBufferRangeBytes);
     Type bufferType = getBufferPointerLikeType(base.getType());
-    Value buffer = waveamd::MakeBufferOp::create(rewriter, base.getLoc(),
-                                                 bufferType, base, range);
+    Value buffer = waveamd::MakeBufferOp::create(
+        rewriter, base.getLoc(), bufferType, base, range,
+        /*allow_full_address=*/nullptr);
     baseBuffers[base] = buffer;
     return buffer;
   }

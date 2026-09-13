@@ -99,7 +99,7 @@ struct LoopCyclicOffsetCandidate {
   SmallVector<Operation *> deadProducers;
   BoundExpr base;
   BoundExpr proof;
-  int64_t increment = 0;
+  BoundExpr increment;
   int64_t ring = 0;
   bool canAnchor = false;
 };
@@ -201,6 +201,7 @@ struct ExpansionState {
   llvm::SmallPtrSet<Operation *, 4> seenProducers;
   llvm::StringMap<Value> reserved;
   llvm::StringMap<Value> emitted;
+  bool modelWrappingIntegerArithmetic = false;
 };
 
 static LogicalResult appendExpandedBinding(ExpansionState &state,
@@ -290,6 +291,29 @@ static std::optional<sym::ExprBinaryOp> convertBinaryKind(BinaryKind kind) {
 }
 
 static FailureOr<sym::ExprHandle>
+wrapSignedIntegerExpr(sym::Store &store, sym::ExprHandle expr, unsigned bits) {
+  // Model the signed SSA value by its exact two's-complement bit pattern. This
+  // does not assert that the source operation is non-wrapping.
+  if (bits == 0 || bits >= 63)
+    return failure();
+  FailureOr<sym::ExprHandle> bias =
+      sym::composeExprInt(store, int64_t{1} << (bits - 1));
+  FailureOr<sym::ExprHandle> modulus =
+      sym::composeExprInt(store, int64_t{1} << bits);
+  if (failed(bias) || failed(modulus))
+    return failure();
+  FailureOr<sym::ExprHandle> biased =
+      sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Add, *bias);
+  FailureOr<sym::ExprHandle> wrapped =
+      succeeded(biased) ? sym::composeExprBinary(
+                              store, *biased, sym::ExprBinaryOp::Mod, *modulus)
+                        : FailureOr<sym::ExprHandle>(failure());
+  if (failed(wrapped))
+    return failure();
+  return sym::composeExprBinary(store, *wrapped, sym::ExprBinaryOp::Sub, *bias);
+}
+
+static FailureOr<sym::ExprHandle>
 expandValueExpr(Value value, StringRef stem, scf::ForOp loop, sym::Store &store,
                 DataFlowSolver &solver, ExpansionState &state,
                 unsigned depth = 0);
@@ -304,7 +328,8 @@ expandOrdinaryBinaryExpr(BinaryOp op, StringRef stem, scf::ForOp loop,
                          sym::Store &store, DataFlowSolver &solver,
                          ExpansionState &state, unsigned depth) {
   std::optional<sym::ExprBinaryOp> kind = convertBinaryKind(op.getKind());
-  if (!kind || !rangeProvesNoSignedOverflow(op, solver))
+  bool noSignedOverflow = rangeProvesNoSignedOverflow(op, solver);
+  if (!kind || (!state.modelWrappingIntegerArithmetic && !noSignedOverflow))
     return bindExpandedValue(op.getResult(), stem, store, state);
 
   FailureOr<sym::ExprHandle> lhs =
@@ -313,14 +338,23 @@ expandOrdinaryBinaryExpr(BinaryOp op, StringRef stem, scf::ForOp loop,
       expandValueExpr(op.getRhs(), stem, loop, store, solver, state, depth);
   if (failed(lhs) || failed(rhs))
     return failure();
-  return sym::composeExprBinary(store, *lhs, *kind, *rhs);
+  FailureOr<sym::ExprHandle> mathematical =
+      sym::composeExprBinary(store, *lhs, *kind, *rhs);
+  if (failed(mathematical) || noSignedOverflow)
+    return mathematical;
+  FailureOr<sym::ExprHandle> wrapped = wrapSignedIntegerExpr(
+      store, *mathematical, elementStorageBitWidth(op.getType()));
+  return succeeded(wrapped)
+             ? *wrapped
+             : bindExpandedValue(op.getResult(), stem, store, state);
 }
 
 static FailureOr<sym::ExprHandle>
 expandShiftLeftExpr(BinaryOp op, StringRef stem, scf::ForOp loop,
                     sym::Store &store, DataFlowSolver &solver,
                     ExpansionState &state, unsigned depth) {
-  if (!rangeProvesNoSignedOverflow(op, solver))
+  bool noSignedOverflow = rangeProvesNoSignedOverflow(op, solver);
+  if (!state.modelWrappingIntegerArithmetic && !noSignedOverflow)
     return bindExpandedValue(op.getResult(), stem, store, state);
   std::optional<int64_t> shift = getConstantIntValue(op.getRhs());
   if (!shift || *shift < 0 || *shift >= 63)
@@ -331,7 +365,15 @@ expandShiftLeftExpr(BinaryOp op, StringRef stem, scf::ForOp loop,
       sym::composeExprInt(store, int64_t{1} << *shift);
   if (failed(lhs) || failed(scale))
     return failure();
-  return sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Mul, *scale);
+  FailureOr<sym::ExprHandle> mathematical =
+      sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Mul, *scale);
+  if (failed(mathematical) || noSignedOverflow)
+    return mathematical;
+  FailureOr<sym::ExprHandle> wrapped = wrapSignedIntegerExpr(
+      store, *mathematical, elementStorageBitWidth(op.getType()));
+  return succeeded(wrapped)
+             ? *wrapped
+             : bindExpandedValue(op.getResult(), stem, store, state);
 }
 
 static FailureOr<sym::ExprHandle>
@@ -402,11 +444,11 @@ expandIndexExpr(IndexExprOp op, scf::ForOp loop, sym::Store &store,
   return substituted;
 }
 
-static FailureOr<ExpandedIndexExpr> expandIndexExpr(IndexExprOp op,
-                                                    scf::ForOp loop,
-                                                    sym::Store &store,
-                                                    DataFlowSolver &solver) {
+static FailureOr<ExpandedIndexExpr>
+expandIndexExpr(IndexExprOp op, scf::ForOp loop, sym::Store &store,
+                DataFlowSolver &solver, bool modelWrapping = false) {
   ExpansionState state;
+  state.modelWrappingIntegerArithmetic = modelWrapping;
   for (auto [nameAttr, value] : llvm::zip(op.getNames(), op.getBindings())) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     state.reserved[name] = value;
@@ -640,6 +682,47 @@ static FailureOr<BoundExpr> buildStrideExpr(const ExpandedIndexExpr &expanded,
   return bindLiveExpr(expanded, *stride, ivName, expanded.assumptions, extra);
 }
 
+static FailureOr<BoundExpr>
+buildModularStrideExpr(const ExpandedIndexExpr &expanded, StringRef ivName,
+                       scf::ForOp loop, sym::Store &store, int64_t ring) {
+  llvm::StringSet<> used;
+  collectUsedNames(expanded, used);
+  sym::ExprHandle iv = sym::composeExprSym(store, ivName);
+  SmallVector<NamedBinding> extra;
+  sym::ExprHandle step = symbolForValue(
+      store, loop.getStep(), (Twine(ivName) + "_step").str(), used, extra);
+
+  FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+      sym::Analysis::create(store, expanded.assumptions);
+  if (failed(analysis))
+    return failure();
+  FailureOr<sym::ExprHandle> nextIV =
+      (*analysis)->compose(iv, sym::ExprBinaryOp::Add, step);
+  FailureOr<sym::ExprHandle> next =
+      succeeded(nextIV) ? (*analysis)->substitute(expanded.materializationExpr,
+                                                  {{iv, *nextIV}})
+                        : FailureOr<sym::ExprHandle>(failure());
+  FailureOr<sym::ExprHandle> current =
+      (*analysis)->substitute(expanded.materializationExpr, {{iv, iv}});
+  FailureOr<sym::ExprHandle> difference =
+      succeeded(next) && succeeded(current)
+          ? (*analysis)->compose(*next, sym::ExprBinaryOp::Sub, *current)
+          : FailureOr<sym::ExprHandle>(failure());
+  FailureOr<sym::ExprHandle> ringExpr = (*analysis)->composeInteger(ring);
+  FailureOr<sym::ExprHandle> wrapped =
+      succeeded(difference) && succeeded(ringExpr)
+          ? (*analysis)->compose(*difference, sym::ExprBinaryOp::Mod, *ringExpr)
+          : FailureOr<sym::ExprHandle>(failure());
+  FailureOr<sym::ExprHandle> simplified =
+      succeeded(wrapped) ? simplifyExpanded(**analysis, *wrapped)
+                         : FailureOr<sym::ExprHandle>(failure());
+  if (failed(simplified) || hasSymbol(*simplified, ivName) ||
+      sym::getIntegerLiteralValue(*simplified) == int64_t{0})
+    return failure();
+  return bindLiveExpr(expanded, *simplified, ivName, expanded.assumptions,
+                      extra);
+}
+
 static bool isPowerOfTwo(int64_t value) {
   return value > 0 && (value & (value - 1)) == 0;
 }
@@ -810,16 +893,18 @@ matchCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
 
 static FailureOr<Value>
 createCyclicOffsetUpdate(IRRewriter &rewriter, Location loc, MLIRContext *ctx,
-                         sym::Store &store, Value current, int64_t increment,
-                         int64_t ring) {
-  FailureOr<sym::ExprHandle> offset = sym::composeExprSym(store, "offset");
-  FailureOr<sym::ExprHandle> step = sym::composeExprInt(store, increment);
+                         sym::Store &store, Value current,
+                         const BoundExpr &increment, int64_t ring) {
+  llvm::StringSet<> used;
+  collectUsedNames(increment, used);
+  std::string offsetName = uniqueName(used, "offset");
+  FailureOr<sym::ExprHandle> offset = sym::composeExprSym(store, offsetName);
   FailureOr<sym::ExprHandle> ringExpr = sym::composeExprInt(store, ring);
-  if (failed(offset) || failed(step) || failed(ringExpr))
+  if (failed(offset) || failed(ringExpr))
     return failure();
 
-  FailureOr<sym::ExprHandle> sum =
-      sym::composeExprBinary(store, *offset, sym::ExprBinaryOp::Add, *step);
+  FailureOr<sym::ExprHandle> sum = sym::composeExprBinary(
+      store, *offset, sym::ExprBinaryOp::Add, increment.expr);
   if (failed(sum))
     return failure();
   FailureOr<sym::ExprHandle> wrapped =
@@ -833,8 +918,11 @@ createCyclicOffsetUpdate(IRRewriter &rewriter, Location loc, MLIRContext *ctx,
 
   BoundExpr update;
   update.expr = *simplified;
-  update.names.push_back("offset");
+  update.assumptions = increment.assumptions;
+  update.names.push_back(offsetName);
   update.bindings.push_back(current);
+  llvm::append_range(update.names, increment.names);
+  llvm::append_range(update.bindings, increment.bindings);
   return createIndexExpr(rewriter, loc, ctx, update, nullptr).getResult();
 }
 
@@ -1172,7 +1260,87 @@ static bool canRewriteCyclicOffsetInLoop(scf::ForOp loop,
     return false;
   if (indexExpr->use_empty())
     return false;
-  return indexExpr.getResult().getType().isIndex();
+  Type type = indexExpr.getResult().getType();
+  if (SimdType simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  return type.isIndex();
+}
+
+static std::optional<int64_t>
+getExplicitPowerOfTwoModulus(sym::ExprHandle expr) {
+  sym::ExprView view(expr);
+  if (view.getKind() != sym::ExprKind::Mod)
+    return std::nullopt;
+  std::optional<int64_t> modulus =
+      sym::getIntegerLiteralValue(view.getBinaryRhs());
+  if (!modulus || *modulus <= 1 || *modulus > (int64_t{1} << 32) ||
+      !isPowerOfTwo(*modulus))
+    return std::nullopt;
+  return modulus;
+}
+
+static FailureOr<bool>
+buildExplicitModularOffsetCarryCandidate(
+    scf::ForOp loop, IndexExprOp indexExpr, sym::Store &store,
+    DataFlowSolver &solver, LoopCyclicOffsetCandidate &candidate) {
+  std::optional<int64_t> modulus =
+      getExplicitPowerOfTwoModulus(indexExpr.getExpr().getValue());
+  if (!modulus)
+    return false;
+  // Do not extract an outer modular recurrence across nested loop iteration.
+  // The pass does not carry modular facts through that second induction, so
+  // doing so can hide the unsigned offset proof needed by the nested loop's
+  // memory operations. Non-iterating control regions preserve the recurrence.
+  if (llvm::any_of(loop.getBody()->without_terminator(),
+                   [](Operation &op) { return isa<scf::ForOp>(op); }))
+    return false;
+
+  FailureOr<ExpandedIndexExpr> expanded =
+      expandIndexExpr(indexExpr, loop, store, solver,
+                      /*modelWrapping=*/true);
+  if (failed(expanded))
+    return failure();
+  std::optional<std::string> ivName =
+      findIVBinding(*expanded, loop.getInductionVar());
+  if (!ivName || hasLoopLocalNonIVBinding(loop, *expanded))
+    return false;
+
+  FailureOr<BoundExpr> base = buildBaseExpr(*expanded, *ivName, loop, store);
+  FailureOr<BoundExpr> increment =
+      buildModularStrideExpr(*expanded, *ivName, loop, store, *modulus);
+  if (failed(base) || failed(increment))
+    return false;
+  if (llvm::any_of(increment->bindings,
+                   [](Value value) { return isa<SimdType>(value.getType()); }))
+    return false;
+
+  // The expression explicitly defines its quotient ring. Within that ring,
+  // exact fixed-width integer arithmetic can be expanded without relying on
+  // a downstream address-space interpretation.
+  FailureOr<sym::ExprHandle> ring = sym::composeExprInt(store, *modulus);
+  FailureOr<sym::ExprHandle> wrappedBase =
+      succeeded(ring) ? sym::composeExprBinary(store, base->expr,
+                                               sym::ExprBinaryOp::Mod, *ring)
+                      : FailureOr<sym::ExprHandle>(failure());
+  FailureOr<sym::ExprHandle> wrappedProof =
+      succeeded(ring) ? sym::composeExprBinary(store, expanded->expr,
+                                               sym::ExprBinaryOp::Mod, *ring)
+                      : FailureOr<sym::ExprHandle>(failure());
+  if (failed(wrappedBase) || failed(wrappedProof))
+    return failure();
+
+  base->expr = *wrappedBase;
+  candidate.members.push_back({indexExpr, 0});
+  llvm::append_range(candidate.producers, expanded->producers);
+  candidate.base = std::move(*base);
+  candidate.proof.expr = *wrappedProof;
+  candidate.proof.assumptions = expanded->assumptions;
+  candidate.proof.names = expanded->names;
+  candidate.proof.bindings = expanded->bindings;
+  candidate.increment = std::move(*increment);
+  candidate.ring = *modulus;
+  candidate.canAnchor = true;
+  return true;
 }
 
 static FailureOr<std::optional<CyclicOffsetLoopMatch>>
@@ -1236,8 +1404,14 @@ buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
       matchCyclicOffsetInLoop(loop, indexExpr, store, solver);
   if (failed(match))
     return failure();
-  if (!*match)
+  if (!*match) {
+    FailureOr<bool> modularCarry = buildExplicitModularOffsetCarryCandidate(
+        loop, indexExpr, store, solver, candidate);
+    if (failed(modularCarry))
+      return failure();
+    matched = *modularCarry;
     return success();
+  }
 
   CyclicOffsetLoopMatch &cyclic = **match;
   std::optional<CyclicOffsetCarryShape> shape =
@@ -1257,7 +1431,11 @@ buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
   candidate.proof.assumptions = cyclic.expanded.assumptions;
   candidate.proof.names = cyclic.expanded.names;
   candidate.proof.bindings = cyclic.expanded.bindings;
-  candidate.increment = shape->increment;
+  FailureOr<sym::ExprHandle> increment =
+      sym::composeExprInt(store, shape->increment);
+  if (failed(increment))
+    return failure();
+  candidate.increment.expr = *increment;
   candidate.ring = shape->ring;
   candidate.canAnchor = cyclic.pattern.canAnchor;
   matched = true;
@@ -1348,7 +1526,13 @@ static FailureOr<bool>
 mergeCyclicOffsetCandidate(LoopCyclicOffsetCandidate &group,
                            LoopCyclicOffsetCandidate candidate,
                            sym::Store &store) {
-  if (group.increment != candidate.increment || group.ring != candidate.ring)
+  if (group.ring != candidate.ring)
+    return false;
+  FailureOr<std::optional<int64_t>> incrementDelta =
+      constantExprDelta(store, candidate.increment, group.increment);
+  if (failed(incrementDelta))
+    return failure();
+  if (!*incrementDelta || **incrementDelta != 0)
     return false;
   FailureOr<std::optional<int64_t>> delta =
       constantExprDelta(store, candidate.proof, group.proof);

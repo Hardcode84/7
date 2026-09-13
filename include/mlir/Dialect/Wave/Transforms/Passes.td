@@ -314,10 +314,12 @@ def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
     Rewrites loop-local `wave.ptr_add(base, wave.index_expr(... iv ...))`
     address formation into a pointer iter_arg when ixsimpl proves the
     per-iteration stride `expr(iv + step) - expr(iv)` no longer depends on the
-    loop IV. Proofs consume only the closed expression and explicit assumptions
-    serialized in that `wave.index_expr`; producer SSA is opaque. Machine
-    lowering can then choose SGPR base carries, buffer soffset marching, or
-    fallback from the ordinary carried-pointer form.
+    loop IV. When a buffer-pointer carry cannot be proven non-wrapping, the pass
+    expands loop-local integer address producers with their fixed-width wrapping
+    semantics and carries the buffer offset modulo 2^32 instead. Proofs consume
+    the closed expression and explicit assumptions. Machine lowering can then
+    choose SGPR base carries, buffer soffset marching, or the modulo-2^32 offset
+    carry that keeps an AMD buffer descriptor fixed.
   }];
   let dependentDialects = [
     "func::FuncDialect",

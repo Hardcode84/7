@@ -14,7 +14,7 @@ func.func @buffer_addr64_fallback(
                 wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %range = arith.constant 4096 : i32
-  %buf = waveamd.make_buffer %out, %range
+  %buf = waveamd.make_buffer %out, %range {allow_full_address}
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptr = wave.ptr_add %buf, %raw

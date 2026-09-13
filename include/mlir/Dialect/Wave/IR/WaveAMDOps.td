@@ -78,11 +78,16 @@ def WaveAMD_MakeBufferOp : WaveAMD_Op<"make_buffer", [Pure]> {
   let description = [{
     Constructs a `!wave.ptr<#waveamd.buffer, T>` value from a uniform base
     pointer and a uniform byte range. The resulting pointer is represented by a
-    uniform AMD buffer descriptor plus the lane-varying i32 offset carried by
-    subsequent `wave.ptr_add` operations.
+    uniform AMD buffer descriptor plus a lane-varying i32 byte offset.
+    Serialized element offsets derived from that descriptor therefore belong
+    to the quotient ring whose period is
+    `2^32 / gcd(2^32, element_bytes)`. `allow_full_address` explicitly opts out
+    of that contract so instruction selection may reconstruct an addr64 value
+    from the descriptor base and an offset wider than the descriptor path.
   }];
   let arguments = (ins Wave_Ptr:$base,
-                       AnySignlessInteger:$range);
+                       AnySignlessInteger:$range,
+                       OptionalAttr<UnitAttr>:$allow_full_address);
   let results = (outs Wave_Ptr:$result);
   let assemblyFormat = "$base `,` $range attr-dict `:` type($base) `,` type($range) `->` type($result)";
   let hasVerifier = 1;

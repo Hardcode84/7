@@ -41,4 +41,43 @@ func.func @cyclic_offset_group_codegen(
   return
 }
 
+// GROUP-LABEL: func.func @modular_buffer_offset_codegen(
+// GROUP: %[[BUFFER:.*]] = waveamd.make_buffer
+// GROUP: %[[BASE:.*]] = wave.index_expr <"Mod(lane, 4294967296)">
+// GROUP: scf.for {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
+// GROUP: wave.ptr_add %[[BUFFER]], %[[OFFSET]]
+// GROUP: %[[NEXT:.*]] = wave.index_expr <"Mod(offset + 128*x_1, 4294967296)">
+// GROUP: scf.yield %[[NEXT]]
+
+// ASM-LABEL: modular_buffer_offset_codegen:
+// ASM: buffer_load_ubyte
+func.func @modular_buffer_offset_codegen(
+    %a: !wave.ptr<#wave.global, i8>, %stride: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c4 = arith.constant 4 : i32
+  %range = arith.constant 4294967295 : i32
+  %buffer = waveamd.make_buffer %a, %range
+      : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
+  %lane = wave.lane_id : !wave.simd<i32, 64>
+  scf.for %i = %c0 to %c4 step %c1 : i32 {
+    %scaled = wave.binary muli %i, %stride : i32, i32 -> i32
+    %off = wave.index_expr <"Mod(128*x + lane, 4294967296)"> ["x", "lane"]
+        (%scaled, %lane)
+        : (i32, !wave.simd<i32, 64>) -> !wave.simd<index, 64>
+    %p = wave.ptr_add %buffer, %off
+        : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 64>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
+    %value, %token = wave.load %p
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>)
+        -> (!wave.simd<i8, 64>, !wave.mem.token)
+    %stored = wave.store %value -> %p after %token
+        : (!wave.simd<i8, 64>,
+           !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>, !wave.mem.token)
+        -> !wave.mem.token
+  }
+  return
+}
+
 }
