@@ -7,18 +7,19 @@
 // CHECK: waveamdmachine.s_cmp_eq_u32
 // CHECK: waveamdmachine.materialization_candidates
 // CHECK: waveamdmachine.uniform_loop
-// CHECK: waveamdmachine.continue_if
+// CHECK: test.variant = "a"
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: waveamdmachine.uniform_loop
-// CHECK: waveamdmachine.continue_if
+// CHECK: test.variant = "b"
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: waveamdmachine.materialization_candidates
 // CHECK: waveamdmachine.uniform_loop
-// CHECK: waveamdmachine.continue_if
+// CHECK: test.variant = "a"
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: waveamdmachine.uniform_loop
-// CHECK: waveamdmachine.continue_if
+// CHECK: test.variant = "b"
 // CHECK: waveamdmachine.candidate_yield
+// CHECK: return
 func.func @independent_loops(%x: !waveamdmachine.reg<sgpr, 1>) -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>) {
   %condition = waveamdmachine.s_cmp_eq_u32 %x, %x : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<scc, 1>
   %r0 = waveamdmachine.uniform_loop if %condition : !waveamdmachine.reg<scc, 1> carries(%x : !waveamdmachine.reg<sgpr, 1>) {
@@ -42,9 +43,11 @@ func.func @independent_loops(%x: !waveamdmachine.reg<sgpr, 1>) -> (!waveamdmachi
 // CHECK: waveamdmachine.materialization_candidates
 // CHECK: waveamdmachine.uniform_loop
 // CHECK: waveamdmachine.uniform_loop
+// CHECK: test.variant = "a"
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: waveamdmachine.uniform_loop
 // CHECK: waveamdmachine.uniform_loop
+// CHECK: test.variant = "b"
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: return
 func.func @nested_loops(%condition: !waveamdmachine.reg<scc, 1>, %x: !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1> {

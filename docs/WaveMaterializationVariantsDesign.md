@@ -16,9 +16,11 @@ loop-carried modular offset from `wave-extract-loop-strides`. Each source
 `wave.materialization_variants` operation records one independent value
 choice. Machine selection preserves it as
 `waveamdmachine.materialization_variants`. Common machine optimizations can add
-choices. Construction then partitions interacting choices into loop-based search
-scopes and builds a complete specialized candidate block for each assignment
-in a scope.
+choices. Construction then partitions interacting choices into search scopes
+and builds a complete specialized candidate block for each assignment in a
+scope. It lifts a choice to the outermost operation in the nearest isolated
+region. Thus, a candidate contains the complete address and memory-operation
+trees and their surrounding loop structure.
 
 Before scheduling-related passes, each scope is represented by one
 `waveamdmachine.materialization_candidates` operation with multiple regions.
@@ -30,13 +32,14 @@ use lists.
 Prescheduling passes process candidates independently. The scheduling pass
 schedules each candidate in parallel, computes its model cycle score, and
 records the score on its yield. An immediate collapse pass keeps the
-lowest-cycle region and inlines its scheduled body. Only the selected code
-reaches the remaining postschedule passes, register allocation, and emission.
+lowest-cycle region and retains its scheduled operation order. Candidate
+scheduling uses the same region collection, scheduling model, and order
+application as normal scheduling. Only the selected code reaches the remaining
+postschedule passes, register allocation, and emission.
 
 Implement the complete candidate-processing infrastructure before GLU
 calibration. Then use it to compare both forms, correct model ranking errors,
-and measure compilation cost. Keep automatic selection opt-in until the
-production gates pass.
+and measure compilation cost.
 
 ## Terms
 
@@ -168,15 +171,31 @@ by another `wave.materialization_variants` operation. It preserves first-seen
 leaf order. Shared producers remain when other operations still use them.
 One remaining choice folds to its value.
 
-Each variants operation defines one independent choice. Any combination of
-operand selections across operations must preserve program semantics. Shared
-producers and cost interactions determine search-region membership; they do
-not require synchronized operand indices.
+Each variants operation without a `materialization_choice_group` attribute
+defines one independent choice. Any combination of operand selections across
+independent operations must preserve program semantics.
 
-Alternatives that are valid only as a bundle do not satisfy this single-result
-contract. Such a producer needs a multi-result choice operation that
-represents the coupling structurally, with a separate semantic contract and
-design review.
+Operations with the same `materialization_choice_group` attribute define one
+coupled choice. They must have the same operand count. Candidate construction
+selects the same operand position for every result in the group. This contract
+keeps the value and token results of one effectful alternative together. The
+group is producer data. Candidate construction does not infer it from users.
+
+### Memory address alternatives
+
+A variants operation must not hide pointer arithmetic from machine address
+selection. Before machine selection, Wave duplicates each affected load or
+store. Each duplicate uses one concrete address tree. Every duplicate reaches
+machine selection, so normal address planning derives its `voffset`, `soffset`,
+descriptor, and instruction offset.
+
+Machine selection preserves a group and alternative index on every operation
+that it emits for a duplicated memory operation. It also preserves grouped
+choices on the load value, load token, and store token. Candidate construction
+resolves the grouped result choices and removes the emitted operations for all
+rejected indices. This removal is structural. Generic dead-code elimination
+only removes pure address computations that become dead after the rejected
+memory operation is removed.
 
 The verifier checks local operand and result structure. The driver builds a
 choice table from the operations in each search region. Internal trial helpers
@@ -240,12 +259,18 @@ Any removal of wrapper inputs, candidate arguments, or wrapper results is a
 serial structural rewrite across all candidates, not a worker-local signature
 edit.
 
-The generic MLIR region-branch canonicalization patterns reject
-`IsolatedFromAbove` operations. Their forwarding rewrites can also replace
-block arguments with external operands, which would break wrapper isolation.
-Apply those patterns to supported loops inside candidates, not to the wrapper
-itself. Keep the wrapper signature fixed through candidate processing; its
-eventual collapse performs the serial argument and result remapping.
+The generic MLIR region-branch canonicalization set contains three classes of
+rewrite. The forwarding rewrite can replace a block argument with an external
+operand. It does not run on an `IsolatedFromAbove` operation because that
+replacement would create an implicit capture. Dead-input removal and duplicate
+input removal only change explicit operands, arguments, and results of the
+same owner. They are safe for an isolated operation.
+
+Register the full set on the wrapper. The LLVM patch makes the forwarding
+rewrite fail without a change on an isolated operation and permits the two
+structural rewrites. Thus, serial canonicalization can reduce the common
+wrapper signature. Candidate-local parallel work must not change that
+signature.
 
 ### Scores and collapse
 
@@ -264,15 +289,17 @@ fallbacks.
 
 Collapse is serial. Map winning block arguments to wrapper operands, inline
 the winning body at the wrapper position, replace wrapper results with yielded
-values, and erase the yield, losing regions, and wrapper. Retain the chosen
-instruction order. Do not reschedule the winner. The remaining postschedule
-pipeline runs once on the resulting function.
+values, and erase the yield, losing regions, and wrapper. The scoring trial
+produces the final instruction order. Do not reschedule the collapsed function.
+The remaining postschedule pipeline then runs once.
 
 The backend pipeline expands choices after common machine optimizations and
 multi-wave specialization. `remove-dead-values`, `cse`, and `canonicalize` clean
-functions that contain candidate wrappers. Scheduling and collapse run next,
-before packed-MFMA optimization and the postschedule pipeline. Calibration pipelines use the same
-expansion, scheduling, and collapse order when scheduling is enabled.
+functions that contain candidate wrappers. Expansion marks each affected
+function as a scheduler input. The scheduler does not search for candidate ops
+to change function eligibility. Exact candidate scheduling, scoring, and
+collapse run next, before packed-MFMA optimization and the postschedule pipeline.
+Calibration pipelines use the same order when scheduling is enabled.
 
 ## Construction and lowering boundary
 
@@ -309,8 +336,8 @@ Wave alternative construction
   -> candidate-local machine cleanup and dead-carry removal
   -> candidate-local split barriers, MMA reuse, scalar masks, hazard repair
   -> candidate-local multi-wave specialization
-  -> schedule candidates and compute cycle scores in parallel
-  -> record scores on yields; collapse each wrapper to its winner
+  -> schedule candidates with the production scheduler and score them in parallel
+  -> record scores on yields; collapse each wrapper to its scheduled winner
   -> packed peephole and remaining production postschedule passes
   -> register allocation, final hazard/wait handling, emission once
 ```
@@ -483,16 +510,19 @@ regalloc.
 ## Enumeration, parallel mutation, and storage
 
 Assign scope IDs in stable lexical order before cloning. Within each scope,
-assign choice ordinals by a stable operation walk and use operand order for
-alternatives. Enumerate the Cartesian product with the first choice changing
-slowest. Candidate zero selects the first operand at each choice. Each source
-variants op remains an independent choice; there is no grouping attribute.
+assign choice dimensions by a stable operation walk and use operand order for
+alternatives. An operation without a group starts an independent dimension.
+Operations with the same group use one dimension and select the same operand
+index. Enumerate the Cartesian product with the first dimension changing
+slowest. Candidate zero selects the first operand in each dimension.
 
-For a configured cap `M` and binary choice counts `c_1, ..., c_R`, the
-candidate count is `sum(min(2^c_i, M))`, bounded by `M * R`. Independent
-scopes add their candidate counts instead of multiplying them. If a merged
-scope exceeds the cap, retain the first assignments up to the cap. Do not split
-coupled choices. Each retained candidate resolves every choice in the scope.
+For a configured cap `M`, let `a_ij` be the arity of dimension `j` in scope
+`i`. The candidate count is
+`sum(min(product(a_ij), M))`, bounded by `M` times the number of scopes.
+Independent scopes add their candidate counts instead of multiplying them. If
+a merged scope exceeds the cap, retain the first assignments up to the cap.
+Do not split coupled choices. Each retained candidate resolves every choice in
+the scope.
 
 Create the wrapper, its external operands, all destination regions, and each
 region's block arguments serially. Build a private `IRMapping` for each
@@ -541,10 +571,11 @@ All candidate bodies remain in the wrapper through scoring. Bound and report
 worker count, candidate counts, IR size, peak resident memory, CPU time, and
 elapsed time. Memory cost includes all candidate bodies, not just active
 workers. Clone only the affected scopes; common surrounding IR is lowered
-once. The work estimate is `sum(2^c_i * candidate_scope_cost_i)` plus common
-compilation and collapse costs. Measure actual lowering and scheduling costs;
-do not assume uniform scope sizes. Outer-tuner nesting remains disabled. No
-silent search cutoff is permitted.
+once. The work estimate is
+`sum(product(a_ij) * candidate_scope_cost_i)` plus common compilation and
+collapse costs. Measure actual lowering and scheduling costs; do not assume
+uniform scope sizes. Outer-tuner nesting remains disabled. Report when the
+configured cap truncates a search.
 
 ## Dead carry cleanup
 
@@ -605,22 +636,19 @@ type. Cleanup must not invoke register-allocation spill policy.
 
 ## Frequency and scoring contract
 
-The initial experiment requires an exact nonnegative static trip count for
-every loop that affects the score. Preserve counts through construction, carry
-pruning, and lowering. Distinguish pre-tested zero-trip loops from post-tested
-loops. Reject missing or inconsistent frequency metadata before simulation.
+Candidate construction lifts a choice to the outermost operation in its
+nearest isolated region. The candidate score measures the affected top-level
+slice at the current machine-model boundary state.
 
-Selection requires a strict simulation mode. Missing trip metadata must
-produce an error, not an assumed iteration count. A command-line trip-count
-override must not replace the kernel's proven execution frequency. A frequency
-upper bound is insufficient because alternatives can exchange rank within it.
-Bounded or dynamic frequencies require a separate objective and proof
-contract.
+A loop inside a candidate uses the normal scheduler and cycle estimator without
+a separate loop traversal. The estimator uses an exact nonnegative `i64`
+`waveamdmachine.trip_count` when the producer supplies one. Otherwise, it uses
+the same steady-state horizon as scheduler recurrence refinement. Reject
+negative, wrong-type, and zero post-tested exact counts.
 
-Score predicted completion cycles for the current search region at its exact
-execution frequencies and fixed external model context. Include its setup,
-loop bodies, required output completion, and actual exit effects. Do not
-substitute whole-function cycles or steady-state cycles per iteration. Fix the
+Score predicted completion cycles for the current search region in its fixed
+external model context. Include its setup, required output completion, and
+actual exit effects. Do not substitute whole-function cycles. Fix the
 device, launch, resident-wave configuration, calibration data, and simulator
 options across candidates. The region simulator must account for nested
 execution and boundary state; a flat list of body instructions is not
@@ -736,8 +764,8 @@ Integration tests compile both GLU witnesses through the full production
 suffix. Check baseline reproduction, final carry and instruction shapes, and
 conversion of source choices to machine choices, absence of value choices at
 scheduling, and absence of candidate wrappers and yields at allocation and
-emission. Separate forced-choice validation runs
-check final binaries for every candidate in the bounded corpus. Check selected
+emission. Separate candidate validation runs check final binaries for every
+candidate in the bounded corpus. Check selected
 binaries for every protected sweep configuration. Simulator checks support
 this evidence; target hardware is required for performance.
 
@@ -746,8 +774,7 @@ this evidence; target hardware is required for performance.
 ### Stage 1: complete the infrastructure
 
 Build the full bounded candidate-processing path before testing it on GLU.
-Keep candidate production and automatic selection opt-in. Implement these
-components in dependency order:
+Implement these components in dependency order:
 
 1. Source and machine value choices, machine candidate wrappers and yields,
    local verifiers, isolation, recursive effects, and region-branch interfaces.
@@ -758,10 +785,11 @@ components in dependency order:
    erasure, within each specialized machine candidate.
 4. Candidate-local production prescheduling and multi-wave specialization, with
    explicit state ownership and checked parallel mutation boundaries.
-5. Parallel scheduling, strict regional cycle scoring, deterministic diagnostic
-   collection, serial score attachment, and immediate winner collapse.
-6. Normal postschedule processing, register allocation, and emission of selected
-   bodies only, plus tracing and forced-choice controls for validation.
+5. Parallel production scheduling, strict regional cycle scoring,
+   deterministic diagnostic collection, serial score attachment, and immediate
+   winner collapse.
+6. Normal postschedule processing, register allocation, and emission of
+   selected bodies only.
 
 Add the specified dialect, transformation, concurrency, and integration tests
 as each component is implemented. Cover the full path through final emission,
@@ -788,7 +816,7 @@ Define CPU and resident-memory limits for the intended build environment.
 Compare against both LLVM and the last known-good Wave implementation with the
 same workload, output contract, and timing method.
 
-Force each legal candidate through the pipeline in separate validation runs.
+Compile each legal candidate through the pipeline in separate validation runs.
 Check correctness and compare its final code with independent compilation of
 that assignment. Require baseline reproduction. Then run automatic selection
 and compare regional cycle rankings with measurements of the actual binaries.
@@ -800,19 +828,19 @@ Measure per-scope cloning, specialization, prescheduling, scheduling, scoring,
 and collapse with the intended worker limit. Include memory for all retained
 candidate bodies. Common code is compiled once; postschedule work, allocation,
 and emission run once after collapse. Measure the actual sum of candidate costs.
-Separate forced-choice calibration runs from normal compilation measurements.
+Separate candidate calibration runs from normal compilation measurements.
 
-If correctness, ranking, or compilation cost fails a gate, keep selection opt-in,
-identify the mechanism, fix the implementation or model, and repeat the affected
-checks. Infrastructure completion does not waive a failed production gate.
+If correctness, ranking, or compilation cost fails a gate, identify the
+mechanism, fix the implementation or model, and repeat the affected checks.
+Infrastructure completion does not waive a failed production gate.
 
 ### Stage 3: production enablement
 
 All conditions must hold:
 
-- The model selects rematerialization for persistent GLU and carry for
-  optimized_async GLU, and preserves the fixed calibration corpus.
-- Separate forced-choice validation confirms correctness and intended final
+- The model selects the fastest measured form for each GLU calibration case
+  and preserves the fixed calibration corpus.
+- Separate candidate validation confirms correctness and intended final
   instruction, memory, and carry behavior for every feasible corpus candidate.
 - Controlled same-device A/B/B/A measurements preserve persistent baseline time
   and retain the optimized_async improvement.
@@ -828,6 +856,5 @@ All conditions must hold:
 
 A failed witness, protected row, or resource budget blocks production
 enablement. Gains elsewhere do not compensate. Passing these gates authorizes
-only the specified gfx950 loop-offset slice. More producers, dynamic
-frequencies, multiple kernels, or a larger per-region search require another
-evidence-backed design review.
+only the specified gfx950 loop-offset slice. More producers, multiple kernels,
+or a larger per-region search require another evidence-backed design review.

@@ -34,6 +34,21 @@ class LLVMPatchTests(unittest.TestCase):
         )
         self.input_path = self.source / "input.txt"
         self.input_path.write_text("before\n")
+        subprocess.run(["git", "add", "input.txt"], cwd=self.source, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=wave-mlir tests",
+                "-c",
+                "user.email=wave-mlir-tests@example.invalid",
+                "commit",
+                "-qm",
+                "test fixture",
+            ],
+            cwd=self.source,
+            check=True,
+        )
         self.addCleanup(patch.stopall)
         patch.object(build_llvm, "PATCH_DIR", self.patches).start()
 
@@ -43,9 +58,24 @@ class LLVMPatchTests(unittest.TestCase):
         build_llvm.apply_patches(self.source)
         self.assertEqual(self.input_path.read_text(), "after\n")
 
+    def test_apply_is_idempotent_for_overlapping_patch_stack(self):
+        second_patch = self.patches / "next.patch"
+        second_patch.write_text(
+            "diff --git a/input.txt b/input.txt\n"
+            "--- a/input.txt\n"
+            "+++ b/input.txt\n"
+            "@@ -1 +1 @@\n"
+            "-after\n"
+            "+final\n"
+        )
+        build_llvm.apply_patches(self.source)
+        self.assertEqual(self.input_path.read_text(), "final\n")
+        build_llvm.apply_patches(self.source)
+        self.assertEqual(self.input_path.read_text(), "final\n")
+
     def test_conflict_preserves_source(self):
         self.input_path.write_text("user edit\n")
-        with self.assertRaises(subprocess.CalledProcessError):
+        with self.assertRaises(RuntimeError):
             build_llvm.apply_patches(self.source)
         self.assertEqual(self.input_path.read_text(), "user edit\n")
 
@@ -65,6 +95,19 @@ class LLVMPatchTests(unittest.TestCase):
             self.patch_path.read_text().replace("+after", "+fixed")
         )
         self.assertFalse(build_llvm.already_installed(install, "commit", False, False))
+
+    def test_distribution_components_follow_enabled_features(self):
+        base = build_llvm.distribution_components(False, False)
+        self.assertNotIn("mlir-python-sources", base)
+        self.assertNotIn("mlir_rocm_runtime", base)
+
+        python = build_llvm.distribution_components(True, False)
+        self.assertIn("mlir-python-sources", python)
+        self.assertNotIn("mlir_rocm_runtime", python)
+
+        rocm = build_llvm.distribution_components(False, True)
+        self.assertNotIn("mlir-python-sources", rocm)
+        self.assertIn("mlir_rocm_runtime", rocm)
 
 
 if __name__ == "__main__":

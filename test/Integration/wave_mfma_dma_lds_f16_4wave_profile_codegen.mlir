@@ -37,7 +37,7 @@
 // MACHINE: [[BNEXT:%.*]], {{%.*}} = waveamdmachine.s_add_u64_u32
 // MACHINE: waveamdmachine.update_tuple {{%.*}}, [[ANEXT]] {offsets = [0]}
 // MACHINE: waveamdmachine.update_tuple {{%.*}}, [[BNEXT]] {offsets = [0]}
-// MACHINE: } {fetch_alignment = 32 : i64, fetch_phase = 12 : i64}
+// MACHINE: } {fetch_alignment = 32 : i64, fetch_phase = 12 : i64, waveamdmachine.trip_count = 2 : i64}
 
 // SPECIALIZED-ASM-LABEL: wmma_f16_matmul_tiled:
 // SPECIALIZED-ASM: v_readfirstlane_b32 [[FIRST:s[0-9]+]], {{v[0-9]+}}

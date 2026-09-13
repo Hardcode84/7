@@ -1952,7 +1952,10 @@ def WaveAMDMachine_MaterializationVariantsOp : WaveAMDMachine_Op<"materializatio
   let summary = "independent choice between equivalent materializations";
   let description = [{
     Each operand is an exact replacement for the result at every use.
-    All choices are equivalent. Each operation defines an independent choice.
+    All choices are equivalent. Operations with no
+    `materialization_choice_group` attribute define independent choices.
+    Operations with the same group select the same operand position. Grouped
+    choices preserve coupled value and token results through machine lowering.
     A single operand is valid and folds to that operand.
     Producers must prove equivalence and must be safe at their actual placement.
     This operation has no runtime meaning. Resolve it before code generation.
@@ -1998,6 +2001,7 @@ def WaveAMDMachine_MaterializationCandidatesOp
     ($inputs^ `:` type($inputs))? (`->` type($results)^)?
     attr-dict-with-keyword regions
   }];
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 
@@ -2039,6 +2043,7 @@ def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
     $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict
     `:` type($condition) (`->` type($results)^)?
   }];
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 
@@ -2059,6 +2064,7 @@ def WaveAMDMachine_UniformIfOp : WaveAMDMachine_Op<"uniform_if", [
     $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict
     `:` type($condition) (`->` type($results)^)?
   }];
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 

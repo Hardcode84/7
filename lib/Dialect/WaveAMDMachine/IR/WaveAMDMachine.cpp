@@ -475,6 +475,12 @@ LogicalResult ExecIfOp::verify() {
   return verifyExecIfYield(*this, getElseRegion(), "else", hasElse);
 }
 
+void ExecIfOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *context) {
+  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns,
+                                                          getOperationName());
+}
+
 SmallVector<ImplicitRegisterUse, 2> ExecIfOp::getImplicitRegisterUses() {
   SmallVector<ImplicitRegisterUse, 2> uses;
   if (!getElseRegion().empty() && !getThenRegion().empty())
@@ -629,6 +635,12 @@ LogicalResult UniformIfOp::verify() {
   return verifyUniformIfYield(*this, getElseRegion(), "else");
 }
 
+void UniformIfOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns,
+                                                          getOperationName());
+}
+
 template <typename TDMOp> static LogicalResult verifyTDMTransfer(TDMOp op) {
   size_t groups = op.getExtraGroups().size();
   if (groups != 0 && groups != 2)
@@ -663,6 +675,12 @@ LogicalResult MaterializationCandidatesOp::verify() {
       return emitOpError("candidate yield types must match result types");
   }
   return success();
+}
+
+void MaterializationCandidatesOp::getCanonicalizationPatterns(
+    RewritePatternSet &patterns, MLIRContext *context) {
+  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns,
+                                                          getOperationName());
 }
 
 void MaterializationCandidatesOp::getSuccessorRegions(

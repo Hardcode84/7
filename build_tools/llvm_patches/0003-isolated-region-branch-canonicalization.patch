@@ -1,0 +1,83 @@
+diff --git a/mlir/lib/Interfaces/ControlFlowInterfaces.cpp b/mlir/lib/Interfaces/ControlFlowInterfaces.cpp
+--- a/mlir/lib/Interfaces/ControlFlowInterfaces.cpp
++++ b/mlir/lib/Interfaces/ControlFlowInterfaces.cpp
+@@ -722,8 +722,11 @@ struct MakeRegionBranchOpSuccessorInputsDead : public RewritePattern {
+
+   LogicalResult matchAndRewrite(Operation *op,
+                                 PatternRewriter &rewriter) const override {
+-    assert(!op->hasTrait<OpTrait::IsIsolatedFromAbove>() &&
+-           "isolated-from-above ops are not supported");
++    // Replacing a successor input with a value defined above an isolated op
++    // would introduce an implicit capture. Other region branch
++    // canonicalizations can still remove dead or duplicate explicit inputs.
++    if (op->hasTrait<OpTrait::IsIsolatedFromAbove>())
++      return failure();
+
+     // Compute the mapping of successor inputs to successor operands.
+     auto regionBranchOp = cast<RegionBranchOpInterface>(op);
+@@ -845,9 +848,6 @@ struct RemoveDeadRegionBranchOpSuccessorInputs : public RewritePattern {
+
+   LogicalResult matchAndRewrite(Operation *op,
+                                 PatternRewriter &rewriter) const override {
+-    assert(!op->hasTrait<OpTrait::IsIsolatedFromAbove>() &&
+-           "isolated-from-above ops are not supported");
+-
+     // Compute tied values: values that must come as a set. If you remove one,
+     // you must remove all. If a successor op operand is forwarded to two
+     // successor inputs %a and %b, both %a and %b are in the same set.
+@@ -995,9 +995,6 @@ struct RemoveDuplicateSuccessorInputUses : public RewritePattern {
+
+   LogicalResult matchAndRewrite(Operation *op,
+                                 PatternRewriter &rewriter) const override {
+-    assert(!op->hasTrait<OpTrait::IsIsolatedFromAbove>() &&
+-           "isolated-from-above ops are not supported");
+-
+     // Collect all successor inputs and sort them. When dropping the uses of a
+     // successor input, we'd like to also drop the uses of the same tied
+     // successor inputs. Otherwise, a set of tied successor inputs may not
+diff --git a/mlir/test/lib/Dialect/Test/TestOpDefs.cpp b/mlir/test/lib/Dialect/Test/TestOpDefs.cpp
+--- a/mlir/test/lib/Dialect/Test/TestOpDefs.cpp
++++ b/mlir/test/lib/Dialect/Test/TestOpDefs.cpp
+@@ -1332,6 +1332,11 @@ IsolatedRegionBranchOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+   return getInputs();
+ }
+
++void IsolatedRegionBranchOp::getCanonicalizationPatterns(
++    RewritePatternSet &patterns, MLIRContext *context) {
++  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns, getName());
++}
++
+ MutableOperandRange
+ IsolatedRegionYieldOp::getMutableSuccessorOperands(RegionSuccessor successor) {
+   return getValuesMutable();
+diff --git a/mlir/test/lib/Dialect/Test/TestOps.td b/mlir/test/lib/Dialect/Test/TestOps.td
+--- a/mlir/test/lib/Dialect/Test/TestOps.td
++++ b/mlir/test/lib/Dialect/Test/TestOps.td
+@@ -2777,6 +2777,7 @@ def IsolatedRegionBranchOp : TEST_Op<"isolated_region_branch", [
+   let arguments = (ins Variadic<AnyType>:$inputs);
+   let results = (outs Variadic<AnyType>:$outputs);
+   let regions = (region VariadicRegion<SizedRegion<1>>:$branches);
++  let hasCanonicalizer = 1;
+ }
+
+ def IsolatedRegionYieldOp : TEST_Op<"isolated_region_yield", [
+diff --git a/mlir/test/Transforms/remove-dead-values-nested-root.mlir b/mlir/test/Transforms/remove-dead-values-nested-root.mlir
+--- a/mlir/test/Transforms/remove-dead-values-nested-root.mlir
++++ b/mlir/test/Transforms/remove-dead-values-nested-root.mlir
+@@ -94,3 +94,16 @@ func.func @dead_carry(%lb: index, %ub: index, %step: index, %x: i32) -> i32 {
+   }) : (index, index, index, i32) -> i32
+   return %r : i32
+ }
++
++// CANON-LABEL: func.func @isolated_dead_input
++// CANON-SAME: %[[X:.*]]: i32
++// CANON: "test.isolated_region_branch"(%[[X]])
++// CANON: ^bb0(%[[ARG:.*]]: i32):
++// CANON-NEXT: "test.isolated_region_yield"(%[[ARG]])
++func.func @isolated_dead_input(%x: i32) -> i32 {
++  %r = "test.isolated_region_branch"(%x, %x) ({
++  ^bb0(%arg: i32, %dead: i32):
++    "test.isolated_region_yield"(%arg) : (i32) -> ()
++  }) : (i32, i32) -> i32
++  return %r : i32
++}

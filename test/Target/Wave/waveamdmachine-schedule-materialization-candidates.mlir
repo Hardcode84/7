@@ -79,8 +79,9 @@ func.func @loop_3(%condition: !waveamdmachine.reg<scc, 1>, %x: !waveamdmachine.r
 // CHECK: [[WIN:%.*]] = waveamdmachine.materialization_candidates
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: waveamdmachine.candidate_yield
-// CHECK: [[IND:%.*]] = waveamdmachine.v_add_u32 {{.*}} {test.independent}
-// CHECK-NEXT: [[DEP:%.*]] = waveamdmachine.v_add_u32 [[WIN]], {{.*}} {test.dependent}
+// Common regions use the same scheduler invocation as candidate regions.
+// CHECK: [[DEP:%.*]] = waveamdmachine.v_add_u32 [[WIN]], {{.*}} {test.dependent}
+// CHECK-NEXT: [[IND:%.*]] = waveamdmachine.v_add_u32 {{.*}} {test.independent}
 // CHECK: return [[DEP]], [[IND]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @continuation(%off: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 2>, %a: !waveamdmachine.reg<vgpr, 1>, %b: !waveamdmachine.reg<vgpr, 1>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {

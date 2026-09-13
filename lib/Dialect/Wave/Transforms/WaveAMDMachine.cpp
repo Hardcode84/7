@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
+#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
@@ -3056,93 +3057,123 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   Operation *parentOp = op->getBlock()->getParentOp();
   if (parentOp == func || isa<waveamdmachine::UniformLoopOp>(parentOp))
     builder.setInsertionPoint(op);
-  return llvm::TypeSwitch<Operation *, LogicalResult>(op)
-      .Case<MaterializationVariantsOp>(
-          [&](auto choice) { return selectMaterializationVariants(choice); })
-      .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
-      .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
-      .Case<ConstantOp>([&](auto o) { return selectConstant(o); })
-      .Case<ub::PoisonOp>([&](auto o) { return selectPoison(o); })
-      .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
-      .Case<ReadCyclesOp>([&](auto o) { return selectReadCycles(o); })
-      .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
-      .Case<ClusterIdOp>([&](auto o) { return selectClusterId(o); })
-      .Case<ClusterWorkgroupIdOp>(
-          [&](auto o) { return selectClusterWorkgroupId(o); })
-      .Case<ClusterWorkgroupMaxIdOp>(
-          [&](auto o) { return selectClusterWorkgroupMaxId(o); })
-      .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
-      .Case<SplatOp>([&](auto o) { return selectSplat(o); })
-      .Case<AssumeOp>([&](auto o) { return selectAssume(o); })
-      .Case<URecipOp>([&](auto o) { return selectURecip(o); })
-      .Case<CtzOp>([&](auto o) { return selectCtz(o); })
-      .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
-      .Case<PackOp>([&](auto o) { return selectPack(o); })
-      .Case<ExtractOp>([&](auto o) { return selectExtract(o); })
-      .Case<CastOp>([&](auto o) { return selectCast(o); })
-      .Case<FAddOp>([&](auto o) { return selectFAdd(o); })
-      .Case<FSubOp>([&](auto o) { return selectFSub(o); })
-      .Case<FMulOp>([&](auto o) { return selectFMul(o); })
-      .Case<FMaxOp>([&](auto o) { return selectFMax(o); })
-      .Case<FmaOp>([&](auto o) { return selectFma(o); })
-      .Case<FExp2Op>([&](auto o) { return selectFExp2(o); })
-      .Case<FRcpOp>([&](auto o) { return selectFRcp(o); })
-      .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
-      .Case<arith::CmpIOp>([&](auto o) { return selectArithCmp(o); })
-      .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
-      .Case<CmpFOp>([&](auto o) { return selectCmpF(o); })
-      .Case<SelectOp>([&](auto o) { return selectSelect(o); })
-      .Case<BallotOp>([&](auto o) { return selectBallot(o); })
-      .Case<MaskAllOp>([&](auto o) { return selectMaskAll(o); })
-      .Case<MaskAnyOp>([&](auto o) { return selectMaskAny(o); })
-      .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
-      .Case<ShuffleOp>([&](auto o) { return selectShuffle(o); })
-      .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
-      .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
-      .Case<waveamd::SetPriorityOp>(
-          [&](auto o) { return selectSetPriority(o); })
-      .Case<waveamd::SetPriorityIncWgOp>(
-          [&](auto o) { return selectSetPriorityIncWg(o); })
-      .Case<waveamd::GlobalAtomicAddAcqRelOp>(
-          [&](auto o) { return selectGlobalAtomicAddAcqRel(*this, o); })
-      .Case<waveamd::MakeBufferOp>([&](auto o) { return selectMakeBuffer(o); })
-      .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
-      .Case<TokenOp>([&](auto o) { return selectToken(o); })
-      .Case<IssueTokenOp>([&](auto o) { return selectIssueToken(o); })
-      .Case<AfterOp, JoinOp>([&](auto o) { return selectTokenJoin(o); })
-      .Case<WhereOp>([&](auto o) { return selectWhere(o); })
-      .Case<StoreOp>([&](auto o) { return selectStore(*this, o); })
-      .Case<LoadOp>([&](auto o) { return selectLoad(*this, o); })
-      .Case<SharedMemoryBaseOp>(
-          [&](auto o) { return selectSharedMemoryBase(o); })
-      .Case<BarrierOp>([&](auto o) { return selectBarrier(o); })
-      .Case<waveamd::FragmentFillOp>(
-          [&](auto o) { return selectFragmentFill(o); })
-      .Case<waveamd::FragmentPackOp>(
-          [&](auto o) { return selectFragmentPack(o); })
-      .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
-      .Case<waveamd::MmaScaleOp>([&](auto o) { return selectMmaScale(o); })
-      .Case<waveamd::TransposeLoadOp>(
-          [&](auto o) { return selectTransposeLoad(o); })
-      .Case<waveamd::DmaLoadLdsOp>([&](auto o) { return selectDmaLoadLds(o); })
-      .Case<waveamd::TDMLoadOp>([&](auto o) { return selectTDMLoad(o); })
-      .Case<waveamd::TDMStoreOp>([&](auto o) { return selectTDMStore(o); })
-      .Case<waveamd::TDMPrefetchOp>(
-          [&](auto o) { return selectTDMPrefetch(o); })
-      .Case<waveamd::FragmentUnpackOp>(
-          [&](auto o) { return selectFragmentUnpack(o); })
-      .Case<func::ReturnOp>([&](auto o) { return selectReturn(o); })
-      .Case<scf::ForOp>([&](auto o) { return selectScfFor(*this, o); })
-      .Case<scf::IfOp>([&](auto o) { return selectScfIf(o); })
-      .Case<scf::YieldOp>([&](auto) {
-        // scf.yield is consumed by structured-control selection.
-        return success();
-      })
-      .Case<YieldOp>([&](auto) { return success(); })
-      .Default([&](auto) {
-        return op->emitError(
-            "unsupported operation in WaveAMDMachine selection");
-      });
+  Block *insertionBlock = builder.getInsertionBlock();
+  auto insertionPoint = builder.getInsertionPoint();
+  Operation *insertionBoundary =
+      insertionPoint == insertionBlock->end() ? nullptr : &*insertionPoint;
+  Operation *previous = insertionBoundary ? insertionBoundary->getPrevNode()
+                        : insertionBlock->empty() ? nullptr
+                                                  : &insertionBlock->back();
+  LogicalResult result =
+      llvm::TypeSwitch<Operation *, LogicalResult>(op)
+          .Case<MaterializationVariantsOp>([&](auto choice) {
+            return selectMaterializationVariants(choice);
+          })
+          .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
+          .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
+          .Case<ConstantOp>([&](auto o) { return selectConstant(o); })
+          .Case<ub::PoisonOp>([&](auto o) { return selectPoison(o); })
+          .Case<LaneIdOp>([&](auto o) { return selectLaneId(o); })
+          .Case<ReadCyclesOp>([&](auto o) { return selectReadCycles(o); })
+          .Case<WorkgroupIdOp>([&](auto o) { return selectWorkgroupId(o); })
+          .Case<ClusterIdOp>([&](auto o) { return selectClusterId(o); })
+          .Case<ClusterWorkgroupIdOp>(
+              [&](auto o) { return selectClusterWorkgroupId(o); })
+          .Case<ClusterWorkgroupMaxIdOp>(
+              [&](auto o) { return selectClusterWorkgroupMaxId(o); })
+          .Case<WorkitemIdOp>([&](auto o) { return selectWorkitemId(o); })
+          .Case<SplatOp>([&](auto o) { return selectSplat(o); })
+          .Case<AssumeOp>([&](auto o) { return selectAssume(o); })
+          .Case<URecipOp>([&](auto o) { return selectURecip(o); })
+          .Case<CtzOp>([&](auto o) { return selectCtz(o); })
+          .Case<BinaryOp>([&](auto o) { return selectBinary(o); })
+          .Case<PackOp>([&](auto o) { return selectPack(o); })
+          .Case<ExtractOp>([&](auto o) { return selectExtract(o); })
+          .Case<CastOp>([&](auto o) { return selectCast(o); })
+          .Case<FAddOp>([&](auto o) { return selectFAdd(o); })
+          .Case<FSubOp>([&](auto o) { return selectFSub(o); })
+          .Case<FMulOp>([&](auto o) { return selectFMul(o); })
+          .Case<FMaxOp>([&](auto o) { return selectFMax(o); })
+          .Case<FmaOp>([&](auto o) { return selectFma(o); })
+          .Case<FExp2Op>([&](auto o) { return selectFExp2(o); })
+          .Case<FRcpOp>([&](auto o) { return selectFRcp(o); })
+          .Case<IndexExprOp>([&](auto o) { return selectIndexExpr(o); })
+          .Case<arith::CmpIOp>([&](auto o) { return selectArithCmp(o); })
+          .Case<CmpIOp>([&](auto o) { return selectCmp(o); })
+          .Case<CmpFOp>([&](auto o) { return selectCmpF(o); })
+          .Case<SelectOp>([&](auto o) { return selectSelect(o); })
+          .Case<BallotOp>([&](auto o) { return selectBallot(o); })
+          .Case<MaskAllOp>([&](auto o) { return selectMaskAll(o); })
+          .Case<MaskAnyOp>([&](auto o) { return selectMaskAny(o); })
+          .Case<ReadFirstOp>([&](auto o) { return selectReadFirst(o); })
+          .Case<ShuffleOp>([&](auto o) { return selectShuffle(o); })
+          .Case<PtrCastOp>([&](auto o) { return selectPtrCast(o); })
+          .Case<PtrAddOp>([&](auto o) { return selectPtrAdd(o); })
+          .Case<waveamd::SetPriorityOp>(
+              [&](auto o) { return selectSetPriority(o); })
+          .Case<waveamd::SetPriorityIncWgOp>(
+              [&](auto o) { return selectSetPriorityIncWg(o); })
+          .Case<waveamd::GlobalAtomicAddAcqRelOp>(
+              [&](auto o) { return selectGlobalAtomicAddAcqRel(*this, o); })
+          .Case<waveamd::MakeBufferOp>(
+              [&](auto o) { return selectMakeBuffer(o); })
+          .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
+          .Case<TokenOp>([&](auto o) { return selectToken(o); })
+          .Case<IssueTokenOp>([&](auto o) { return selectIssueToken(o); })
+          .Case<AfterOp, JoinOp>([&](auto o) { return selectTokenJoin(o); })
+          .Case<WhereOp>([&](auto o) { return selectWhere(o); })
+          .Case<StoreOp>([&](auto o) { return selectStore(*this, o); })
+          .Case<LoadOp>([&](auto o) { return selectLoad(*this, o); })
+          .Case<SharedMemoryBaseOp>(
+              [&](auto o) { return selectSharedMemoryBase(o); })
+          .Case<BarrierOp>([&](auto o) { return selectBarrier(o); })
+          .Case<waveamd::FragmentFillOp>(
+              [&](auto o) { return selectFragmentFill(o); })
+          .Case<waveamd::FragmentPackOp>(
+              [&](auto o) { return selectFragmentPack(o); })
+          .Case<waveamd::MmaOp>([&](auto o) { return selectMma(o); })
+          .Case<waveamd::MmaScaleOp>([&](auto o) { return selectMmaScale(o); })
+          .Case<waveamd::TransposeLoadOp>(
+              [&](auto o) { return selectTransposeLoad(o); })
+          .Case<waveamd::DmaLoadLdsOp>(
+              [&](auto o) { return selectDmaLoadLds(o); })
+          .Case<waveamd::TDMLoadOp>([&](auto o) { return selectTDMLoad(o); })
+          .Case<waveamd::TDMStoreOp>([&](auto o) { return selectTDMStore(o); })
+          .Case<waveamd::TDMPrefetchOp>(
+              [&](auto o) { return selectTDMPrefetch(o); })
+          .Case<waveamd::FragmentUnpackOp>(
+              [&](auto o) { return selectFragmentUnpack(o); })
+          .Case<func::ReturnOp>([&](auto o) { return selectReturn(o); })
+          .Case<scf::ForOp>([&](auto o) { return selectScfFor(*this, o); })
+          .Case<scf::IfOp>([&](auto o) { return selectScfIf(o); })
+          .Case<scf::YieldOp>([&](auto) {
+            // scf.yield is consumed by structured-control selection.
+            return success();
+          })
+          .Case<YieldOp>([&](auto) { return success(); })
+          .Default([&](auto) {
+            return op->emitError(
+                "unsupported operation in WaveAMDMachine selection");
+          });
+  if (failed(result))
+    return failure();
+
+  Attribute group = op->getAttr(kMaterializationChoiceGroupAttrName);
+  Attribute alternative = op->getAttr(kMaterializationAlternativeAttrName);
+  if (alternative) {
+    assert(group && "materialization alternative needs a choice group");
+    Operation *inserted = previous                  ? previous->getNextNode()
+                          : insertionBlock->empty() ? nullptr
+                                                    : &insertionBlock->front();
+    while (inserted && inserted != insertionBoundary) {
+      if (!isMemoryEffectFree(inserted)) {
+        inserted->setAttr(kMaterializationChoiceGroupAttrName, group);
+        inserted->setAttr(kMaterializationAlternativeAttrName, alternative);
+      }
+      inserted = inserted->getNextNode();
+    }
+  }
+  return success();
 }
 
 LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantIntOp op) {
@@ -3592,8 +3623,11 @@ LogicalResult WaveAMDMachineSelector::selectMaterializationVariants(
   SmallVector<Value> choices;
   for (Value choice : op.getChoices())
     choices.push_back(expect(choice, op));
-  values[op.getResult()] = waveamdmachine::MaterializationVariantsOp::create(
+  auto selected = waveamdmachine::MaterializationVariantsOp::create(
       builder, op.getLoc(), choices.front().getType(), choices);
+  if (Attribute group = op->getAttr(kMaterializationChoiceGroupAttrName))
+    selected->setAttr(kMaterializationChoiceGroupAttrName, group);
+  values[op.getResult()] = selected;
   eraseIfTopLevel(op);
   return success();
 }
@@ -8912,7 +8946,10 @@ static FailureOr<Value> materializeDmaLoadLdsM0(WaveAMDMachineSelector &S,
                                                 const DmaPointers &ptrs) {
   Operation *previousDma =
       S.lastDmaToken ? S.lastDmaToken.getDefiningOp() : nullptr;
-  if (S.lastDmaM0 && previousDma &&
+  Operation *previousM0 = S.lastDmaM0 ? S.lastDmaM0.getDefiningOp() : nullptr;
+  if (!op->hasAttr(kMaterializationAlternativeAttrName) && S.lastDmaM0 &&
+      previousDma && previousM0 &&
+      !previousM0->hasAttr(kMaterializationAlternativeAttrName) &&
       previousDma->getBlock() == S.builder.getInsertionBlock() &&
       S.lastDmaDstBase == ptrs.dstBase) {
     std::optional<int64_t> delta =
@@ -8959,7 +8996,8 @@ static FailureOr<Value> materializeDmaIssueDelay(WaveAMDMachineSelector &S,
 
 static void recordDmaM0(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
                         const DmaPointers &ptrs, Value m0, Value token) {
-  if (!S.dmaIssueTimingEnabled)
+  if (!S.dmaIssueTimingEnabled ||
+      op->hasAttr(kMaterializationAlternativeAttrName))
     return;
   Operation *dma = token.getDefiningOp();
   Operation *previousDma =

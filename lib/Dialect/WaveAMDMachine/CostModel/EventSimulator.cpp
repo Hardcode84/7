@@ -136,14 +136,22 @@ static int eventKindRank(EventSimEventKind kind) {
   llvm_unreachable("bad event kind");
 }
 
-static int64_t getTripCount(UniformLoopOp loop, const EventSimConfig &config) {
+static FailureOr<int64_t> getTripCount(UniformLoopOp loop,
+                                       const EventSimConfig &config) {
   if (config.tripCountOverride >= 0)
     return config.tripCountOverride;
-  IntegerAttr trip =
-      loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
-  if (!trip)
-    return 1;
-  return std::max<int64_t>(0, trip.getInt());
+  Attribute rawTrip = loop->getAttr("waveamdmachine.trip_count");
+  if (!rawTrip)
+    return kScheduleSteadyStateIterations;
+  auto trip = dyn_cast<IntegerAttr>(rawTrip);
+  if (!trip || !trip.getType().isInteger(64) || trip.getInt() < 0 ||
+      (!loop.getEntryCond() && trip.getInt() == 0)) {
+    loop.emitOpError(
+        "waveamdmachine.trip_count must be a nonnegative i64; post-tested "
+        "loops require a positive value");
+    return failure();
+  }
+  return trip.getInt();
 }
 
 static YieldOp getYield(Region &region) {
@@ -272,22 +280,24 @@ private:
       return failure();
 
     Block &body = op.getBody().front();
-    int64_t trips = getTripCount(op, config);
-    if (trips <= 0) {
+    FailureOr<int64_t> trips = getTripCount(op, config);
+    if (failed(trips))
+      return failure();
+    if (*trips <= 0) {
       bindValues(op.getResults(), op.getInits());
       return success();
     }
 
     bindValues(body.getArguments(), op.getInits());
 
-    for (int64_t iter = 0; iter < trips; ++iter) {
+    for (int64_t iter = 0; iter < *trips; ++iter) {
       if (failed(runBlock(body)))
         return failure();
       ContinueIfOp terminator = dyn_cast<ContinueIfOp>(body.getTerminator());
       if (!terminator)
         return failure();
       ValueRange carries = terminator.getCarries();
-      if (iter + 1 == trips)
+      if (iter + 1 == *trips)
         bindValues(op.getResults(), carries);
       else
         bindValues(body.getArguments(), carries);

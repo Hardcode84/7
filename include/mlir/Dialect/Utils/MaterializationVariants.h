@@ -15,12 +15,21 @@
 #include "llvm/ADT/STLExtras.h"
 
 namespace mlir {
+inline constexpr llvm::StringLiteral kMaterializationChoiceGroupAttrName =
+    "materialization_choice_group";
+inline constexpr llvm::StringLiteral kMaterializationAlternativeAttrName =
+    "materialization_alternative";
+
 template <typename VariantsOp>
 struct FlattenMaterializationVariants : OpRewritePattern<VariantsOp> {
   using OpRewritePattern<VariantsOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(VariantsOp op,
                                 PatternRewriter &rewriter) const override {
+    // A grouped choice has positional semantics. Removing or flattening one
+    // operand would desynchronize it from the other results in the group.
+    if (op->hasAttr(kMaterializationChoiceGroupAttrName))
+      return failure();
     SmallVector<Value> worklist =
         llvm::to_vector(llvm::reverse(op.getChoices()));
     SmallVector<Value> choices;

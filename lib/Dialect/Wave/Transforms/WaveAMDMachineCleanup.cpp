@@ -8,6 +8,7 @@
 
 #include "WaveAMDHardwareResources.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
@@ -1731,6 +1732,8 @@ static Value findM0Operand(Operation *op) {
 static std::optional<Value> findPreviousDmaM0(SAddM0I32Op add) {
   Value dmaM0;
   for (Operation *op = add->getPrevNode(); op; op = op->getPrevNode()) {
+    if (op->hasAttr(kMaterializationAlternativeAttrName))
+      return std::nullopt;
     // Region op may hide physical M0 writes.
     if (!isWaveAMDMachineOp(op) || op->getNumRegions() != 0)
       return std::nullopt;

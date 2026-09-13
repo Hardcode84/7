@@ -695,7 +695,9 @@ func.func @drop_dead_simd_offset_carries(
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(wi, 4294967296)">
 // CHECK: scf.for {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
-// CHECK: wave.ptr_add %[[BUFFER]], %[[OFFSET]]
+// CHECK: %[[REMAT:.*]] = wave.index_expr <"Mod(128*i + wi, 4294967296)">
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[REMAT]], %[[OFFSET]]
+// CHECK: wave.ptr_add %[[BUFFER]], %[[CHOICE]]
 // CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(256 + offset, 4294967296)"> ["offset"](%[[OFFSET]])
 // CHECK: scf.yield %[[NEXT]]
 func.func @buffer_modular_offset_carry(
@@ -724,8 +726,10 @@ func.func @buffer_modular_offset_carry(
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
 // CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(wi, 4294967296)">
 // CHECK: scf.for {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
-// CHECK-NOT: wave.binary muli
-// CHECK: wave.ptr_add %[[BUFFER]], %[[OFFSET]]
+// CHECK: %[[SCALED:.*]] = wave.binary muli
+// CHECK: %[[REMAT:.*]] = wave.index_expr <"Mod(wi + 128*x, 4294967296)">
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[REMAT]], %[[OFFSET]]
+// CHECK: wave.ptr_add %[[BUFFER]], %[[CHOICE]]
 // CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(offset + 128*x_1, 4294967296)"> ["offset", "x_1"](%[[OFFSET]], %[[STRIDE]])
 // CHECK: scf.yield %[[NEXT]]
 func.func @buffer_modular_uniform_stride(
@@ -757,8 +761,10 @@ func.func @buffer_modular_uniform_stride(
 // CHECK-SAME: %[[STRIDE:[^ ]+]]: i32
 // CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(wi, 4294967296)">
 // CHECK: scf.for {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
-// CHECK-NOT: wave.binary muli
-// CHECK: wave.binary addi %[[OFFSET]], %[[OFFSET]]
+// CHECK: %[[SCALED:.*]] = wave.binary muli
+// CHECK: %[[REMAT:.*]] = wave.index_expr <"Mod(wi + 128*x, 4294967296)">
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[REMAT]], %[[OFFSET]]
+// CHECK: wave.binary addi %[[CHOICE]], %[[CHOICE]]
 // CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(offset + 128*x_1, 4294967296)"> ["offset", "x_1"](%[[OFFSET]], %[[STRIDE]])
 // CHECK: scf.yield %[[NEXT]]
 func.func @explicit_modular_offset_without_pointer_user(

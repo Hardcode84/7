@@ -11,6 +11,7 @@
 // RUN: wave-sim-report --func=lds_b16_latency --op-latencies --lds-counter-latency=7 --lds-value-latency=11 --smem-counter-latency=97 --smem-value-latency=101 %s | FileCheck %s --check-prefix=LDSB16LAT
 // RUN: wave-sim-report --func=trip_loop --trip-count=3 %s | FileCheck %s --check-prefix=TRIP
 // RUN: wave-sim-report --func=trip_loop --trip-count=10000 %s | FileCheck %s --check-prefix=TRIPBIG
+// RUN: wave-sim-report --func=trip_loop %s | FileCheck %s --check-prefix=TRIPDEFAULT
 // RUN: wave-sim-report --func=wmma_latency --op-latencies %s | FileCheck %s --check-prefix=WMMA
 // RUN: not wave-sim-report --func=mfma_32x32_latency --op-latencies %s 2>&1 | FileCheck %s --check-prefix=MFMA32
 // RUN: not wave-sim-report --func=mfma_scale_32x32_latency --op-latencies %s 2>&1 | FileCheck %s --check-prefix=MFMASCALE32
@@ -336,6 +337,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // TRIPBIG: trip_count_override: 10000
 // TRIPBIG: total_cycles: 20000
 // TRIPBIG: issued_ops: 10000
+
+// TRIPDEFAULT: func: trip_loop
+// TRIPDEFAULT: total_cycles: 8
+// TRIPDEFAULT: issued_ops: 4
 
 // WMMA: op_latencies:
 // WMMA: op=waveamdmachine.wmma_f32_16x16x16_f16 class=Write16PassWMMA fu=VALU latency=5

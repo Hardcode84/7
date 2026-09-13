@@ -58,6 +58,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveLowerRedistribute.cpp
   WaveLowerSymbolicMemory.cpp
   WaveLowerTokenSelects.cpp
+  WaveMaterializeMemoryVariants.cpp
   WaveMetaSpecialize.cpp
   WaveNormalizePointerOffsets.cpp
   WaveOptimizeMasks.cpp

@@ -24,6 +24,7 @@ def ConvertWaveAMDToWaveAMDMachine : Pass<"waveamd-to-machine"> {
 
   let dependentDialects = [
     "func::FuncDialect",
+    "ub::UBDialect",
     "waveamd::WaveAMDDialect",
     "waveamdmachine::WaveAMDMachineDialect"
   ];
@@ -716,8 +717,8 @@ def WaveAMDExpandMaterializationVariants
     : Pass<"waveamd-expand-materialization-variants"> {
   let summary = "Expand machine choices into specialized loop scopes";
   let description = [{
-    Enclose each choice in its complete containing control-flow operation.
-    Include dependent consumers and removable alternative setup. Merge scopes
+    Keep each choice inside its nearest containing loop. Include dependent
+    consumers and removable alternative setup from that block. Merge scopes
     that overlap or share this setup. Keep independent loops in separate scopes.
     Block terminators and machine return instructions stay outside the wrapper.
     Enumerate up to max-candidates assignments in operand order, with the first
@@ -727,6 +728,22 @@ def WaveAMDExpandMaterializationVariants
   let options = [Option<"maxCandidates", "max-candidates", "unsigned", "16",
                        "Maximum assignments per search scope">];
   let dependentDialects = ["waveamdmachine::WaveAMDMachineDialect"];
+}
+
+def WaveMaterializeMemoryVariants
+    : Pass<"wave-materialize-memory-variants"> {
+  let summary = "Duplicate memory operations for concrete address variants";
+  let description = [{
+    Replace a load or store through a pointer-offset materialization choice with
+    one operation per concrete address. Put grouped choices on the duplicated
+    result values and tokens. All memory alternatives then reach machine
+    selection with a complete address tree. Candidate construction removes the
+    alternatives that do not match its selected group index.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
 }
 
 def WaveAMDCollapseMaterializationVariants
@@ -779,7 +796,7 @@ def WaveAMDMachineSchedule
     Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
            "Apply greedy local schedules.">,
     Option<"requireSelectedInput", "require-selected-input", "bool", /*default=*/"false",
-           "Only schedule functions stamped by waveamd-to-machine or containing materialization candidates.">
+           "Only schedule functions stamped by waveamd-to-machine.">
   ];
 }
 

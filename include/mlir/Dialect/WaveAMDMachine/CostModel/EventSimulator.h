@@ -28,6 +28,8 @@ namespace mlir::waveamdmachine {
 struct ArchData;
 class CalibrationData;
 
+inline constexpr unsigned kScheduleSteadyStateIterations = 4;
+
 struct EventSimConfig {
   explicit EventSimConfig(unsigned wavefrontSize)
       : wavefrontSize(wavefrontSize) {}

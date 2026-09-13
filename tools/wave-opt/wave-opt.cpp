@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
         ctx->getOrLoadDialect<mlir::wavemeta::WaveMetaDialect>();
         ctx->getOrLoadDialect<mlir::waveamdmachine::WaveAMDMachineDialect>();
         ctx->getOrLoadDialect<mlir::ROCDL::ROCDLDialect>();
+        ctx->getOrLoadDialect<mlir::ub::UBDialect>();
       });
   mlir::registerCanonicalizerPass();
   mlir::registerRemoveDeadValuesPass();

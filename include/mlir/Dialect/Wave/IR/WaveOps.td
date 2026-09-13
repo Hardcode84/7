@@ -38,7 +38,10 @@ def Wave_MaterializationVariantsOp : Wave_Op<"materialization_variants", [
   let summary = "independent choice between equivalent materializations";
   let description = [{
     Each operand is an exact replacement for the result at every use.
-    All choices are equivalent. Each operation defines an independent choice.
+    All choices are equivalent. Operations with no
+    `materialization_choice_group` attribute define independent choices.
+    Operations with the same group select the same operand position. Producers
+    use grouped choices for the coupled results of duplicated effectful ops.
     A single operand is valid and folds to that operand.
     Producers must prove equivalence and must be safe at their actual placement.
     This operation has no runtime meaning. Resolve it before code generation.

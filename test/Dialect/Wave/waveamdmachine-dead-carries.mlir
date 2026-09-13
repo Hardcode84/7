@@ -374,3 +374,56 @@ func.func @duplicate_live_carries(%init: !s, %cond: !c, %token: !t) -> (!s, !s) 
   } -> !s, !s
   return %r#0, %r#1 : !s, !s
 }
+
+// CANON-LABEL: func.func @dead_exec_if_token(
+// CANON: waveamdmachine.exec_if
+// CANON: } : !waveamdmachine.reg<sgpr, 2>{{$}}
+// CLEAN-LABEL: func.func @dead_exec_if_token(
+// CLEAN: waveamdmachine.exec_if
+// CLEAN: } : !waveamdmachine.reg<sgpr, 2>{{$}}
+func.func @dead_exec_if_token(%cond: !waveamdmachine.reg<sgpr, 2>, %token: !t) {
+  %unused = waveamdmachine.exec_if %cond {
+    waveamdmachine.s_barrier %token : (!t) -> ()
+    waveamdmachine.yield %token : !t
+  } otherwise {
+    waveamdmachine.yield %token : !t
+  } : !waveamdmachine.reg<sgpr, 2> -> !t
+  return
+}
+
+// CANON-LABEL: func.func @dead_uniform_if_token(
+// CANON: waveamdmachine.uniform_if
+// CANON: } : !waveamdmachine.reg<scc, 1>{{$}}
+// CLEAN-LABEL: func.func @dead_uniform_if_token(
+// CLEAN: waveamdmachine.uniform_if
+// CLEAN: } : !waveamdmachine.reg<scc, 1>{{$}}
+func.func @dead_uniform_if_token(%cond: !c, %token: !t) {
+  %unused = waveamdmachine.uniform_if %cond {
+    waveamdmachine.s_barrier %token : (!t) -> ()
+    waveamdmachine.yield %token : !t
+  } otherwise {
+    waveamdmachine.yield %token : !t
+  } : !c -> !t
+  return
+}
+
+// CANON-LABEL: func.func @dead_candidate_input(
+// CANON: waveamdmachine.materialization_candidates %{{.*}} : !waveamdmachine.mem.token
+// CANON-NOT: !waveamdmachine.reg<sgpr, 1>
+// CANON: return
+// CLEAN-LABEL: func.func @dead_candidate_input(
+// CLEAN: waveamdmachine.materialization_candidates %{{.*}} : !waveamdmachine.mem.token
+// CLEAN-NOT: !waveamdmachine.reg<sgpr, 1>
+// CLEAN: return
+func.func @dead_candidate_input(%dead: !s, %token: !t) {
+  waveamdmachine.materialization_candidates %dead, %token : !s, !t {
+  ^bb0(%unused: !s, %candidate_token: !t):
+    waveamdmachine.s_barrier %candidate_token : (!t) -> ()
+    waveamdmachine.candidate_yield
+  }, {
+  ^bb0(%unused: !s, %candidate_token: !t):
+    waveamdmachine.s_barrier %candidate_token : (!t) -> ()
+    waveamdmachine.candidate_yield
+  }
+  return
+}

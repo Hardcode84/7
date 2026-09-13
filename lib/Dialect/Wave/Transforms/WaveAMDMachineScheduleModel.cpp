@@ -43,9 +43,7 @@ static constexpr StringLiteral kDmaIssueAfterDelayAttr =
     "waveamdmachine.dma_issue_after_delay";
 static constexpr uint64_t kMaxFlatWorkgroupSize = 1024;
 static constexpr unsigned kSteadyStateFillsPerTarget = 16;
-static constexpr unsigned kSingleWaveSteadyStateIterations = 4;
 static constexpr unsigned kSingleWaveSteadyStateRefinementLimit = 3;
-static constexpr unsigned kMultiWaveSteadyStateIterations = 4;
 static constexpr unsigned kMultiWaveSteadyStateRefinementLimit = 3;
 
 struct WorkgroupShape {
@@ -279,9 +277,9 @@ static SingleWaveRefinementStep
 refineSingleWaveScheduleOnce(SingleWaveScheduleBuildProvider buildProvider,
                              SingleWaveRefinementState &state,
                              SingleWaveScheduleDecision &decision) {
-  SingleWaveScheduleBuildRequest request{state.accepted.order,
-                                         kSingleWaveSteadyStateIterations,
-                                         /*replaySteadyState=*/true};
+  SingleWaveScheduleBuildRequest request{
+      state.accepted.order, waveamdmachine::kScheduleSteadyStateIterations,
+      /*replaySteadyState=*/true};
   FailureOr<SingleWaveScheduleCandidateFacts> candidate =
       buildProvider(request);
   if (failed(candidate)) {
@@ -311,7 +309,7 @@ finishSingleWaveRefinement(const SingleWaveRefinementState &state) {
   unsigned recurrenceModelMoves = state.accepted.recurrenceModelMoves;
   if (state.usedModeledRecurrence && recurrenceModelMoves == 0)
     recurrenceModelMoves = 1;
-  return {kSingleWaveSteadyStateIterations, state.refinements,
+  return {waveamdmachine::kScheduleSteadyStateIterations, state.refinements,
           recurrenceModelMoves};
 }
 
@@ -364,9 +362,9 @@ static FailureOr<bool>
 refineMultiWaveScheduleOnce(MultiWaveScheduleBuildProvider buildProvider,
                             MultiWaveRefinementState &state,
                             MultiWaveScheduleDecision &decision) {
-  MultiWaveScheduleBuildRequest request{state.accepted.orders,
-                                        kMultiWaveSteadyStateIterations,
-                                        /*replaySteadyState=*/true};
+  MultiWaveScheduleBuildRequest request{
+      state.accepted.orders, waveamdmachine::kScheduleSteadyStateIterations,
+      /*replaySteadyState=*/true};
   FailureOr<MultiWaveScheduleCandidateFacts> candidate = buildProvider(request);
   if (failed(candidate))
     return failure();
@@ -387,7 +385,7 @@ static MultiWaveScheduleRefinementStats
 finishMultiWaveRefinement(const MultiWaveRefinementState &state) {
   MultiWaveScheduleRefinementStats stats;
   stats.recurrenceModelMoves = state.accepted.recurrenceModelMoves;
-  stats.steadyStateIterations = kMultiWaveSteadyStateIterations;
+  stats.steadyStateIterations = waveamdmachine::kScheduleSteadyStateIterations;
   stats.steadyStateRefinements = state.refinements;
   for (unsigned classId : llvm::seq<unsigned>(kMultiWaveScheduleClassCount))
     if (state.usedModeledRecurrence[classId] &&

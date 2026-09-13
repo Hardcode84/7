@@ -64,11 +64,11 @@ LLVM_DISTRIBUTION_COMPONENTS = (
     "mlir-cmake-exports",
     "mlir-headers",
     "mlir-libraries",
-    "mlir-python-sources",
     "mlir-tblgen",
     "not",
     "split-file",
 )
+MLIR_PYTHON_DISTRIBUTION_COMPONENTS = ("mlir-python-sources",)
 ROCM_RUNNER_DISTRIBUTION_COMPONENTS = (
     "mlir-runner",
     "mlir_apfloat_wrappers",
@@ -76,6 +76,17 @@ ROCM_RUNNER_DISTRIBUTION_COMPONENTS = (
     "mlir_rocm_runtime",
     "mlir_runner_utils",
 )
+
+
+def distribution_components(
+    enable_python_bindings: bool, enable_rocm_runner: bool
+) -> tuple[str, ...]:
+    components = LLVM_DISTRIBUTION_COMPONENTS
+    if enable_python_bindings:
+        components += MLIR_PYTHON_DISTRIBUTION_COMPONENTS
+    if enable_rocm_runner:
+        components += ROCM_RUNNER_DISTRIBUTION_COMPONENTS
+    return components
 
 
 def read_pinned_commit() -> str:
@@ -170,16 +181,40 @@ def patch_fingerprint() -> str:
 
 
 def apply_patches(source_dir: Path) -> None:
-    for patch in sorted(PATCH_DIR.glob("*.patch")):
+    patches = sorted(PATCH_DIR.glob("*.patch"))
+    reversed_patches: list[Path] = []
+
+    # Normalize an already-applied prefix before applying the complete series.
+    # A later patch can overlap an earlier patch, so checking each patch in
+    # forward order cannot reliably identify an applied stack.
+    for patch in reversed(patches):
         reverse = subprocess.run(
             ["git", "apply", "--reverse", "--check", str(patch)],
             cwd=source_dir,
             capture_output=True,
             text=True,
         )
-        if reverse.returncode == 0:
-            print(f"LLVM patch already applied: {patch.name}")
+        if reverse.returncode != 0:
             continue
+        run(["git", "apply", "--reverse", str(patch)], cwd=source_dir)
+        reversed_patches.append(patch)
+
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=source_dir,
+        text=True,
+    )
+    if status:
+        # Restore every patch that this invocation removed before reporting the
+        # conflicting source state.
+        for patch in reversed(reversed_patches):
+            run(["git", "apply", str(patch)], cwd=source_dir)
+        raise RuntimeError(
+            "LLVM source contains changes outside the managed patch series:\n"
+            + status
+        )
+
+    for patch in patches:
         run(["git", "apply", "--check", str(patch)], cwd=source_dir)
         run(["git", "apply", str(patch)], cwd=source_dir)
 
@@ -278,11 +313,7 @@ def configure_and_build(
         "-DLLVM_INCLUDE_DOCS=OFF",
         "-DMLIR_INCLUDE_TESTS=OFF",
         "-DLLVM_DISTRIBUTION_COMPONENTS="
-        + ";".join(
-            (*LLVM_DISTRIBUTION_COMPONENTS, *ROCM_RUNNER_DISTRIBUTION_COMPONENTS)
-            if enable_rocm_runner
-            else LLVM_DISTRIBUTION_COMPONENTS
-        ),
+        + ";".join(distribution_components(enable_python_bindings, enable_rocm_runner)),
         f"-DMLIR_ENABLE_ROCM_RUNNER={'ON' if enable_rocm_runner else 'OFF'}",
         f"-DMLIR_ENABLE_BINDINGS_PYTHON={'ON' if enable_python_bindings else 'OFF'}",
         f"-DPython3_EXECUTABLE={sys.executable}",

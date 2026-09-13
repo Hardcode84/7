@@ -69,6 +69,35 @@ func.func @effects() {
   return
 }
 
+// CHECK-LABEL: func.func @grouped_effects
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK: test.alternative = 0
+// CHECK-NOT: test.alternative = 1
+// CHECK: waveamdmachine.candidate_yield
+// CHECK: test.alternative = 1
+// CHECK-NOT: test.alternative = 0
+// CHECK: waveamdmachine.candidate_yield
+func.func @grouped_effects(%off: !waveamdmachine.reg<vgpr, 1>,
+                           %value: !waveamdmachine.reg<vgpr, 1>,
+                           %base: !waveamdmachine.reg<sgpr, 2>) {
+  %first = waveamdmachine.global_store_b32 %off, %value, %base
+      {materialization_alternative = 0 : i64,
+       materialization_choice_group = 7 : i64, test.alternative = 0}
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  %second = waveamdmachine.global_store_b32 %off, %value, %base
+      {materialization_alternative = 1 : i64,
+       materialization_choice_group = 7 : i64, test.alternative = 1}
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  %choice = waveamdmachine.materialization_variants %first, %second
+      {materialization_choice_group = 7 : i64}
+      : !waveamdmachine.mem.token
+  waveamdmachine.s_barrier %choice : (!waveamdmachine.mem.token) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
 // CHECK-LABEL: func.func @cross_block(
 // CHECK: [[FIRST:%.*]] = waveamdmachine.materialization_candidates
 // CHECK: cf.br

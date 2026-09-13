@@ -41,7 +41,8 @@ using namespace mlir::wave;
 namespace {
 
 static constexpr int64_t u32Max = (int64_t{1} << 32) - 1;
-
+static constexpr StringLiteral kRematerializationAlternativeAttr =
+    "wave.rematerialization_alternative";
 struct NamedBinding {
   std::string name;
   Value value;
@@ -91,6 +92,7 @@ struct CyclicOffsetCarryShape {
 struct CyclicOffsetMember {
   IndexExprOp indexExpr;
   int64_t delta = 0;
+  bool retainRematerializedAlternative = false;
 };
 
 struct LoopCyclicOffsetCandidate {
@@ -103,6 +105,8 @@ struct LoopCyclicOffsetCandidate {
   int64_t ring = 0;
   bool canAnchor = false;
 };
+
+using MaterializationAlternatives = llvm::SmallPtrSet<Operation *, 4>;
 
 struct OffsetCarryCandidate {
   BinaryOp update;
@@ -1279,10 +1283,12 @@ getExplicitPowerOfTwoModulus(sym::ExprHandle expr) {
   return modulus;
 }
 
-static FailureOr<bool>
-buildExplicitModularOffsetCarryCandidate(
+static FailureOr<bool> buildExplicitModularOffsetCarryCandidate(
     scf::ForOp loop, IndexExprOp indexExpr, sym::Store &store,
-    DataFlowSolver &solver, LoopCyclicOffsetCandidate &candidate) {
+    DataFlowSolver &solver, LoopCyclicOffsetCandidate &candidate,
+    const llvm::SmallPtrSetImpl<Operation *> &materializationAlternatives) {
+  if (materializationAlternatives.contains(indexExpr))
+    return false;
   std::optional<int64_t> modulus =
       getExplicitPowerOfTwoModulus(indexExpr.getExpr().getValue());
   if (!modulus)
@@ -1330,7 +1336,8 @@ buildExplicitModularOffsetCarryCandidate(
     return failure();
 
   base->expr = *wrappedBase;
-  candidate.members.push_back({indexExpr, 0});
+  candidate.members.push_back(
+      {indexExpr, 0, /*retainRematerializedAlternative=*/true});
   llvm::append_range(candidate.producers, expanded->producers);
   candidate.base = std::move(*base);
   candidate.proof.expr = *wrappedProof;
@@ -1391,11 +1398,10 @@ computeCyclicOffsetCarryShape(scf::ForOp loop, CyclicOffsetPattern pattern) {
   return shape;
 }
 
-static LogicalResult
-buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
-                           sym::Store &store, DataFlowSolver &solver,
-                           LoopCyclicOffsetCandidate &candidate,
-                           bool &matched) {
+static LogicalResult buildCyclicOffsetCandidate(
+    scf::ForOp loop, IndexExprOp indexExpr, sym::Store &store,
+    DataFlowSolver &solver, LoopCyclicOffsetCandidate &candidate, bool &matched,
+    const llvm::SmallPtrSetImpl<Operation *> &materializationAlternatives) {
   matched = false;
   if (!canRewriteCyclicOffsetInLoop(loop, indexExpr))
     return success();
@@ -1406,7 +1412,7 @@ buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
     return failure();
   if (!*match) {
     FailureOr<bool> modularCarry = buildExplicitModularOffsetCarryCandidate(
-        loop, indexExpr, store, solver, candidate);
+        loop, indexExpr, store, solver, candidate, materializationAlternatives);
     if (failed(modularCarry))
       return failure();
     matched = *modularCarry;
@@ -1601,8 +1607,9 @@ addCyclicOffsetCandidate(std::optional<LoopCyclicOffsetCandidate> &group,
 }
 
 static FailureOr<std::optional<LoopCyclicOffsetCandidate>>
-findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
-                          DataFlowSolver &solver) {
+findCyclicOffsetCandidate(
+    scf::ForOp loop, sym::Store &store, DataFlowSolver &solver,
+    const llvm::SmallPtrSetImpl<Operation *> &materializationAlternatives) {
   std::optional<LoopCyclicOffsetCandidate> group;
   SmallVector<LoopCyclicOffsetCandidate, 0> deferred;
   for (Operation &op : loop.getBody()->without_terminator()) {
@@ -1612,7 +1619,8 @@ findCyclicOffsetCandidate(scf::ForOp loop, sym::Store &store,
     LoopCyclicOffsetCandidate candidate;
     bool matched = false;
     if (failed(buildCyclicOffsetCandidate(loop, indexExpr, store, solver,
-                                          candidate, matched)))
+                                          candidate, matched,
+                                          materializationAlternatives)))
       return failure();
     if (!matched)
       continue;
@@ -1746,10 +1754,36 @@ static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
                              rewriter.getStrArrayAttr(nameRefs), bindings);
 }
 
-static LogicalResult cloneBodyWithCarriedPointer(IRRewriter &rewriter,
-                                                 scf::ForOp src, scf::ForOp dst,
-                                                 LoopStrideCandidate candidate,
-                                                 Value strideValue) {
+static LogicalResult remapMaterializationAlternatives(
+    scf::ForOp source, const IRMapping &map,
+    MaterializationAlternatives &materializationAlternatives) {
+  SmallVector<std::pair<Operation *, Operation *>, 4> replacements;
+  WalkResult result = source->walk([&](Operation *op) {
+    if (!materializationAlternatives.contains(op))
+      return WalkResult::advance();
+    Operation *replacement = map.lookupOrNull(op);
+    if (!replacement) {
+      op->emitOpError(
+          "materialization alternative was not preserved by loop rewrite");
+      return WalkResult::interrupt();
+    }
+    replacements.emplace_back(op, replacement);
+    return WalkResult::advance();
+  });
+  if (result.wasInterrupted())
+    return failure();
+  for (auto [sourceOp, replacement] : replacements) {
+    materializationAlternatives.erase(sourceOp);
+    materializationAlternatives.insert(replacement);
+  }
+  return success();
+}
+
+static LogicalResult
+cloneBodyWithCarriedPointer(IRRewriter &rewriter, scf::ForOp src,
+                            scf::ForOp dst, LoopStrideCandidate candidate,
+                            Value strideValue,
+                            MaterializationAlternatives &alternatives) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
   Value ptrCarry = dstBody.getArgument(srcBody.getNumArguments());
@@ -1783,21 +1817,17 @@ static LogicalResult cloneBodyWithCarriedPointer(IRRewriter &rewriter,
     return failure();
   yielded.push_back(*nextPtr);
   scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
-  return success();
+  return remapMaterializationAlternatives(src, map, alternatives);
 }
 
-static FailureOr<IndexExprOp>
-mapCyclicOffsetMembers(IRRewriter &rewriter, scf::ForOp src,
-                       LoopCyclicOffsetCandidate &candidate, sym::Store &store,
-                       Value offsetCarry, IRMapping &map) {
-  IndexExprOp anchor;
-  for (CyclicOffsetMember &member : candidate.members) {
-    if (member.delta == 0) {
-      anchor = member.indexExpr;
-      map.map(member.indexExpr.getResult(), offsetCarry);
-      continue;
-    }
+static FailureOr<Value>
+createCarriedCyclicOffsetMember(IRRewriter &rewriter, scf::ForOp src,
+                                CyclicOffsetMember &member, sym::Store &store,
+                                Value offsetCarry) {
+  if (member.delta == 0)
+    return offsetCarry;
 
+  {
     FailureOr<sym::ExprHandle> offset = sym::composeExprSym(store, "offset");
     FailureOr<sym::ExprHandle> delta = sym::composeExprInt(store, member.delta);
     if (failed(offset) || failed(delta))
@@ -1817,10 +1847,63 @@ mapCyclicOffsetMembers(IRRewriter &rewriter, scf::ForOp src,
     derived.bindings.push_back(offsetCarry);
     IndexExprOp derivedOffset = createIndexExpr(
         rewriter, member.indexExpr.getLoc(), src->getContext(), derived);
-    map.map(member.indexExpr.getResult(), derivedOffset.getResult());
+    return derivedOffset.getResult();
+  }
+}
+
+static FailureOr<IndexExprOp>
+mapCyclicOffsetMembers(IRRewriter &rewriter, scf::ForOp src,
+                       LoopCyclicOffsetCandidate &candidate, sym::Store &store,
+                       Value offsetCarry, IRMapping &map) {
+  IndexExprOp anchor;
+  for (CyclicOffsetMember &member : candidate.members) {
+    if (member.delta == 0)
+      anchor = member.indexExpr;
+    FailureOr<Value> carried = createCarriedCyclicOffsetMember(
+        rewriter, src, member, store, offsetCarry);
+    if (failed(carried))
+      return failure();
+    map.map(member.indexExpr.getResult(), *carried);
   }
   assert(anchor && "cyclic offset group must have an anchor");
   return anchor;
+}
+
+static LogicalResult cloneCyclicOffsetBodyWithVariants(
+    IRRewriter &rewriter, scf::ForOp src, LoopCyclicOffsetCandidate &candidate,
+    sym::Store &store, Value offsetCarry, IRMapping &map,
+    MaterializationAlternatives &alternatives) {
+  Block &srcBody = *src.getBody();
+  for (Operation &op : srcBody.without_terminator()) {
+    auto member = llvm::find_if(
+        candidate.members, [&](CyclicOffsetMember &candidateMember) {
+          return candidateMember.indexExpr.getOperation() == &op;
+        });
+    if (member == candidate.members.end()) {
+      rewriter.clone(op, map);
+      continue;
+    }
+
+    FailureOr<Value> carried = createCarriedCyclicOffsetMember(
+        rewriter, src, *member, store, offsetCarry);
+    if (failed(carried))
+      return failure();
+    if (!member->retainRematerializedAlternative) {
+      map.map(member->indexExpr.getResult(), *carried);
+      continue;
+    }
+
+    auto rematerialized = cast<IndexExprOp>(rewriter.clone(op, map));
+    rematerialized->setAttr(kRematerializationAlternativeAttr,
+                            rewriter.getUnitAttr());
+    alternatives.insert(rematerialized);
+    SmallVector<Value, 2> choices{rematerialized.getResult(), *carried};
+    auto variants =
+        MaterializationVariantsOp::create(rewriter, member->indexExpr.getLoc(),
+                                          rematerialized.getType(), choices);
+    map.map(member->indexExpr.getResult(), variants.getResult());
+  }
+  return success();
 }
 
 static void cloneCyclicOffsetBody(IRRewriter &rewriter, Block &srcBody,
@@ -1840,7 +1923,8 @@ static void cloneCyclicOffsetBody(IRRewriter &rewriter, Block &srcBody,
 
 static LogicalResult cloneBodyWithCarriedCyclicOffset(
     IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
-    LoopCyclicOffsetCandidate candidate, sym::Store &store) {
+    LoopCyclicOffsetCandidate candidate, sym::Store &store,
+    MaterializationAlternatives &alternatives) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
   Value offsetCarry = dstBody.getArgument(srcBody.getNumArguments());
@@ -1852,25 +1936,41 @@ static LogicalResult cloneBodyWithCarriedCyclicOffset(
     map.map(oldArg, newArg);
 
   rewriter.setInsertionPointToStart(&dstBody);
-  FailureOr<IndexExprOp> anchor =
-      mapCyclicOffsetMembers(rewriter, src, candidate, store, offsetCarry, map);
-  if (failed(anchor))
-    return failure();
-  cloneCyclicOffsetBody(rewriter, srcBody, candidate, map);
+  bool hasVariants =
+      llvm::any_of(candidate.members, [](const CyclicOffsetMember &member) {
+        return member.retainRematerializedAlternative;
+      });
+  if (hasVariants) {
+    if (failed(cloneCyclicOffsetBodyWithVariants(
+            rewriter, src, candidate, store, offsetCarry, map, alternatives)))
+      return failure();
+  } else {
+    FailureOr<IndexExprOp> anchor = mapCyclicOffsetMembers(
+        rewriter, src, candidate, store, offsetCarry, map);
+    if (failed(anchor))
+      return failure();
+    cloneCyclicOffsetBody(rewriter, srcBody, candidate, map);
+  }
 
   SmallVector<Value> yielded;
   scf::YieldOp srcYield = cast<scf::YieldOp>(srcBody.getTerminator());
   for (Value value : srcYield.getOperands())
     yielded.push_back(map.lookupOrDefault(value));
 
+  CyclicOffsetMember *anchor =
+      llvm::find_if(candidate.members, [](const CyclicOffsetMember &member) {
+        return member.delta == 0;
+      });
+  assert(anchor != candidate.members.end() &&
+         "cyclic offset group must have an anchor");
   FailureOr<Value> nextOffset = createCyclicOffsetUpdate(
-      rewriter, anchor->getLoc(), src->getContext(), store, offsetCarry,
-      candidate.increment, candidate.ring);
+      rewriter, anchor->indexExpr.getLoc(), src->getContext(), store,
+      offsetCarry, candidate.increment, candidate.ring);
   if (failed(nextOffset))
     return failure();
   yielded.push_back(*nextOffset);
   scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
-  return success();
+  return remapMaterializationAlternatives(src, map, alternatives);
 }
 
 static bool hasNonUpdateUse(OffsetCarryCandidate &candidate) {
@@ -1915,7 +2015,7 @@ static void eraseDefaultYield(IRRewriter &rewriter, Block &body) {
 static LogicalResult cloneBodyWithoutOffsetCarries(
     IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
     LoopOffsetCarryCandidate candidate, const llvm::BitVector &removed,
-    ArrayRef<unsigned> newIndex) {
+    ArrayRef<unsigned> newIndex, MaterializationAlternatives &alternatives) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
   eraseDefaultYield(rewriter, dstBody);
@@ -1956,7 +2056,7 @@ static LogicalResult cloneBodyWithoutOffsetCarries(
     yielded.push_back(map.lookupOrDefault(value));
   }
   scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
-  return success();
+  return remapMaterializationAlternatives(src, map, alternatives);
 }
 
 static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
@@ -1965,7 +2065,8 @@ static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
 }
 
 static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
-                                 LoopStrideCandidate candidate) {
+                                 LoopStrideCandidate candidate,
+                                 MaterializationAlternatives &alternatives) {
   Location loc = loop.getLoc();
   rewriter.setInsertionPoint(loop);
   IndexExprOp base = createIndexExpr(rewriter, candidate.indexExpr.getLoc(),
@@ -1986,7 +2087,7 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
                          loop.getUpperBound(), loop.getStep(), initArgs);
   copyLoopAttrs(loop, newLoop);
   if (failed(cloneBodyWithCarriedPointer(rewriter, loop, newLoop, candidate,
-                                         stride.getResult())))
+                                         stride.getResult(), alternatives)))
     return failure();
 
   rewriter.replaceOp(loop,
@@ -1996,7 +2097,8 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
 
 static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
                                  LoopCyclicOffsetCandidate candidate,
-                                 sym::Store &store) {
+                                 sym::Store &store,
+                                 MaterializationAlternatives &alternatives) {
   Location loc = loop.getLoc();
   rewriter.setInsertionPoint(loop);
   CyclicOffsetMember *anchor =
@@ -2016,7 +2118,7 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
                          loop.getUpperBound(), loop.getStep(), initArgs);
   copyLoopAttrs(loop, newLoop);
   if (failed(cloneBodyWithCarriedCyclicOffset(rewriter, loop, newLoop,
-                                              candidate, store)))
+                                              candidate, store, alternatives)))
     return failure();
 
   rewriter.replaceOp(loop,
@@ -2025,7 +2127,8 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
 }
 
 static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
-                                 LoopOffsetCarryCandidate candidate) {
+                                 LoopOffsetCarryCandidate candidate,
+                                 MaterializationAlternatives &alternatives) {
   llvm::BitVector removed(loop.getNumResults());
   for (const OffsetCarryCandidate &carry : candidate.carries)
     removed.set(carry.index);
@@ -2046,7 +2149,7 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
                          loop.getUpperBound(), loop.getStep(), initArgs);
   copyLoopAttrs(loop, newLoop);
   if (failed(cloneBodyWithoutOffsetCarries(rewriter, loop, newLoop, candidate,
-                                           removed, newIndex)))
+                                           removed, newIndex, alternatives)))
     return failure();
 
   for (unsigned index : llvm::seq<unsigned>(0, loop.getNumResults())) {
@@ -2062,63 +2165,65 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
   return success();
 }
 
-static FailureOr<bool> rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop,
-                                      sym::Store &store,
-                                      DataFlowSolver &solver) {
+static FailureOr<bool>
+rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop, sym::Store &store,
+               DataFlowSolver &solver,
+               MaterializationAlternatives &alternatives) {
   FailureOr<std::optional<LoopStrideCandidate>> candidate =
       findCandidate(loop, store, solver);
   if (failed(candidate))
     return failure();
   if (!*candidate)
     return false;
-  if (failed(rewriteLoop(rewriter, loop, **candidate)))
+  if (failed(rewriteLoop(rewriter, loop, **candidate, alternatives)))
     return failure();
   return true;
 }
 
-static FailureOr<bool> rewriteOneCyclicOffset(IRRewriter &rewriter,
-                                              scf::ForOp loop,
-                                              sym::Store &store,
-                                              DataFlowSolver &solver) {
+static FailureOr<bool>
+rewriteOneCyclicOffset(IRRewriter &rewriter, scf::ForOp loop, sym::Store &store,
+                       DataFlowSolver &solver,
+                       MaterializationAlternatives &alternatives) {
   FailureOr<std::optional<LoopCyclicOffsetCandidate>> candidate =
-      findCyclicOffsetCandidate(loop, store, solver);
+      findCyclicOffsetCandidate(loop, store, solver, alternatives);
   if (failed(candidate))
     return failure();
   if (!*candidate)
     return false;
-  if (failed(rewriteLoop(rewriter, loop, **candidate, store)))
+  if (failed(rewriteLoop(rewriter, loop, **candidate, store, alternatives)))
     return failure();
   return true;
 }
 
-static FailureOr<bool> rewriteOneOffsetCarry(IRRewriter &rewriter,
-                                             scf::ForOp loop) {
+static FailureOr<bool>
+rewriteOneOffsetCarry(IRRewriter &rewriter, scf::ForOp loop,
+                      MaterializationAlternatives &alternatives) {
   FailureOr<std::optional<LoopOffsetCarryCandidate>> candidate =
       findOffsetCarryCandidate(loop);
   if (failed(candidate))
     return failure();
   if (!*candidate)
     return false;
-  if (failed(rewriteLoop(rewriter, loop, **candidate)))
+  if (failed(rewriteLoop(rewriter, loop, **candidate, alternatives)))
     return failure();
   return true;
 }
 
-static FailureOr<bool> rewriteOneStrideExtraction(IRRewriter &rewriter,
-                                                  scf::ForOp loop,
-                                                  WaveDialect *dialect,
-                                                  DataFlowSolver &solver) {
-  FailureOr<bool> rewritten =
-      rewriteOneLoop(rewriter, loop, dialect->getSymbolStore(), solver);
+static FailureOr<bool>
+rewriteOneStrideExtraction(IRRewriter &rewriter, scf::ForOp loop,
+                           WaveDialect *dialect, DataFlowSolver &solver,
+                           MaterializationAlternatives &alternatives) {
+  FailureOr<bool> rewritten = rewriteOneLoop(
+      rewriter, loop, dialect->getSymbolStore(), solver, alternatives);
   if (failed(rewritten) || *rewritten)
     return rewritten;
 
-  rewritten =
-      rewriteOneCyclicOffset(rewriter, loop, dialect->getSymbolStore(), solver);
+  rewritten = rewriteOneCyclicOffset(rewriter, loop, dialect->getSymbolStore(),
+                                     solver, alternatives);
   if (failed(rewritten) || *rewritten)
     return rewritten;
 
-  return rewriteOneOffsetCarry(rewriter, loop);
+  return rewriteOneOffsetCarry(rewriter, loop, alternatives);
 }
 
 struct WaveExtractLoopStridesPass
@@ -2133,6 +2238,11 @@ struct WaveExtractLoopStridesPass
     }
 
     IRRewriter rewriter(root->getContext());
+    MaterializationAlternatives materializationAlternatives;
+    root->walk([&](IndexExprOp op) {
+      if (op->hasAttr(kRematerializationAlternativeAttr))
+        materializationAlternatives.insert(op);
+    });
     bool changed = true;
     while (changed) {
       changed = false;
@@ -2145,8 +2255,8 @@ struct WaveExtractLoopStridesPass
         return signalPassFailure();
       }
       WalkResult result = root->walk([&](scf::ForOp loop) {
-        FailureOr<bool> rewritten =
-            rewriteOneStrideExtraction(rewriter, loop, dialect, solver);
+        FailureOr<bool> rewritten = rewriteOneStrideExtraction(
+            rewriter, loop, dialect, solver, materializationAlternatives);
         if (failed(rewritten)) {
           signalPassFailure();
           return WalkResult::interrupt();

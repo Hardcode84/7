@@ -9,6 +9,8 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
@@ -28,10 +30,16 @@ namespace mlir::wave {
 using namespace mlir;
 using namespace mlir::waveamdmachine;
 
+static constexpr StringLiteral kScheduleInputAttr =
+    "waveamdmachine.schedule_input";
+
 namespace {
 struct CandidateScope {
   SmallVector<Operation *> operations;
   SmallVector<MaterializationVariantsOp> choices;
+  SmallVector<unsigned> choiceDimensions;
+  SmallVector<unsigned> dimensionArities;
+  llvm::DenseMap<int64_t, unsigned> groupDimensions;
   SmallVector<Value> inputs;
   SmallVector<Value> outputs;
   unsigned count = 1;
@@ -85,7 +93,26 @@ static LogicalResult checkScope(unsigned limit, CandidateScope &scope) {
       return failure();
   }
   for (MaterializationVariantsOp choice : scope.choices) {
-    size_t arity = choice.getChoices().size();
+    unsigned arity = choice.getChoices().size();
+    auto group =
+        choice->getAttrOfType<IntegerAttr>(kMaterializationChoiceGroupAttrName);
+    unsigned dimension;
+    if (!group) {
+      dimension = scope.dimensionArities.size();
+      scope.dimensionArities.push_back(arity);
+    } else {
+      auto [it, inserted] = scope.groupDimensions.try_emplace(
+          group.getInt(), scope.dimensionArities.size());
+      dimension = it->second;
+      if (inserted)
+        scope.dimensionArities.push_back(arity);
+      else if (scope.dimensionArities[dimension] != arity)
+        return choice.emitOpError(
+            "materialization choices in one group must have equal arity");
+    }
+    scope.choiceDimensions.push_back(dimension);
+  }
+  for (unsigned arity : scope.dimensionArities) {
     scope.count = arity > limit / scope.count ? limit : scope.count * arity;
   }
   return success();
@@ -125,13 +152,16 @@ collectChoiceSetup(ArrayRef<MaterializationVariantsOp> choices) {
       continue;
     }
     Operation *def = value.getDefiningOp();
+    bool markedAlternative =
+        def && def->hasAttr(kMaterializationAlternativeAttrName);
     if (auto branch = dyn_cast<RegionBranchOpInterface>(def)) {
-      if (isMemoryEffectFree(def))
+      if (isMemoryEffectFree(def) || markedAlternative)
         setup.insert(def);
       appendPredecessors(branch, RegionSuccessor(def), value, pending);
       continue;
     }
-    if (def->hasTrait<OpTrait::ConstantLike>() || !isMemoryEffectFree(def))
+    if (def->hasTrait<OpTrait::ConstantLike>() ||
+        (!isMemoryEffectFree(def) && !markedAlternative))
       continue;
     setup.insert(def);
     llvm::append_range(pending, def->getOperands());
@@ -264,27 +294,63 @@ static LogicalResult checkBlockExits(Block &block) {
   return success();
 }
 
-static void populateCandidate(const CandidateScope &scope, unsigned ordinal,
-                              Region &region) {
+static LogicalResult populateCandidate(const CandidateScope &scope,
+                                       unsigned ordinal, Region &region) {
   IRMapping mapping;
   mapping.map(scope.inputs, region.front().getArguments());
   OpBuilder builder = OpBuilder::atBlockEnd(&region.front());
   for (Operation *op : scope.operations)
     builder.clone(*op, mapping);
-  SmallVector<unsigned> selections(scope.choices.size());
-  for (size_t index : llvm::reverse(llvm::seq(scope.choices.size()))) {
-    MaterializationVariantsOp source = scope.choices[index];
-    selections[index] = ordinal % source.getChoices().size();
-    ordinal /= source.getChoices().size();
+  SmallVector<unsigned> dimensionSelections(scope.dimensionArities.size());
+  for (size_t dimension :
+       llvm::reverse(llvm::seq(scope.dimensionArities.size()))) {
+    dimensionSelections[dimension] =
+        ordinal % scope.dimensionArities[dimension];
+    ordinal /= scope.dimensionArities[dimension];
   }
-  for (auto [index, selection] : llvm::enumerate(selections)) {
+  for (size_t index : llvm::seq(scope.choices.size())) {
     MaterializationVariantsOp source = scope.choices[index];
+    unsigned selection = dimensionSelections[scope.choiceDimensions[index]];
     auto choice = cast<MaterializationVariantsOp>(
         mapping.lookup(source.getResult()).getDefiningOp());
     Value selected = choice.getChoices()[selection];
     choice.getResult().replaceAllUsesWith(selected);
     mapping.map(source.getResult(), selected);
     choice.erase();
+  }
+
+  SmallVector<Operation *> rejected;
+  WalkResult marked = region.walk<WalkOrder::PostOrder>([&](Operation *op) {
+    auto group =
+        op->getAttrOfType<IntegerAttr>(kMaterializationChoiceGroupAttrName);
+    auto alternative =
+        op->getAttrOfType<IntegerAttr>(kMaterializationAlternativeAttrName);
+    if (!group && !alternative)
+      return WalkResult::advance();
+    if (!group || !alternative) {
+      op->emitOpError("materialization alternative marker is incomplete");
+      return WalkResult::interrupt();
+    }
+    auto dimension = scope.groupDimensions.find(group.getInt());
+    if (dimension == scope.groupDimensions.end()) {
+      op->emitOpError("materialization alternative has no choice group");
+      return WalkResult::interrupt();
+    }
+    if (alternative.getInt() == dimensionSelections[dimension->second]) {
+      op->removeAttr(kMaterializationChoiceGroupAttrName);
+      op->removeAttr(kMaterializationAlternativeAttrName);
+    } else {
+      rejected.push_back(op);
+    }
+    return WalkResult::advance();
+  });
+  if (marked.wasInterrupted())
+    return failure();
+  for (Operation *op : llvm::reverse(rejected)) {
+    if (!op->use_empty())
+      return op->emitOpError(
+          "rejected materialization alternative still has a live use");
+    op->erase();
   }
   SmallVector<Value> outputs;
   for (Value value : scope.outputs)
@@ -293,9 +359,10 @@ static void populateCandidate(const CandidateScope &scope, unsigned ordinal,
                            IntegerAttr{});
   IRRewriter rewriter(builder.getContext());
   eliminateTriviallyDeadOps(rewriter, region);
+  return success();
 }
 
-static void expandScope(CandidateScope &scope) {
+static LogicalResult expandScope(CandidateScope &scope) {
   collectScopeValues(scope);
   Operation *first = scope.operations.front();
   OpBuilder builder(first);
@@ -311,14 +378,20 @@ static void expandScope(CandidateScope &scope) {
       block->addArgument(input.getType(), input.getLoc());
   }
   // Shared input use lists stay fixed while workers clone private regions.
+  std::atomic<bool> failedCandidate = false;
   parallelFor(first->getContext(), 0, scope.count, [&](size_t ordinal) {
-    populateCandidate(scope, ordinal, wrapper.getCandidates()[ordinal]);
+    if (failed(populateCandidate(scope, ordinal,
+                                 wrapper.getCandidates()[ordinal])))
+      failedCandidate.store(true, std::memory_order_relaxed);
   });
+  if (failedCandidate.load(std::memory_order_relaxed))
+    return failure();
   for (auto [source, result] :
        llvm::zip_equal(scope.outputs, wrapper.getResults()))
     source.replaceAllUsesWith(result);
   for (Operation *op : llvm::reverse(scope.operations))
     op->erase();
+  return success();
 }
 
 namespace {
@@ -333,6 +406,7 @@ struct WaveAMDExpandMaterializationVariantsPass
       return signalPassFailure();
     }
     llvm::SetVector<Block *> blocks;
+    llvm::SetVector<func::FuncOp> scheduleInputs;
     SmallVector<MaterializationVariantsOp> choices;
     llvm::DenseMap<Block *, SmallVector<Operation *>> roots;
     WalkResult walk = getOperation()->walk([&](MaterializationVariantsOp op) {
@@ -341,6 +415,12 @@ struct WaveAMDExpandMaterializationVariantsPass
         return WalkResult::interrupt();
       }
       choices.push_back(op);
+      func::FuncOp func = op->getParentOfType<func::FuncOp>();
+      if (!func) {
+        op.emitOpError("must be nested in a function");
+        return WalkResult::interrupt();
+      }
+      scheduleInputs.insert(func);
       Operation *root = scopeRoot(op);
       blocks.insert(root->getBlock());
       roots[root->getBlock()].push_back(root);
@@ -362,7 +442,10 @@ struct WaveAMDExpandMaterializationVariantsPass
       if (failed(checkScope(maxCandidates, scope)))
         return signalPassFailure();
     for (CandidateScope &scope : scopes)
-      expandScope(scope);
+      if (failed(expandScope(scope)))
+        return signalPassFailure();
+    for (func::FuncOp func : scheduleInputs)
+      func->setAttr(kScheduleInputAttr, UnitAttr::get(func.getContext()));
   }
 };
 } // namespace

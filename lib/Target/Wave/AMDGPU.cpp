@@ -6363,6 +6363,7 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
   registerRemoveDeadValuesPass();
   registerLoopInvariantCodeMotionPass();
   ctx->getOrLoadDialect<transform::TransformDialect>();
+  ctx->getOrLoadDialect<ub::UBDialect>();
   ctx->getOrLoadDialect<wave::WaveDialect>();
 
   std::string resolved;
