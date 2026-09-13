@@ -710,6 +710,23 @@ def WaveAMDMaterializeSplitBarriers
   ];
 }
 
+def WaveAMDExpandMaterializationVariants
+    : Pass<"waveamd-expand-materialization-variants"> {
+  let summary = "Expand machine choices into specialized loop scopes";
+  let description = [{
+    Enclose each choice in its complete containing control-flow operation.
+    Include dependent consumers and removable alternative setup. Merge scopes
+    that overlap or share this setup. Keep independent loops in separate scopes.
+    Block terminators and machine return instructions stay outside the wrapper.
+    Enumerate up to max-candidates assignments in operand order, with the first
+    choice changing slowest. Clone candidates with private block arguments, resolve choices,
+    and remove dead operations. This pass does not select or score candidates.
+  }];
+  let options = [Option<"maxCandidates", "max-candidates", "unsigned", "16",
+                       "Maximum assignments per search scope">];
+  let dependentDialects = ["waveamdmachine::WaveAMDMachineDialect"];
+}
+
 def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule"> {
   let summary = "Apply greedy gap-fill WaveAMDMachine scheduling";

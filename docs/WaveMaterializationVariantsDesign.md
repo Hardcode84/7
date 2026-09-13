@@ -105,12 +105,11 @@ decision. The experiment setup checks this restriction before constructing
 alternatives. A direct experimental invocation outside this scope reports an
 error.
 
-Each search region contains at most four binary choices. The driver checks
-this limit after region formation and before cloning. It does not truncate a
-Cartesian product or retain a subset of choices. A configuration outside the
-limit is unsupported by the experiment and blocks production integration if it
-belongs to the protected sweep. There is no default-pipeline producer until
-the complete protected sweep meets the scope.
+Each search region has a configurable candidate limit. The driver retains
+the first assignments in stable operand order, up to this limit. Larger search
+spaces do not cause compilation to fail. Each retained assignment resolves all
+choices. The limit bounds exploration; it does not prove that the retained
+assignments contain the lowest-cost candidate.
 
 The producer owns fixed-width semantics, definedness, and dominance. The model
 owns target cost, occupancy policy, and legal resource limits. Candidate
@@ -396,6 +395,33 @@ region; do not nest unbounded searches. This extension needs its own
 production witness and candidate-cost gate. It does not expand the initial
 loop-offset producer scope.
 
+## Scope expansion pass
+
+`waveamd-expand-materialization-variants` places each machine choice in a scope
+that contains its complete enclosing loop and enclosing control-flow operations.
+The scope includes dependent consumers, including loop exit computations.
+Alternative setup enters the scope when all its users belong to scopes. The
+pass follows region branch inputs and results to find setup through loop carries.
+Shared fixed inputs stay outside the scopes.
+
+Each scope is a contiguous sequence of operations in one block. Overlapping
+scopes merge. Shared removable setup and dependent consumers also merge scopes.
+Operations between merged scopes retain their order. Independent loops keep
+separate candidate counts. Block terminators and machine return instructions
+stay outside each wrapper.
+
+The pass caps each candidate count before cloning. `max-candidates` must be
+positive. The first choice changes slowest. If the full product exceeds the
+cap, the pass retains its first `max-candidates` assignments.
+It computes capped counts without overflow. It creates private input arguments
+serially, then clones and resolves each assignment in parallel. Dead operations
+are removed within each candidate. External uses receive the wrapper results.
+
+Scope formation uses SSA edges, including explicit memory tokens. It does not
+infer memory ordering. Separate scopes alone do not prove that model costs are
+independent. The scoring pipeline must supply a fixed model state at each scope
+boundary before it can compare local scores.
+
 ## Search regions and independence
 
 A search scope is a cost boundary represented by one wrapper. Each candidate
@@ -455,12 +481,11 @@ alternatives. Enumerate the Cartesian product with the first choice changing
 slowest. Candidate zero selects the first operand at each choice. Each source
 variants op remains an independent choice; there is no grouping attribute.
 
-Four binary choices permit at most 16 candidate regions per wrapper. For scope
-choice counts `c_1, ..., c_R`, the candidate count is `sum(2^c_i)`, bounded by
-`16 * R`, rather than `2^sum(c_i)`. Two independent loops with four binary
-choices each need 32 candidates, not 256. Diagnose a merged scope above the
-bound before cloning. Do not split coupled choices or truncate the candidate
-set.
+For a configured cap `M` and binary choice counts `c_1, ..., c_R`, the
+candidate count is `sum(min(2^c_i, M))`, bounded by `M * R`. Independent
+scopes add their candidate counts instead of multiplying them. If a merged
+scope exceeds the cap, retain the first assignments up to the cap. Do not split
+coupled choices. Each retained candidate resolves every choice in the scope.
 
 Create the wrapper, its external operands, all destination regions, and each
 region's block arguments serially. Build a private `IRMapping` for each
@@ -687,10 +712,9 @@ emission and that a winner failure does not retry another candidate.
 
 Region tests cover independent sibling loops, shared unchanged inputs, shared
 choice-dependent producers, nested carries, escaping live values, and pending
-DMA dependencies. Check merge decisions and the four-choice bound after
-merging. Two independent four-choice loops must evaluate 32 trials. For small
-cases, compare regional choices with exhaustive joint evaluation as a test
-oracle. Reverse region processing order and vary worker limits; require
+DMA dependencies. Check merge decisions and the configured candidate cap after
+merging. Independent loops must have separate candidate counts. For small
+cases within the cap, use exhaustive joint evaluation as a test oracle. Reverse region processing order and vary worker limits; require
 identical choices and regional scores. Test scope identity through loop
 rebuilding and require a definite failure when lowering violates a declared
 boundary.

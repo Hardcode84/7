@@ -14,6 +14,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveAMDDeduplicateWrites.cpp
   WaveAMDDmaZeroFill.cpp
   WaveAMDElideSCCBoolRoundtrip.cpp
+  WaveAMDExpandMaterializationVariants.cpp
   WaveAMDFormFusedInt.cpp
   WaveAMDHazardWaits.cpp
   WaveAMDHoistTuples.cpp
