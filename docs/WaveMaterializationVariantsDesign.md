@@ -255,9 +255,10 @@ is the model's cycle score for that entire candidate at the fixed scope
 context. Do not sum scores for nested scheduler blocks as if overlap and loop
 frequencies were independent. The score is valid only for that scheduled body.
 
-The collapse pass selects the minimum score and breaks exact ties by region
-order. It does not need a separate winner-index attribute. No graph-changing
-pass runs between scoring and collapse. Missing scores, malformed scores, or a
+The `waveamd-collapse-materialization-variants` pass selects the minimum score
+and breaks exact ties by region order. It does not need a separate winner-index
+attribute. No graph-changing pass runs between scoring and collapse. Missing
+scores, malformed scores, or a
 broken candidate contract terminate compilation; they are not baseline
 fallbacks.
 

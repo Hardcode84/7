@@ -727,6 +727,18 @@ def WaveAMDExpandMaterializationVariants
   let dependentDialects = ["waveamdmachine::WaveAMDMachineDialect"];
 }
 
+def WaveAMDCollapseMaterializationVariants
+    : Pass<"waveamd-collapse-materialization-variants"> {
+  let summary = "Keep the lowest-cycle materialization candidate";
+  let description = [{
+    Require cycle scores on all candidate yields. Select the minimum score,
+    with ties resolved by region order. Inline the selected body and replace
+    wrapper results with its yielded values. Preserve scheduled operation order.
+    Run immediately after scheduling, before register allocation.
+  }];
+  let dependentDialects = ["waveamdmachine::WaveAMDMachineDialect"];
+}
+
 def WaveAMDMachineSchedule
     : Pass<"waveamd-machine-schedule"> {
   let summary = "Apply greedy gap-fill WaveAMDMachine scheduling";

@@ -1,3 +1,4 @@
+// RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants --waveamd-machine-schedule="apply-schedule" --waveamd-collapse-materialization-variants --waveamd-prepare-regalloc | FileCheck %s --check-prefix=COLLAPSE --implicit-check-not=waveamdmachine.materialization --implicit-check-not=waveamdmachine.candidate_yield
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants --waveamd-machine-schedule='apply-schedule' | FileCheck %s --check-prefix=SCHEDULE
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants='max-candidates=1' | FileCheck %s --check-prefix=ONE --implicit-check-not=waveamdmachine.materialization_variants
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants -o %t.expanded
@@ -81,3 +82,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     return
   }
 }
+
+// COLLAPSE-LABEL: func.func @kernel
+// COLLAPSE: waveamdmachine.global_store_b32
+// COLLAPSE: waveamdmachine.s_endpgm
+// COLLAPSE-LABEL: func.func @loop_kernel
+// COLLAPSE: waveamdmachine.uniform_loop
+// COLLAPSE: waveamdmachine.global_store_b32
+// COLLAPSE: waveamdmachine.s_endpgm
