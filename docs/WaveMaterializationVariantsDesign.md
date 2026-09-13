@@ -511,10 +511,17 @@ work queue, with per-candidate analysis, model, and diagnostic state. Preload
 required dialects and snapshot immutable target configuration before workers
 start.
 
-Schedule independent candidate bodies in parallel and return their cycle
-scores and diagnostics in indexed result storage. After joining workers,
-attach scores serially to yields in candidate order. Collapse wrappers
-serially because it reconnects winning bodies to external SSA values and
+At a candidate wrapper, copy the incoming greedy scheduler state for each
+candidate. Preserve pending memory events, value readiness, resource use, and
+issue position. Bind wrapper inputs to each candidate's private arguments.
+Schedule each candidate in parallel with the same greedy scheduling rules.
+Keep the resulting state, cycle score, and diagnostics in indexed storage.
+After joining workers,
+attach scores serially to yields in candidate order. Select the lowest cycle
+score; use region order to break ties. Adopt that candidate's scheduler state
+and bind wrapper results to its yielded values. Continue scheduling after the
+wrapper from this state. Do not drain pending work at the wrapper boundary.
+Collapse wrappers serially because this reconnects winning bodies to external SSA values and
 removes losing input uses. Do not mutate the parent operation from scheduling
 workers.
 
@@ -613,8 +620,7 @@ execution and boundary state; a flat list of body instructions is not
 sufficient.
 
 Select the candidate with minimum predicted region completion cycles. On an
-exact cycle tie, select the lowest trial index. Thus the current region's
-baseline wins a tie with any other candidate in that region. Pressure and
+exact cycle tie, select the lowest trial index. Pressure and
 instruction counts are diagnostics, not additional ranking terms. The driver
 adds no target-specific weights or pressure-based rejection rule.
 

@@ -365,11 +365,18 @@ public:
     coalesceMFMAAccResult =
         aliasPolicy != wave::WaveAMDLiveIntervalAliasPolicy::Conservative &&
         shouldCoalesceMFMAAccResult(func);
-    if (failed(walkFunctionBody(func)))
+    if (failed(walkRootRegion(func.getBody())))
       return failure();
     if (hasOrderOverride && !usedOrderOverride)
       return func.emitError("live interval order override block not visited");
     if (failed(coalesceMFMAAccumulatorOps()))
+      return failure();
+    return std::move(result);
+  }
+
+  FailureOr<wave::WaveAMDLiveIntervalBuildResult> build(Region &region) {
+    flow.emplace(region);
+    if (failed(walkRootRegion(region)))
       return failure();
     return std::move(result);
   }
@@ -395,12 +402,12 @@ private:
     bool repetitive = false;
   };
 
-  LogicalResult walkFunctionBody(func::FuncOp func) {
-    for (Block &block : func.getBody()) {
+  LogicalResult walkRootRegion(Region &region) {
+    for (Block &block : region) {
       for (BlockArgument argument : block.getArguments())
         if (!argument.use_empty())
-          (void)ensureInterval(argument, cursor, result.intervals, func,
-                               includeAllocated);
+          (void)ensureInterval(argument, cursor, result.intervals,
+                               region.getParentOp(), includeAllocated);
       if (failed(walkBlock(block)))
         return failure();
     }
@@ -1004,4 +1011,11 @@ mlir::wave::buildAllocatedWaveAMDLiveIntervals(
   LiveIntervalBuilder builder(orderOverride, /*includeAllocated=*/true,
                               aliasPolicy);
   return builder.build(func);
+}
+
+FailureOr<wave::WaveAMDLiveIntervalBuildResult>
+mlir::wave::buildAllocatedWaveAMDLiveIntervals(Region &region) {
+  LiveIntervalBuilder builder(/*includeAllocated=*/true,
+                              WaveAMDLiveIntervalAliasPolicy::Conservative);
+  return builder.build(region);
 }

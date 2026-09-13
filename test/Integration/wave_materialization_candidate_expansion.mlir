@@ -1,3 +1,4 @@
+// RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants --waveamd-machine-schedule='apply-schedule' | FileCheck %s --check-prefix=SCHEDULE
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants='max-candidates=1' | FileCheck %s --check-prefix=ONE --implicit-check-not=waveamdmachine.materialization_variants
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants -o %t.expanded
 // RUN: FileCheck %s < %t.expanded
@@ -10,6 +11,10 @@
 // ONE: waveamdmachine.candidate_yield
 // ONE-NOT: waveamdmachine.candidate_yield
 // ONE: waveamdmachine.s_endpgm
+// SCHEDULE-LABEL: func.func @kernel
+// SCHEDULE: waveamdmachine.materialization_candidates
+// SCHEDULE: waveamdmachine.candidate_yield {{.*}}cycles = {{[0-9]+}} : i64
+// SCHEDULE: waveamdmachine.candidate_yield {{.*}}cycles = {{[0-9]+}} : i64
 // CHECK-LABEL: func.func @kernel
 // CHECK: waveamdmachine.materialization_candidates
 // CHECK: waveamdmachine.s_mul_i32
@@ -42,6 +47,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ONE: waveamdmachine.candidate_yield
 // ONE-NOT: waveamdmachine.candidate_yield
 // ONE: waveamdmachine.s_endpgm
+// SCHEDULE-LABEL: func.func @loop_kernel
+// SCHEDULE: waveamdmachine.materialization_candidates
+// SCHEDULE: waveamdmachine.candidate_yield {{.*}}cycles = {{[0-9]+}} : i64
+// SCHEDULE: waveamdmachine.candidate_yield {{.*}}cycles = {{[0-9]+}} : i64
 // CHECK-LABEL: func.func @loop_kernel
 // CHECK: waveamdmachine.materialization_candidates
 // CHECK: waveamdmachine.uniform_loop

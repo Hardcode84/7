@@ -88,6 +88,10 @@ buildWaveAMDLiveIntervals(func::FuncOp func);
 FailureOr<WaveAMDLiveIntervalBuildResult>
 buildAllocatedWaveAMDLiveIntervals(func::FuncOp func);
 
+// Isolated candidate inputs and outputs bound local scheduling liveness.
+FailureOr<WaveAMDLiveIntervalBuildResult>
+buildAllocatedWaveAMDLiveIntervals(Region &region);
+
 // Candidate order replaces one contiguous slice in one block.
 FailureOr<WaveAMDLiveIntervalBuildResult>
 buildWaveAMDLiveIntervals(func::FuncOp func,

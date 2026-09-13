@@ -80,6 +80,7 @@ public:
   };
 
   explicit RegAllocRegionFlow(Operation *root);
+  explicit RegAllocRegionFlow(Region &root);
 
   const Branch *lookup(Operation *op) const;
   ArrayRef<Branch> getBranches() const { return branches; }

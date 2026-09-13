@@ -19,6 +19,12 @@ using namespace mlir::wave::regalloc_detail;
 
 RegAllocRegionFlow::RegAllocRegionFlow(Operation *root) { collect(root); }
 
+RegAllocRegionFlow::RegAllocRegionFlow(Region &root) {
+  for (Block &block : root)
+    for (Operation &op : block)
+      collect(&op);
+}
+
 void RegAllocRegionFlow::collect(Operation *root) {
   root->walk<WalkOrder::PreOrder>([&](Operation *op) {
     if (op->getNumRegions() == 0)

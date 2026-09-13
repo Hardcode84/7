@@ -25,6 +25,7 @@
 
 namespace mlir {
 class Operation;
+class Region;
 namespace func {
 class FuncOp;
 }
@@ -415,7 +416,7 @@ class WaveAMDMachineScheduleModel {
 public:
   static FailureOr<WaveAMDMachineScheduleModel>
   create(func::FuncOp func, const waveamdmachine::ArchData &arch,
-         unsigned wavefrontSize);
+         unsigned wavefrontSize, Region *candidate = nullptr);
 
   WaveAMDMachineScheduleModel(WaveAMDMachineScheduleModel &&);
   WaveAMDMachineScheduleModel &operator=(WaveAMDMachineScheduleModel &&);

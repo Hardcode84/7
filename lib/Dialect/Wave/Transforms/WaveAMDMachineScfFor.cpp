@@ -113,6 +113,10 @@ static Operation *buildUniformLoopOp(WaveAMDMachineSelector &S, scf::ForOp op,
   for (StringRef name : {"fetch_alignment", "fetch_phase"})
     if (Attribute attr = op->getAttr(("waveamdmachine." + name).str()))
       state.addAttribute(name, attr);
+  if (std::optional<APInt> trips = op.getStaticTripCount())
+    if (trips->getActiveBits() <= 63)
+      state.addAttribute("waveamdmachine.trip_count",
+                         S.builder.getI64IntegerAttr(trips->getZExtValue()));
   Region *body = state.addRegion();
   body->emplaceBlock();
   for (Value init : inits)

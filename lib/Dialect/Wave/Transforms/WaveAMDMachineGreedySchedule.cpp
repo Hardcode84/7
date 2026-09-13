@@ -24,6 +24,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTraits.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Threading.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
@@ -120,6 +121,7 @@ struct ScheduleEdge {
 struct GreedyRegion {
   SmallVector<Operation *, 16> ops;
   func::FuncOp func;
+  std::string *diagnostics = nullptr;
   Block *block = nullptr;
   Operation *first = nullptr;
   Operation *last = nullptr;
@@ -185,6 +187,17 @@ public:
                       ArrayRef<unsigned> waves)
       : state(std::in_place_type<waveamdmachine::MultiWaveCohortExecutionState>,
               state, waves) {}
+
+  IssueExecutionModel(const IssueExecutionModel &) = default;
+  IssueExecutionModel(IssueExecutionModel &&) = default;
+  IssueExecutionModel &operator=(IssueExecutionModel &&other) {
+    std::visit(
+        [&](auto &model) {
+          state.emplace<std::decay_t<decltype(model)>>(std::move(model));
+        },
+        other.state);
+    return *this;
+  }
 
   FailureOr<waveamdmachine::InstructionCommitResult> commit(Operation *op) {
     if (auto *single =
@@ -289,6 +302,8 @@ struct IssueState {
   waveamdmachine::InstructionScheduleResourceState resources;
   const StaticIssueInfoMap *staticInfo = nullptr;
   Block *frozenLoopArgs = nullptr;
+  int64_t completionCycle = 0;
+  bool explicitRegionBindings = false;
 };
 
 struct ComputeIslandInfo {
@@ -610,10 +625,16 @@ static LogicalResult commitIssue(IssueState &state, Operation *op,
                                  const IssuePreview &preview,
                                  const ValueOriginMap &origins) {
   (void)preview;
-  if (failed(state.model.commit(op)))
+  FailureOr<waveamdmachine::InstructionCommitResult> committed =
+      state.model.commit(op);
+  if (failed(committed))
     return failure();
-  // Candidate copies inherit aliases from the committed state.
-  bindValueOriginsFromDef(state.model, origins, op, state.frozenLoopArgs);
+  state.completionCycle =
+      std::max({state.completionCycle, committed->nextIssueCycle,
+                committed->valueReadyCycle, committed->tokenReadyCycle});
+  // Explicit traversal binds the selected branch and current loop iteration.
+  if (!state.explicitRegionBindings)
+    bindValueOriginsFromDef(state.model, origins, op, state.frozenLoopArgs);
   state.resources.commit(state.getStaticInfo(op).resource);
   return success();
 }
@@ -1227,9 +1248,11 @@ static void appendValueAliases(ValueOriginMap &origins, OperandRange sources,
 
 static void buildValueOriginBindings(ValueOriginMap &origins);
 
-static ValueOriginMap buildValueOriginMap(func::FuncOp func) {
+template <typename Root> static ValueOriginMap buildValueOriginMap(Root &root) {
   ValueOriginMap origins;
-  func.walk([&](RegionBranchOpInterface branch) {
+  root.walk([&](RegionBranchOpInterface branch) {
+    if (isa<waveamdmachine::MaterializationCandidatesOp>(branch.getOperation()))
+      return;
     SmallVector<RegionSuccessor> successors;
     branch.getSuccessorRegions(RegionBranchPoint::parent(), successors);
     for (RegionSuccessor successor : successors)
@@ -2162,28 +2185,12 @@ struct GreedyOrderState {
   std::optional<unsigned> stallTarget;
 };
 
-static GreedyResult
-buildGreedyOrderFromState(const GreedyRegion &region, const GraphTables &graph,
-                          const waveamdmachine::ArchData &arch,
-                          const waveamdmachine::EventSimConfig &config,
-                          const ValueOriginMap &origins,
-                          const StaticIssueInfoMap &staticInfo,
-                          const WaveAMDMachineScheduleModel &scheduleModel,
-                          const IssueState *initialState) {
-  assert((!initialState || initialState->staticInfo == &staticInfo) &&
-         "initial issue state uses different static info");
-  IssueState state(arch, scheduleModel.buildInstructionConfig(config),
-                   staticInfo);
-  std::unique_ptr<IssueState> steadyState =
-      initialState ? std::make_unique<IssueState>(*initialState) : nullptr;
-  bindValueOrigins(state.model, origins, state.frozenLoopArgs);
-  if (steadyState)
-    bindValueOrigins(steadyState->model, origins, steadyState->frozenLoopArgs);
-  ComputeIslandInfo computeIslands =
-      buildComputeIslandInfo(region, graph, staticInfo, config, scheduleModel);
-  GreedyOrderState orderState(region, graph, staticInfo,
-                              std::move(computeIslands), std::move(state),
-                              std::move(steadyState));
+static GreedyResult runGreedyOrder(GreedyOrderState &orderState,
+                                   const GreedyRegion &region,
+                                   const GraphTables &graph,
+                                   const waveamdmachine::ArchData &arch,
+                                   const waveamdmachine::EventSimConfig &config,
+                                   const ValueOriginMap &origins) {
   while (orderState.result.order.size() != region.ops.size()) {
     FailureOr<GreedyStepStatus> step =
         orderState.step(region, graph, arch, config, origins);
@@ -2198,6 +2205,39 @@ buildGreedyOrderFromState(const GreedyRegion &region, const GraphTables &graph,
   addReadyScheduleWorkStats(orderState.computeIslands, orderState.result.stats);
   orderState.result.success = true;
   return orderState.result;
+}
+
+static GreedyResult buildGreedyOrderFromState(
+    const GreedyRegion &region, const GraphTables &graph,
+    const waveamdmachine::ArchData &arch,
+    const waveamdmachine::EventSimConfig &config, const ValueOriginMap &origins,
+    const StaticIssueInfoMap &staticInfo,
+    const WaveAMDMachineScheduleModel &scheduleModel,
+    const IssueState *initialState, const IssueState *incoming = nullptr,
+    std::unique_ptr<IssueState> *outgoing = nullptr) {
+  assert((!initialState || initialState->staticInfo == &staticInfo) &&
+         "initial issue state uses different static info");
+  IssueState state =
+      incoming ? *incoming
+               : IssueState(arch, scheduleModel.buildInstructionConfig(config),
+                            staticInfo);
+  state.staticInfo = &staticInfo;
+  std::unique_ptr<IssueState> steadyState =
+      initialState ? std::make_unique<IssueState>(*initialState) : nullptr;
+  if (!incoming)
+    bindValueOrigins(state.model, origins, state.frozenLoopArgs);
+  if (steadyState)
+    bindValueOrigins(steadyState->model, origins, steadyState->frozenLoopArgs);
+  ComputeIslandInfo computeIslands =
+      buildComputeIslandInfo(region, graph, staticInfo, config, scheduleModel);
+  GreedyOrderState orderState(region, graph, staticInfo,
+                              std::move(computeIslands), std::move(state),
+                              std::move(steadyState));
+  GreedyResult result =
+      runGreedyOrder(orderState, region, graph, arch, config, origins);
+  if (outgoing && result.success)
+    *outgoing = std::make_unique<IssueState>(std::move(orderState.state));
+  return result;
 }
 
 static waveamdmachine::UniformLoopOp
@@ -2235,6 +2275,17 @@ static LogicalResult bindLoopBackedge(IssueState &state,
        llvm::zip_equal(body.getArguments(), terminator.getCarries()))
     state.model.bindValue(arg, carry);
   return success();
+}
+
+static void bindLoopResults(IssueState &state,
+                            waveamdmachine::UniformLoopOp loop, int64_t trips) {
+  ValueRange values =
+      trips == 0 ? ValueRange(loop.getInits())
+                 : ValueRange(cast<waveamdmachine::ContinueIfOp>(
+                                  loop.getBody().front().getTerminator())
+                                  .getCarries());
+  for (auto [result, value] : llvm::zip_equal(loop.getResults(), values))
+    state.model.bindValue(result, value);
 }
 
 static FailureOr<std::unique_ptr<IssueState>>
@@ -2275,13 +2326,24 @@ static void materializeOrder(const GreedyRegion &region,
     ops.push_back(region.ops[index]);
 }
 
+static void applySingleWaveRefinementStats(
+    GreedyStats &stats,
+    const std::optional<SingleWaveScheduleRefinementStats> &refinement) {
+  if (!refinement)
+    return;
+  stats.steadyStateIterations = refinement->steadyStateIterations;
+  stats.steadyStateRefinements = refinement->steadyStateRefinements;
+  stats.recurrenceModelMoves = refinement->recurrenceModelMoves;
+}
+
 // Never post-veto greedy orders with simulated cycles; fix greedy choices.
 static GreedyResult
 buildBoundedGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
                         const waveamdmachine::ArchData &arch,
                         const waveamdmachine::EventSimConfig &config,
                         const ValueOriginMap &origins,
-                        const WaveAMDMachineScheduleModel &scheduleModel) {
+                        const WaveAMDMachineScheduleModel &scheduleModel,
+                        IssueState *continuation = nullptr) {
   FailureOr<StaticIssueInfoMap> staticInfo =
       buildStaticIssueInfoMap(region, arch, config.wavefrontSize);
   if (failed(staticInfo)) {
@@ -2289,6 +2351,7 @@ buildBoundedGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
     return failGreedyModel(result);
   }
   SmallVector<GreedyResult, 4> results;
+  SmallVector<std::unique_ptr<IssueState>> states;
   auto buildProvider = [&](const SingleWaveScheduleBuildRequest &request)
       -> FailureOr<SingleWaveScheduleCandidateFacts> {
     std::unique_ptr<IssueState> replayed;
@@ -2301,9 +2364,11 @@ buildBoundedGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
       replayed = std::move(*state);
     }
 
-    GreedyResult result =
-        buildGreedyOrderFromState(region, graph, arch, config, origins,
-                                  *staticInfo, scheduleModel, replayed.get());
+    std::unique_ptr<IssueState> outgoing;
+    GreedyResult result = buildGreedyOrderFromState(
+        region, graph, arch, config, origins, *staticInfo, scheduleModel,
+        replayed.get(), continuation, continuation ? &outgoing : nullptr);
+    states.push_back(std::move(outgoing));
     SingleWaveScheduleCandidateFacts facts;
     facts.order = result.order;
     facts.resultToken = results.size();
@@ -2324,14 +2389,11 @@ buildBoundedGreedyOrder(const GreedyRegion &region, const GraphTables &graph,
   GreedyResult result = std::move(results[decision->resultToken]);
   if (decision->modelFailed)
     return failGreedyModel(result);
-  if (decision->refinementStats) {
-    result.stats.steadyStateIterations =
-        decision->refinementStats->steadyStateIterations;
-    result.stats.steadyStateRefinements =
-        decision->refinementStats->steadyStateRefinements;
-    result.stats.recurrenceModelMoves =
-        decision->refinementStats->recurrenceModelMoves;
+  if (continuation && result.success) {
+    *continuation = std::move(*states[decision->resultToken]);
+    continuation->staticInfo = nullptr;
   }
+  applySingleWaveRefinementStats(result.stats, decision->refinementStats);
   return result;
 }
 
@@ -2367,34 +2429,38 @@ static void applyOrder(const GreedyRegion &region, ArrayRef<unsigned> order) {
 static void printDecision(const GreedyRegion &region, StringRef action,
                           StringRef reason, const GreedyStats &stats) {
   StringAttr funcName = region.func->getAttrOfType<StringAttr>("sym_name");
-  llvm::errs() << "waveamd-machine-schedule region func="
-               << (funcName ? funcName.getValue() : StringRef("<unknown>"))
-               << " index=" << region.regionOrdinal
-               << " ops=" << region.ops.size() << " action=" << action
-               << " reason=" << reason << " filled_gaps=" << stats.filledGaps
-               << " unfilled_gaps=" << stats.unfilledGaps
-               << " operand_gaps=" << stats.operandGaps
-               << " resource_gaps=" << stats.resourceGaps
-               << " cheap_hazard_gaps=" << stats.cheapHazardGaps
-               << " m0_gaps=" << stats.m0Gaps
-               << " store_data_gaps=" << stats.storeDataGaps
-               << " coexec_window_gaps=" << stats.coexecWindowGaps
-               << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
-               << " long_latency_vmem_prefetch_moves="
-               << stats.longLatencyVmemPrefetchMoves
-               << " recurrence_model_moves=" << stats.recurrenceModelMoves
-               << " memory_token_gaps=" << stats.memoryTokenGaps
-               << " barrier_memory_gaps=" << stats.barrierMemoryGaps
-               << " filled_barrier_memory_gaps="
-               << stats.filledBarrierMemoryGaps
-               << " steady_state_fills=" << stats.steadyStateFills
-               << " steady_state_iterations=" << stats.steadyStateIterations
-               << " steady_state_refinements=" << stats.steadyStateRefinements
-               << " latency_priority_moves=" << stats.latencyPriorityMoves
-               << " resource_priority_moves=" << stats.resourcePriorityMoves
-               << " resource_stall_fills=" << stats.resourceStallFills
-               << " pressure_priority_moves=" << stats.pressurePriorityMoves
-               << "\n";
+  std::string message;
+  llvm::raw_string_ostream os(message);
+  os << "waveamd-machine-schedule region func="
+     << (funcName ? funcName.getValue() : StringRef("<unknown>"))
+     << " index=" << region.regionOrdinal << " ops=" << region.ops.size()
+     << " action=" << action << " reason=" << reason
+     << " filled_gaps=" << stats.filledGaps
+     << " unfilled_gaps=" << stats.unfilledGaps
+     << " operand_gaps=" << stats.operandGaps
+     << " resource_gaps=" << stats.resourceGaps
+     << " cheap_hazard_gaps=" << stats.cheapHazardGaps
+     << " m0_gaps=" << stats.m0Gaps
+     << " store_data_gaps=" << stats.storeDataGaps
+     << " coexec_window_gaps=" << stats.coexecWindowGaps
+     << " vmem_prefetch_moves=" << stats.vmemPrefetchMoves
+     << " long_latency_vmem_prefetch_moves="
+     << stats.longLatencyVmemPrefetchMoves
+     << " recurrence_model_moves=" << stats.recurrenceModelMoves
+     << " memory_token_gaps=" << stats.memoryTokenGaps
+     << " barrier_memory_gaps=" << stats.barrierMemoryGaps
+     << " filled_barrier_memory_gaps=" << stats.filledBarrierMemoryGaps
+     << " steady_state_fills=" << stats.steadyStateFills
+     << " steady_state_iterations=" << stats.steadyStateIterations
+     << " steady_state_refinements=" << stats.steadyStateRefinements
+     << " latency_priority_moves=" << stats.latencyPriorityMoves
+     << " resource_priority_moves=" << stats.resourcePriorityMoves
+     << " resource_stall_fills=" << stats.resourceStallFills
+     << " pressure_priority_moves=" << stats.pressurePriorityMoves << "\n";
+  if (region.diagnostics)
+    *region.diagnostics += message;
+  else
+    llvm::errs() << message;
 }
 
 using MultiWaveRegions = std::array<GreedyRegion, kMultiWaveScheduleClassCount>;
@@ -2954,6 +3020,8 @@ struct RegionCollector {
   }
 
   LogicalResult collectNestedRegionOp(Operation &op) {
+    if (isa<waveamdmachine::MaterializationCandidatesOp>(op))
+      return success();
     if (!isWaveAMDMachineOpForScheduling(&op) || !isSupportedRegionOp(&op))
       return op.emitError("waveamd-machine-schedule unsupported region op: ")
              << op.getName();
@@ -3030,7 +3098,8 @@ static bool hasAnyWaveMachineOp(func::FuncOp func) {
 }
 
 static FailureOr<MultiWaveRegionLists>
-collectSpecializedRegions(waveamdmachine::UniformIfOp uniformIf) {
+collectSpecializedRegions(waveamdmachine::UniformIfOp uniformIf,
+                          std::string *diagnostics = nullptr) {
   func::FuncOp func = uniformIf->getParentOfType<func::FuncOp>();
   MultiWaveRegionLists regions;
   FailureOr<SmallVector<GreedyRegion, 16>> thenRegions =
@@ -3043,6 +3112,10 @@ collectSpecializedRegions(waveamdmachine::UniformIfOp uniformIf) {
     uniformIf.emitOpError("multi-wave branches have different region counts");
     return failure();
   }
+  for (GreedyRegion &region : *thenRegions)
+    region.diagnostics = diagnostics;
+  for (GreedyRegion &region : *elseRegions)
+    region.diagnostics = diagnostics;
   regions[0] = std::move(*thenRegions);
   regions[1] = std::move(*elseRegions);
   return regions;
@@ -3070,6 +3143,79 @@ getOriginalMultiWaveOrders(const MultiWaveRegions &regions) {
   return orders;
 }
 
+static SmallVector<waveamdmachine::UniformIfOp>
+collectScheduleSpecializations(Region &root) {
+  SmallVector<waveamdmachine::UniformIfOp> specializations;
+  root.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (isa<waveamdmachine::MaterializationCandidatesOp>(op))
+      return WalkResult::skip();
+    if (auto uniformIf = dyn_cast<waveamdmachine::UniformIfOp>(op))
+      if (uniformIf->hasAttr(kMultiWaveScheduleAttr))
+        specializations.push_back(uniformIf);
+    return WalkResult::advance();
+  });
+  return specializations;
+}
+
+struct CandidateSchedule {
+  SmallVector<GreedyRegion, 16> regions;
+  SmallVector<waveamdmachine::UniformIfOp> specializations;
+  ValueOriginMap origins;
+  DenseMap<Operation *, GreedyRegion *> starts;
+  std::optional<WaveAMDMachineScheduleModel> model;
+  std::unique_ptr<IssueState> state;
+  std::string diagnostics;
+  MachineScheduleStageTiming timing;
+  Region *body = nullptr;
+  int64_t cycles = 0;
+};
+
+static unsigned
+recordCandidateScores(ArrayRef<std::unique_ptr<CandidateSchedule>> candidates) {
+  unsigned winner = 0;
+  for (auto [index, candidate] : llvm::enumerate(candidates)) {
+    auto yield = cast<waveamdmachine::CandidateYieldOp>(
+        candidate->body->front().getTerminator());
+    yield.setCycles(candidate->cycles);
+    if (candidate->cycles < candidates[winner]->cycles)
+      winner = index;
+  }
+  return winner;
+}
+
+static LogicalResult validateSchedulingFrequencies(Region &root) {
+  WalkResult walk = root.walk([&](waveamdmachine::UniformLoopOp loop) {
+    auto trip = loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
+    if (!trip || !trip.getType().isInteger(64) || trip.getInt() < 0 ||
+        (!loop.getEntryCond() && trip.getInt() == 0)) {
+      loop.emitOpError("candidate scheduling requires an exact nonnegative i64 "
+                       "waveamdmachine.trip_count; post-tested loops require a "
+                       "positive count");
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+static LogicalResult validateCandidate(Region &root) {
+  WalkResult walk = root.walk([&](waveamdmachine::MaterializationCandidatesOp
+                                      op) {
+    op.emitOpError(
+        "nested materialization candidates must be merged before scheduling");
+    return WalkResult::interrupt();
+  });
+  return failure(walk.wasInterrupted());
+}
+
+static void bindConditionalResults(IssueState &state, Operation *op,
+                                   Region &region) {
+  auto yield = cast<waveamdmachine::YieldOp>(region.front().getTerminator());
+  for (auto [result, value] :
+       llvm::zip_equal(op->getResults(), yield.getValues()))
+    state.model.bindValue(result, value);
+}
+
 struct WaveAMDMachineSchedulePass
     : public wave::impl::WaveAMDMachineScheduleBase<
           WaveAMDMachineSchedulePass> {
@@ -3086,17 +3232,17 @@ struct WaveAMDMachineSchedulePass
       return signalPassFailure();
   }
 
-  LogicalResult
-  processCollectedRegions(ArrayRef<waveamdmachine::UniformIfOp> specializations,
-                          ArrayRef<GreedyRegion> regions,
-                          const waveamdmachine::ArchData &arch,
-                          const waveamdmachine::EventSimConfig &modelConfig,
-                          const ValueOriginMap &origins,
-                          const WaveAMDMachineScheduleModel &scheduleModel,
-                          MachineScheduleStageTiming &timing) {
+  LogicalResult processCollectedRegions(
+      ArrayRef<waveamdmachine::UniformIfOp> specializations,
+      ArrayRef<GreedyRegion> regions, const waveamdmachine::ArchData &arch,
+      const waveamdmachine::EventSimConfig &modelConfig,
+      const ValueOriginMap &origins,
+      const WaveAMDMachineScheduleModel &scheduleModel,
+      MachineScheduleStageTiming &timing, std::string *diagnostics = nullptr) {
     for (waveamdmachine::UniformIfOp specialization : specializations)
       if (failed(processSpecialization(specialization, arch, modelConfig,
-                                       origins, scheduleModel, timing)))
+                                       origins, scheduleModel, timing,
+                                       diagnostics)))
         return failure();
     for (const GreedyRegion &region : regions)
       if (failed(processRegion(region, arch, modelConfig, origins,
@@ -3126,11 +3272,6 @@ struct WaveAMDMachineSchedulePass
     prepareTiming.stop();
 
     TimingScope collectTiming = timing.nest("machine_schedule_collect_regions");
-    SmallVector<waveamdmachine::UniformIfOp, 2> specializations;
-    func.walk([&](waveamdmachine::UniformIfOp uniformIf) {
-      if (uniformIf->hasAttr(kMultiWaveScheduleAttr))
-        specializations.push_back(uniformIf);
-    });
     FailureOr<SmallVector<GreedyRegion, 16>> collected =
         RegionCollector().collect(func);
     if (failed(collected))
@@ -3150,13 +3291,270 @@ struct WaveAMDMachineSchedulePass
     if (failed(scheduleModel))
       return WalkResult::interrupt();
     livenessTiming.stop();
-    if (failed(processCollectedRegions(specializations, *collected, *arch.arch,
-                                       *modelConfig, origins, *scheduleModel,
-                                       timing)))
+    return scheduleFunctionRegions(func, *arch.arch, *modelConfig,
+                                   std::move(*collected), std::move(origins),
+                                   std::move(*scheduleModel), timing);
+  }
+
+  WalkResult scheduleFunctionRegions(
+      func::FuncOp func, const waveamdmachine::ArchData &arch,
+      const waveamdmachine::EventSimConfig &config,
+      SmallVector<GreedyRegion, 16> regions, ValueOriginMap origins,
+      WaveAMDMachineScheduleModel model, MachineScheduleStageTiming &timing) {
+    SmallVector<waveamdmachine::UniformIfOp> specializations =
+        collectScheduleSpecializations(func.getBody());
+    bool hasCandidates =
+        func.walk([](waveamdmachine::MaterializationCandidatesOp) {
+              return WalkResult::interrupt();
+            })
+            .wasInterrupted();
+    if (hasCandidates)
+      return WalkResult(failed(scheduleFunctionWithCandidates(
+                            func, arch, config, std::move(regions),
+                            std::move(origins), std::move(model)))
+                            ? WalkResult::interrupt()
+                            : WalkResult::advance());
+    if (failed(processCollectedRegions(specializations, regions, arch, config,
+                                       origins, model, timing)))
       return WalkResult::interrupt();
     for (waveamdmachine::UniformIfOp specialization : specializations)
       specialization->removeAttr(kMultiWaveScheduleAttr);
     return WalkResult::advance();
+  }
+
+  LogicalResult scheduleFunctionWithCandidates(
+      func::FuncOp func, const waveamdmachine::ArchData &arch,
+      const waveamdmachine::EventSimConfig &config,
+      SmallVector<GreedyRegion, 16> regions, ValueOriginMap origins,
+      WaveAMDMachineScheduleModel model) {
+    if (!func.getBody().hasOneBlock())
+      return func.emitOpError(
+          "candidate scheduling requires structured single-block control flow");
+    if (failed(validateSchedulingFrequencies(func.getBody())))
+      return failure();
+    CandidateSchedule scope;
+    scope.body = &func.getBody();
+    scope.regions = std::move(regions);
+    scope.origins = std::move(origins);
+    scope.model.emplace(std::move(model));
+    scope.specializations = collectScheduleSpecializations(func.getBody());
+    initializeScopeRegions(scope);
+    StaticIssueInfoMap empty;
+    IssueState state(arch, scope.model->buildInstructionConfig(config), empty);
+    state.explicitRegionBindings = true;
+    LogicalResult result = scheduleScope(scope, state, arch, config);
+    llvm::errs() << scope.diagnostics;
+    return result;
+  }
+
+  static void initializeScopeRegions(CandidateSchedule &scope) {
+    for (GreedyRegion &region : scope.regions) {
+      region.diagnostics = &scope.diagnostics;
+      scope.starts[region.first] = &region;
+    }
+  }
+
+  LogicalResult
+  scheduleCandidates(waveamdmachine::MaterializationCandidatesOp wrapper,
+                     CandidateSchedule &parent, IssueState &state,
+                     const waveamdmachine::ArchData &arch,
+                     const waveamdmachine::EventSimConfig &config) {
+    if (wrapper->getParentOfType<waveamdmachine::UniformLoopOp>())
+      return wrapper.emitOpError(
+          "materialization candidates must enclose their outermost loop");
+    SmallVector<std::unique_ptr<CandidateSchedule>> candidates;
+    for (Region &body : wrapper.getCandidates()) {
+      if (failed(prepareCandidate(body,
+                                  wrapper->getParentOfType<func::FuncOp>(),
+                                  arch, config, candidates)))
+        return failure();
+      candidates.back()->state = std::make_unique<IssueState>(state);
+      candidates.back()->origins.sources.insert(parent.origins.sources.begin(),
+                                                parent.origins.sources.end());
+      for (auto [arg, input] :
+           llvm::zip_equal(body.front().getArguments(), wrapper.getInputs())) {
+        candidates.back()->state->model.bindValue(arg, input);
+        candidates.back()->origins.sources[arg] = {input};
+      }
+    }
+    int64_t start = state.model.getCurrentCycle();
+    LogicalResult result = failableParallelForEach(
+        wrapper.getContext(), candidates,
+        [&](std::unique_ptr<CandidateSchedule> &candidate) {
+          if (failed(
+                  scheduleScope(*candidate, *candidate->state, arch, config)))
+            return failure();
+          candidate->cycles = candidate->state->completionCycle - start;
+          return success();
+        });
+    for (const auto &candidate : candidates)
+      parent.diagnostics += candidate->diagnostics;
+    if (failed(result))
+      return failure();
+    unsigned winner = recordCandidateScores(candidates);
+    state = std::move(*candidates[winner]->state);
+    parent.origins.sources.insert(candidates[winner]->origins.sources.begin(),
+                                  candidates[winner]->origins.sources.end());
+    auto yield = cast<waveamdmachine::CandidateYieldOp>(
+        candidates[winner]->body->front().getTerminator());
+    for (auto [result, value] :
+         llvm::zip_equal(wrapper.getResults(), yield.getValues())) {
+      state.model.bindValue(result, value);
+      parent.origins.sources[result] = {value};
+    }
+    return success();
+  }
+
+  LogicalResult prepareCandidate(
+      Region &body, func::FuncOp func, const waveamdmachine::ArchData &arch,
+      const waveamdmachine::EventSimConfig &config,
+      SmallVectorImpl<std::unique_ptr<CandidateSchedule>> &candidates) {
+    if (failed(validateCandidate(body)))
+      return failure();
+    auto yield =
+        cast<waveamdmachine::CandidateYieldOp>(body.front().getTerminator());
+    yield.removeCyclesAttr();
+    auto candidate = std::make_unique<CandidateSchedule>();
+    candidate->body = &body;
+    FailureOr<SmallVector<GreedyRegion, 16>> regions =
+        RegionCollector().collect(body, func);
+    if (failed(regions))
+      return failure();
+    candidate->regions = std::move(*regions);
+    initializeScopeRegions(*candidate);
+    candidate->specializations = collectScheduleSpecializations(body);
+    candidate->origins = buildValueOriginMap(body);
+    FailureOr<WaveAMDMachineScheduleModel> model =
+        WaveAMDMachineScheduleModel::create(func, arch, config.wavefrontSize,
+                                            &body);
+    if (failed(model))
+      return failure();
+    candidate->model.emplace(std::move(*model));
+    candidates.push_back(std::move(candidate));
+    return success();
+  }
+
+  LogicalResult scheduleScope(CandidateSchedule &scope, IssueState &state,
+                              const waveamdmachine::ArchData &arch,
+                              const waveamdmachine::EventSimConfig &config) {
+    for (waveamdmachine::UniformIfOp specialization : scope.specializations)
+      if (failed(processSpecialization(specialization, arch, config,
+                                       scope.origins, *scope.model,
+                                       scope.timing, &scope.diagnostics)))
+        return failure();
+    for (Block &block : *scope.body)
+      if (failed(scheduleBlock(block, scope, state, arch, config, true)))
+        return failure();
+    for (waveamdmachine::UniformIfOp specialization : scope.specializations)
+      specialization->removeAttr(kMultiWaveScheduleAttr);
+    return success();
+  }
+
+  LogicalResult commitScheduledOp(Operation *op, IssueState &state,
+                                  const waveamdmachine::ArchData &arch,
+                                  const waveamdmachine::EventSimConfig &config,
+                                  const ValueOriginMap &origins) {
+    StaticIssueInfoMap info;
+    info.try_emplace(op, buildStaticIssueInfo(op, arch, config.wavefrontSize));
+    state.staticInfo = &info;
+    LogicalResult result = commitIssue(state, op, IssuePreview{}, origins);
+    state.staticInfo = nullptr;
+    return result;
+  }
+
+  LogicalResult scheduleBlock(Block &block, CandidateSchedule &scope,
+                              IssueState &state,
+                              const waveamdmachine::ArchData &arch,
+                              const waveamdmachine::EventSimConfig &config,
+                              bool schedule) {
+    SmallVector<Operation *> ops;
+    for (Operation &op : block.without_terminator())
+      ops.push_back(&op);
+    for (size_t index = 0; index < ops.size();) {
+      Operation *op = ops[index];
+      GreedyRegion *region = schedule ? scope.starts.lookup(op) : nullptr;
+      if (region) {
+        if (failed(processRegion(*region, arch, config, scope.origins,
+                                 *scope.model, scope.timing, &state)))
+          return failure();
+        index += region->ops.size();
+      } else {
+        if (failed(
+                scheduleStructuredOp(op, scope, state, arch, config, schedule)))
+          return failure();
+        ++index;
+      }
+    }
+    return success();
+  }
+
+  LogicalResult scheduleLoop(waveamdmachine::UniformLoopOp loop,
+                             CandidateSchedule &scope, IssueState &state,
+                             const waveamdmachine::ArchData &arch,
+                             const waveamdmachine::EventSimConfig &config,
+                             bool schedule) {
+    int64_t trips =
+        loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count").getInt();
+    Block &body = loop.getBody().front();
+    bindLoopEntry(state, loop);
+    if (trips == 0 && schedule) {
+      IssueState unused = state;
+      if (failed(scheduleBlock(body, scope, unused, arch, config, true)))
+        return failure();
+    }
+    for (int64_t iteration = 0; iteration < trips; ++iteration) {
+      if (failed(scheduleBlock(body, scope, state, arch, config,
+                               schedule && iteration == 0)))
+        return failure();
+      if (failed(bindLoopBackedge(state, loop)))
+        return failure();
+    }
+    bindLoopResults(state, loop, trips);
+    return success();
+  }
+
+  LogicalResult
+  scheduleConditional(Operation *op, CandidateSchedule &scope,
+                      IssueState &state, const waveamdmachine::ArchData &arch,
+                      const waveamdmachine::EventSimConfig &config,
+                      bool schedule) {
+    bool uniform = isa<waveamdmachine::UniformIfOp>(op);
+    IssueState incoming = state;
+    std::unique_ptr<IssueState> selected;
+    for (Region &region : op->getRegions()) {
+      IssueState branch = uniform ? incoming : state;
+      if (!region.empty()) {
+        if (failed(scheduleBlock(region.front(), scope, branch, arch, config,
+                                 schedule &&
+                                     !op->hasAttr(kMultiWaveScheduleAttr))))
+          return failure();
+        bindConditionalResults(branch, op, region);
+      }
+      if (!uniform)
+        state = IssueState(branch);
+      if (!selected || branch.completionCycle > selected->completionCycle)
+        selected = std::make_unique<IssueState>(std::move(branch));
+    }
+    if (uniform)
+      state = std::move(*selected);
+    return success();
+  }
+
+  LogicalResult
+  scheduleStructuredOp(Operation *op, CandidateSchedule &scope,
+                       IssueState &state, const waveamdmachine::ArchData &arch,
+                       const waveamdmachine::EventSimConfig &config,
+                       bool schedule) {
+    if (auto wrapper =
+            dyn_cast<waveamdmachine::MaterializationCandidatesOp>(op))
+      return scheduleCandidates(wrapper, scope, state, arch, config);
+    if (auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(op))
+      return scheduleLoop(loop, scope, state, arch, config, schedule);
+    if (isa<waveamdmachine::UniformIfOp, waveamdmachine::ExecIfOp>(op))
+      return scheduleConditional(op, scope, state, arch, config, schedule);
+    if (isa<waveamdmachine::SchedBarrierOp>(op))
+      return success();
+    return commitScheduledOp(op, state, arch, config, scope.origins);
   }
 
   bool shouldScheduleFunction(func::FuncOp func) const {
@@ -3204,7 +3602,8 @@ struct WaveAMDMachineSchedulePass
                               const waveamdmachine::EventSimConfig &config,
                               const ValueOriginMap &origins,
                               const WaveAMDMachineScheduleModel &scheduleModel,
-                              MachineScheduleStageTiming &timing) {
+                              MachineScheduleStageTiming &timing,
+                              IssueState *continuation = nullptr) {
     TimingScope graphTiming = timing.nest("machine_schedule_build_graph");
     GraphTables graph;
     if (failed(buildGraph(region, graph)))
@@ -3214,8 +3613,8 @@ struct WaveAMDMachineSchedulePass
 
     SmallVector<unsigned, 16> originalOrder = getOriginalOrder(region);
     TimingScope orderTiming = timing.nest("machine_schedule_build_order");
-    GreedyResult greedy = buildBoundedGreedyOrder(region, graph, arch, config,
-                                                  origins, scheduleModel);
+    GreedyResult greedy = buildBoundedGreedyOrder(
+        region, graph, arch, config, origins, scheduleModel, continuation);
     if (!greedy.success)
       return emitGreedyFailure(region, greedy);
     orderTiming.stop();
@@ -3279,9 +3678,10 @@ struct WaveAMDMachineSchedulePass
                         const waveamdmachine::EventSimConfig &config,
                         const ValueOriginMap &origins,
                         const WaveAMDMachineScheduleModel &scheduleModel,
-                        MachineScheduleStageTiming &timing) {
+                        MachineScheduleStageTiming &timing,
+                        std::string *diagnostics) {
     FailureOr<MultiWaveRegionLists> collected =
-        collectSpecializedRegions(uniformIf);
+        collectSpecializedRegions(uniformIf, diagnostics);
     if (failed(collected))
       return failure();
     SmallVector<waveamdmachine::WavePlacement> placements =

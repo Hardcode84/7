@@ -2527,7 +2527,7 @@ struct RegionScheduleSession::Impl {
 FailureOr<WaveAMDMachineScheduleModel>
 WaveAMDMachineScheduleModel::create(func::FuncOp func,
                                     const waveamdmachine::ArchData &arch,
-                                    unsigned wavefrontSize) {
+                                    unsigned wavefrontSize, Region *candidate) {
   assert((wavefrontSize == 32 || wavefrontSize == 64) &&
          "invalid verified wavefront size");
   FailureOr<WaveAMDRegisterLimits> targetLimits =
@@ -2549,9 +2549,10 @@ WaveAMDMachineScheduleModel::create(func::FuncOp func,
   if (failed(pressureLimits))
     return failure();
   FailureOr<WaveAMDLiveIntervalBuildResult> liveness =
-      buildAllocatedWaveAMDLiveIntervals(
-          func, WaveAMDLiveIntervalOrderOverride{},
-          WaveAMDLiveIntervalAliasPolicy::Conservative);
+      candidate ? buildAllocatedWaveAMDLiveIntervals(*candidate)
+                : buildAllocatedWaveAMDLiveIntervals(
+                      func, WaveAMDLiveIntervalOrderOverride{},
+                      WaveAMDLiveIntervalAliasPolicy::Conservative);
   if (failed(liveness))
     return failure();
   auto impl = std::make_unique<Impl>();
