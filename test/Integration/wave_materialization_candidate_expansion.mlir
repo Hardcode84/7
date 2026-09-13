@@ -1,3 +1,6 @@
+// RUN: wave-translate %s --wave-to-amdgpu-asm -o %t.s
+// RUN: FileCheck %s --check-prefix=ASM < %t.s
+// RUN: llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj %t.s -o /dev/null
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants --waveamd-machine-schedule="apply-schedule" --waveamd-collapse-materialization-variants --waveamd-prepare-regalloc | FileCheck %s --check-prefix=COLLAPSE --implicit-check-not=waveamdmachine.materialization --implicit-check-not=waveamdmachine.candidate_yield
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants --waveamd-machine-schedule='apply-schedule' | FileCheck %s --check-prefix=SCHEDULE
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants='max-candidates=1' | FileCheck %s --check-prefix=ONE --implicit-check-not=waveamdmachine.materialization_variants
@@ -39,7 +42,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     wave.store %value -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
     return
   }
-}
 
 // ONE-LABEL: func.func @loop_kernel
 // ONE: waveamdmachine.materialization_candidates
@@ -65,7 +67,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: waveamdmachine.global_store_b32
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: waveamdmachine.s_endpgm
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @loop_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
     %zero = arith.constant 0 : i32
     %one = arith.constant 1 : i32
@@ -90,3 +91,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // COLLAPSE: waveamdmachine.uniform_loop
 // COLLAPSE: waveamdmachine.global_store_b32
 // COLLAPSE: waveamdmachine.s_endpgm
+
+// ASM-LABEL: kernel:
+// ASM: buffer_store_b32
+// ASM: s_endpgm
+// ASM-LABEL: loop_kernel:
+// ASM: s_cbranch
+// ASM: buffer_store_b32
+// ASM: s_endpgm

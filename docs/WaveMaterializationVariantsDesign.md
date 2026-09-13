@@ -268,6 +268,12 @@ values, and erase the yield, losing regions, and wrapper. Retain the chosen
 instruction order. Do not reschedule the winner. The remaining postschedule
 pipeline runs once on the resulting function.
 
+The backend pipeline expands choices after common machine optimizations and
+multi-wave specialization. `remove-dead-values`, `cse`, and `canonicalize` clean
+functions that contain candidate wrappers. Scheduling and collapse run next,
+before packed-MFMA optimization and the postschedule pipeline. Calibration pipelines use the same
+expansion, scheduling, and collapse order when scheduling is enabled.
+
 ## Construction and lowering boundary
 
 `wave-extract-loop-strides` preserves the original rematerialization and

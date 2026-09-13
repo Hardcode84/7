@@ -1,8 +1,11 @@
 // RUN: not wave-opt %s --waveamd-prepare-regalloc 2>&1 | FileCheck %s --check-prefix=ALLOC
-// RUN: not wave-translate %s --wave-to-amdgpu-asm 2>&1 | FileCheck %s --check-prefix=ASM
+// RUN: wave-translate %s --wave-to-amdgpu-asm | FileCheck %s --check-prefix=ASM
 
 // ALLOC: must be resolved before register allocation
-// ASM: must be resolved before register allocation
+// ASM-LABEL: unresolved:
+// ASM: s_barrier
+// ASM-NOT: s_barrier
+// ASM: s_endpgm
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @unresolved() attributes {wave.kernel} {
     waveamdmachine.materialization_candidates {

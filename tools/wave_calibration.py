@@ -166,8 +166,24 @@ def append_calibration_entry(
             finish_input = transform.ApplyRegisteredPassOp(
                 any_op,
                 finish_input,
+                "waveamd-expand-materialization-variants",
+            ).result
+            finish_input = transform.IncludeOp(
+                [any_op],
+                "waveamd_cleanup_materialization_variants",
+                transform.FailurePropagationMode.Propagate,
+                [finish_input],
+            ).result
+            finish_input = transform.ApplyRegisteredPassOp(
+                any_op,
+                finish_input,
                 "waveamd-machine-schedule",
                 options=schedule_options,
+            ).result
+            finish_input = transform.ApplyRegisteredPassOp(
+                any_op,
+                finish_input,
+                "waveamd-collapse-materialization-variants",
             ).result
         finish_input = transform.IncludeOp(
             [any_op],

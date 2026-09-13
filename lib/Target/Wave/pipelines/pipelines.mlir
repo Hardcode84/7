@@ -262,6 +262,28 @@ module attributes {transform.with_named_sequence} {
     transform.yield %r1 : !transform.any_op
   }
 
+  transform.named_sequence @waveamd_match_materialization_candidates(
+      %op: !transform.any_op {transform.readonly}) -> !transform.any_op {
+    transform.match.operation_name %op ["waveamdmachine.materialization_candidates"]
+        : !transform.any_op
+    transform.yield %op : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_cleanup_materialization_variants(
+      %root: !transform.any_op {transform.readonly}) -> !transform.any_op {
+    %candidates = transform.collect_matching @waveamd_match_materialization_candidates in %root
+        : (!transform.any_op) -> !transform.any_op
+    %funcs = transform.get_parent_op %candidates {op_name = "func.func", deduplicate}
+        : (!transform.any_op) -> !transform.any_op
+    %rdead = transform.apply_registered_pass "remove-dead-values" to %funcs
+        : (!transform.any_op) -> !transform.any_op
+    %rcse = transform.apply_registered_pass "cse" to %rdead
+        : (!transform.any_op) -> !transform.any_op
+    %rcanon = transform.apply_registered_pass "canonicalize" to %rcse
+        : (!transform.any_op) -> !transform.any_op
+    transform.yield %root : !transform.any_op
+  }
+
   transform.named_sequence @waveamd_backend(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rpre = transform.include @waveamd_backend_preschedule failures(propagate) (%root)
@@ -269,12 +291,18 @@ module attributes {transform.with_named_sequence} {
     %rjoint = transform.apply_registered_pass
         "waveamd-machine-multi-wave-specialize"
         to %rpre : (!transform.any_op) -> !transform.any_op
+    %rvariants = transform.apply_registered_pass "waveamd-expand-materialization-variants"
+        to %rjoint : (!transform.any_op) -> !transform.any_op
+    %rcanon = transform.include @waveamd_cleanup_materialization_variants failures(propagate) (%rvariants)
+        : (!transform.any_op) -> !transform.any_op
     %rs = transform.apply_registered_pass "waveamd-machine-schedule" with
         options = { "apply-schedule" = true,
                     "require-selected-input" = true }
-        to %rjoint : (!transform.any_op) -> !transform.any_op
-    %rpack = transform.apply_registered_pass "waveamd-mfma-packed-peephole"
+        to %rcanon : (!transform.any_op) -> !transform.any_op
+    %rwinner = transform.apply_registered_pass "waveamd-collapse-materialization-variants"
         to %rs : (!transform.any_op) -> !transform.any_op
+    %rpack = transform.apply_registered_pass "waveamd-mfma-packed-peephole"
+        to %rwinner : (!transform.any_op) -> !transform.any_op
     %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rpack)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r1 : !transform.any_op

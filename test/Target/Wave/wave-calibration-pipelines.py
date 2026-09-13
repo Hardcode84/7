@@ -139,7 +139,9 @@ def check_backend_entry(label: str, ir, entry) -> None:
         [
             "waveamd-machine-schedule-report",
             "waveamd-machine-multi-wave-specialize",
+            "waveamd-expand-materialization-variants",
             "waveamd-machine-schedule",
+            "waveamd-collapse-materialization-variants",
         ],
         "scheduler order drifted",
     )
@@ -300,6 +302,15 @@ def check_calibration_entry(label: str, module) -> None:
         post = require_sequence(ir, parsed, label, "waveamd_backend_post_regalloc")
         require_sequence(ir, parsed, label, "waveamd_regalloc_transform_loop")
         emit_only = require_sequence(ir, parsed, label, module.EMIT_ONLY_ENTRY_POINT)
+        cleanup = require_sequence(
+            ir, parsed, label, "waveamd_cleanup_materialization_variants"
+        )
+        require_pass_order(
+            label,
+            applied_passes(ir, cleanup),
+            ["remove-dead-values", "cse", "canonicalize"],
+            "candidate cleanup order drifted",
+        )
         check_backend_entry(label, ir, entry)
         check_preschedule(label, ir, preschedule)
         check_postschedule(label, ir, postschedule)

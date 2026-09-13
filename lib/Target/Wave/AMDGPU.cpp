@@ -6360,6 +6360,7 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
   // Backend transform runs canonicalize + cse around selection too.
   registerCanonicalizerPass();
   registerCSEPass();
+  registerRemoveDeadValuesPass();
   registerLoopInvariantCodeMotionPass();
   ctx->getOrLoadDialect<transform::TransformDialect>();
   ctx->getOrLoadDialect<wave::WaveDialect>();

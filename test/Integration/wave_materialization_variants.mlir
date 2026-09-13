@@ -1,6 +1,8 @@
 // RUN: split-file %s %t
 // RUN: wave-opt %t/live.mlir --waveamd-to-machine | FileCheck %s --check-prefix=SELECT
-// RUN: not wave-translate %t/live.mlir --wave-to-amdgpu-asm 2>&1 | FileCheck %s --check-prefix=LIVE
+// RUN: wave-translate %t/live.mlir --wave-to-amdgpu-asm -o %t/live.s
+// RUN: FileCheck %s --check-prefix=LIVE < %t/live.s
+// RUN: llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj %t/live.s -o /dev/null
 // RUN: wave-translate %t/single.mlir --wave-to-amdgpu-asm | FileCheck %s --check-prefix=SINGLE
 // RUN: wave-translate %t/single.mlir --wave-to-amdgpu-asm | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 // RUN: wave-translate %t/chained.mlir --wave-to-amdgpu-asm -o %t/chained.s
@@ -13,7 +15,9 @@
 
 
 // SELECT: waveamdmachine.materialization_variants
-// LIVE: waveamd-machine-schedule unsupported op: waveamdmachine.materialization_variants
+// LIVE-LABEL: live_variants:
+// LIVE: buffer_store_b32
+// LIVE: s_endpgm
 // SELECTED-LABEL: single_variant:
 // SELECTED: global_store_b32
 // SELECTED: s_endpgm

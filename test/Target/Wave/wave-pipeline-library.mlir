@@ -185,15 +185,27 @@
 // PIPELINE: transform.include @waveamd_backend_preschedule
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.include @waveamd_backend_postschedule
+// PIPELINE: transform.named_sequence @waveamd_cleanup_materialization_variants
+// PIPELINE: transform.collect_matching @waveamd_match_materialization_candidates
+// PIPELINE: transform.get_parent_op %{{.*}} {op_name = "func.func", deduplicate}
+// PIPELINE: transform.apply_registered_pass "remove-dead-values"
+// PIPELINE: transform.apply_registered_pass "cse"
+// PIPELINE: transform.apply_registered_pass "canonicalize"
 // PIPELINE: transform.named_sequence @waveamd_backend
 // PIPELINE: transform.include @waveamd_backend_preschedule
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: %{{.*}} = transform.apply_registered_pass
 // PIPELINE-NEXT: "waveamd-machine-multi-wave-specialize"
 // PIPELINE-NEXT: to %{{.*}} : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-expand-materialization-variants"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.include @waveamd_cleanup_materialization_variants
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-machine-schedule"
 // PIPELINE-NEXT: options = { "apply-schedule" = true,
 // PIPELINE-NEXT: "require-selected-input" = true }
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-collapse-materialization-variants"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-mfma-packed-peephole"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

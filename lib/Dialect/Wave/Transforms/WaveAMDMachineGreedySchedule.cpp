@@ -3561,7 +3561,11 @@ struct WaveAMDMachineSchedulePass
     if (func.isExternal())
       return false;
     if (applySchedule && requireSelectedInput &&
-        !func->hasAttr(kScheduleInputAttr))
+        !func->hasAttr(kScheduleInputAttr) &&
+        !func.walk([](waveamdmachine::MaterializationCandidatesOp) {
+               return WalkResult::interrupt();
+             })
+             .wasInterrupted())
       return false;
     return hasAnyWaveMachineOp(func);
   }

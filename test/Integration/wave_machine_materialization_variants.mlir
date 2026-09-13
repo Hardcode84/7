@@ -3,8 +3,11 @@
 // RUN: wave-translate %t/clean.mlir --wave-to-amdgpu-asm | FileCheck %s --check-prefix=ASM
 // RUN: wave-translate %t/clean.mlir --wave-to-amdgpu-asm | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj -o /dev/null
 // RUN: not wave-opt %t/live.mlir --waveamd-prepare-regalloc 2>&1 | FileCheck %s --check-prefix=LIVE
-// RUN: not wave-translate %t/live.mlir --wave-to-amdgpu-asm 2>&1 | FileCheck %s --check-prefix=LIVE
+// RUN: wave-translate %t/live.mlir --wave-to-amdgpu-asm | FileCheck %s --check-prefix=LIVEASM
 
+// LIVEASM-LABEL: live:
+// LIVEASM: s_mov_b32
+// LIVEASM: s_endpgm
 // ASM-LABEL: single:
 // ASM: s_endpgm
 // LIVE: 'waveamdmachine.materialization_variants' op must be resolved before register allocation

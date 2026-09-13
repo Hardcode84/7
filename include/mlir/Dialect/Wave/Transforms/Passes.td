@@ -777,7 +777,7 @@ def WaveAMDMachineSchedule
     Option<"applySchedule", "apply-schedule", "bool", /*default=*/"false",
            "Apply greedy local schedules.">,
     Option<"requireSelectedInput", "require-selected-input", "bool", /*default=*/"false",
-           "Only schedule functions stamped by waveamd-to-machine.">
+           "Only schedule functions stamped by waveamd-to-machine or containing materialization candidates.">
   ];
 }
 
