@@ -1,3 +1,4 @@
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-to-machine,waveamd-abi-lowering,waveamd-expand-materialization-variants,func.func(waveamdmachine.materialization_candidates(remove-dead-values,cse,canonicalize)),waveamd-machine-schedule{apply-schedule},waveamd-collapse-materialization-variants,waveamd-prepare-regalloc)' | FileCheck %s --check-prefix=COLLAPSE --implicit-check-not=waveamdmachine.materialization --implicit-check-not=waveamdmachine.candidate_yield
 // RUN: wave-translate %s --wave-to-amdgpu-asm -o %t.s
 // RUN: FileCheck %s --check-prefix=ASM < %t.s
 // RUN: llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1100 -filetype=obj %t.s -o /dev/null
