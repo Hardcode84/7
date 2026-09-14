@@ -8,9 +8,8 @@
 // CHECK: ^bb0([[C:%.*]]: !waveamdmachine.reg<sgpr, 1>, [[D:%.*]]: !waveamdmachine.reg<sgpr, 1>)
 // CHECK: waveamdmachine.candidate_yield [[D]] : !waveamdmachine.reg<sgpr, 1> {cycles = 0 : i64}
 // CANON-LABEL: func.func @choices
-// CANON: waveamdmachine.materialization_candidates
-// CANON: cycles = 9
-// CANON: cycles = 0
+// CANON-SAME: [[X:%.*]]: !waveamdmachine.reg<sgpr, 1>
+// CANON-NEXT: return [[X]] : !waveamdmachine.reg<sgpr, 1>
 func.func @choices(%x: !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1> {
   %r = waveamdmachine.materialization_candidates %x, %x : !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.reg<sgpr, 1> {
   ^bb0(%a: !waveamdmachine.reg<sgpr, 1>, %b: !waveamdmachine.reg<sgpr, 1>):

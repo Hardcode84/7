@@ -7,6 +7,10 @@
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants='max-candidates=1' | FileCheck %s --check-prefix=ONE --implicit-check-not=waveamdmachine.materialization_variants
 // RUN: wave-opt %s --waveamd-to-machine --waveamd-abi-lowering --waveamd-expand-materialization-variants -o %t.expanded
 // RUN: FileCheck %s < %t.expanded
+// RUN: wave-opt %t.expanded --pass-pipeline='builtin.module(func.func(waveamdmachine.materialization_candidates(remove-dead-values,cse,canonicalize)))' -o %t.parallel
+// RUN: wave-opt %t.expanded --mlir-disable-threading --pass-pipeline='builtin.module(func.func(waveamdmachine.materialization_candidates(remove-dead-values,cse,canonicalize)))' -o %t.serial
+// RUN: diff %t.parallel %t.serial
+// RUN: wave-opt %t.parallel --waveamd-machine-schedule='apply-schedule' --waveamd-collapse-materialization-variants | wave-translate --wave-to-amdgpu-asm - | llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1100 --filetype=obj -o /dev/null
 // RUN: not wave-opt %t.expanded --waveamd-prepare-regalloc 2>&1 | FileCheck %s --check-prefix=ALLOC
 
 // ONE-LABEL: func.func @kernel

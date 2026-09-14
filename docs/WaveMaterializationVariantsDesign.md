@@ -261,12 +261,14 @@ Any removal of wrapper inputs, candidate arguments, or wrapper results is a
 serial structural rewrite across all candidates, not a worker-local signature
 edit.
 
-The generic MLIR region-branch canonicalization patterns reject
-`IsolatedFromAbove` operations. Their forwarding rewrites can also replace
-block arguments with external operands, which would break wrapper isolation.
-Apply those patterns to supported loops inside candidates, not to the wrapper
-itself. Keep the wrapper signature fixed through candidate processing; its
-eventual collapse performs the serial argument and result remapping.
+The LLVM region-branch patterns support isolated wrappers. They can remove
+dead or duplicate inputs and results, and fold results to external values.
+They must not replace private entry arguments with external values.
+
+A cleanup pass rooted on a wrapper can change only its contents. Preserve
+root inputs, entry arguments, and results. An enclosing pass can change the
+wrapper signature across all candidates. Register the full pattern set for
+machine candidates, conditionals, and loops.
 
 ### Scores and collapse
 

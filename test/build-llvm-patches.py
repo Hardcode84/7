@@ -43,6 +43,44 @@ class LLVMPatchTests(unittest.TestCase):
         build_llvm.apply_patches(self.source)
         self.assertEqual(self.input_path.read_text(), "after\n")
 
+    def add_overlapping_patch(self):
+        path = self.patches / "next.patch"
+        path.write_text(
+            self.patch_path.read_text()
+            .replace("-before", "-after")
+            .replace("+after", "+final")
+        )
+
+    def test_overlapping_stack_is_idempotent(self):
+        self.add_overlapping_patch()
+        build_llvm.apply_patches(self.source)
+        self.assertEqual(self.input_path.read_text(), "final\n")
+        timestamp = self.input_path.stat().st_mtime_ns
+        build_llvm.apply_patches(self.source)
+        self.assertEqual(self.input_path.stat().st_mtime_ns, timestamp)
+
+    def test_extend_applied_prefix(self):
+        build_llvm.apply_patches(self.source)
+        self.add_overlapping_patch()
+        build_llvm.apply_patches(self.source)
+        self.assertEqual(self.input_path.read_text(), "final\n")
+
+    def test_later_conflict_preserves_source(self):
+        self.add_overlapping_patch()
+        path = self.patches / "next.patch"
+        path.write_text(path.read_text().replace("-after", "-conflict"))
+        with self.assertRaises(subprocess.CalledProcessError):
+            build_llvm.apply_patches(self.source)
+        self.assertEqual(self.input_path.read_text(), "before\n")
+
+    def test_applied_stack_conflict_preserves_source(self):
+        self.add_overlapping_patch()
+        build_llvm.apply_patches(self.source)
+        self.input_path.write_text("user edit\n")
+        with self.assertRaises(subprocess.CalledProcessError):
+            build_llvm.apply_patches(self.source)
+        self.assertEqual(self.input_path.read_text(), "user edit\n")
+
     def test_conflict_preserves_source(self):
         self.input_path.write_text("user edit\n")
         with self.assertRaises(subprocess.CalledProcessError):

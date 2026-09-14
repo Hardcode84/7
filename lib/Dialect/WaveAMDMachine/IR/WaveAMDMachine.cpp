@@ -494,6 +494,12 @@ static LogicalResult verifyExecIfCondition(ExecIfOp op) {
   return success();
 }
 
+void ExecIfOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *context) {
+  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns,
+                                                          getOperationName());
+}
+
 LogicalResult ExecIfOp::verify() {
   if (failed(verifyExecIfCondition(*this)))
     return failure();
@@ -648,6 +654,12 @@ static LogicalResult verifyUniformIfYield(UniformIfOp op, Region &region,
   return success();
 }
 
+void UniformIfOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns,
+                                                          getOperationName());
+}
+
 LogicalResult UniformIfOp::verify() {
   bool hasElse = !getElseRegion().empty();
   if (!hasElse && getNumResults() != 0)
@@ -678,6 +690,12 @@ void MaterializationVariantsOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
   patterns.add<FlattenMaterializationVariants<MaterializationVariantsOp>>(
       context);
+}
+
+void MaterializationCandidatesOp::getCanonicalizationPatterns(
+    RewritePatternSet &patterns, MLIRContext *context) {
+  populateRegionBranchOpInterfaceCanonicalizationPatterns(patterns,
+                                                          getOperationName());
 }
 
 LogicalResult MaterializationCandidatesOp::verify() {

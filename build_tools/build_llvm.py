@@ -30,6 +30,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -169,18 +170,58 @@ def patch_fingerprint() -> str:
     return digest.hexdigest()
 
 
+def patch_paths(source_dir: Path, patches: list[Path]) -> list[str]:
+    stats = subprocess.check_output(
+        ["git", "apply", "--numstat", "-z", *(str(p) for p in patches)],
+        cwd=source_dir,
+        text=True,
+    )
+    return sorted({entry.split("\t", 2)[2] for entry in stats.split("\0") if entry})
+
+
+def pending_patches(source_dir: Path, patches: list[Path]) -> list[Path]:
+    if not patches:
+        return []
+    paths = patch_paths(source_dir, patches)
+    with tempfile.TemporaryDirectory() as temp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(temp) / "index"))
+
+        def git(*args: str, check: bool = True):
+            return subprocess.run(
+                ["git", *args],
+                cwd=source_dir,
+                env=env,
+                capture_output=not check,
+                text=True,
+                check=check,
+            )
+
+        # Validate overlapping patches in a private index; keep source untouched.
+        git("read-tree", "--empty")
+        present = [name for name in paths if (source_dir / name).exists()]
+        if present:
+            git("add", "--", *present)
+        applied = []
+        for patch in reversed(patches):
+            if (
+                git(
+                    "apply", "--cached", "--reverse", "--check", str(patch), check=False
+                ).returncode
+                == 0
+            ):
+                git("apply", "--cached", "--reverse", str(patch))
+                applied.append(patch)
+        applied.reverse()
+        if applied != patches[: len(applied)]:
+            raise RuntimeError("LLVM source does not contain a managed patch prefix")
+        for patch in patches:
+            git("apply", "--cached", str(patch))
+        return patches[len(applied) :]
+
+
 def apply_patches(source_dir: Path) -> None:
-    for patch in sorted(PATCH_DIR.glob("*.patch")):
-        reverse = subprocess.run(
-            ["git", "apply", "--reverse", "--check", str(patch)],
-            cwd=source_dir,
-            capture_output=True,
-            text=True,
-        )
-        if reverse.returncode == 0:
-            print(f"LLVM patch already applied: {patch.name}")
-            continue
-        run(["git", "apply", "--check", str(patch)], cwd=source_dir)
+    patches = sorted(PATCH_DIR.glob("*.patch"))
+    for patch in pending_patches(source_dir, patches):
         run(["git", "apply", str(patch)], cwd=source_dir)
 
 

@@ -1998,6 +1998,7 @@ def WaveAMDMachine_MaterializationCandidatesOp
     ($inputs^ `:` type($inputs))? (`->` type($results)^)?
     attr-dict-with-keyword regions
   }];
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 
@@ -2039,6 +2040,7 @@ def WaveAMDMachine_ExecIfOp : WaveAMDMachine_Op<"exec_if", [
     $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict
     `:` type($condition) (`->` type($results)^)?
   }];
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 
@@ -2059,6 +2061,7 @@ def WaveAMDMachine_UniformIfOp : WaveAMDMachine_Op<"uniform_if", [
     $condition $thenRegion (`otherwise` $elseRegion^)? attr-dict
     `:` type($condition) (`->` type($results)^)?
   }];
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 
