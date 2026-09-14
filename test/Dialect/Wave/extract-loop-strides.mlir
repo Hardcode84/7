@@ -690,6 +690,139 @@ func.func @drop_dead_simd_offset_carries(
 
 // -----
 
+// CHECK-LABEL: func.func @buffer_modular_offset_carry
+// CHECK-SAME: %[[BUFFER:.*]]: !wave.ptr<#waveamd.buffer, i8>
+// CHECK: %[[WI:.*]] = wave.workitem_id 0
+// CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(wi, 4294967296)">
+// CHECK: scf.for {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
+// CHECK: %[[REMAT:.*]] = wave.index_expr <"Mod(128*i + wi, 4294967296)">
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[REMAT]], %[[OFFSET]]
+// CHECK: wave.ptr_add %[[BUFFER]], %[[CHOICE]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(256 + offset, 4294967296)"> ["offset"](%[[OFFSET]])
+// CHECK: scf.yield %[[NEXT]]
+func.func @buffer_modular_offset_carry(
+    %buffer: !wave.ptr<#waveamd.buffer, i8>, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c2 = arith.constant 2 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c2 : i32 {
+    %off = wave.index_expr <"Mod(128*i + wi, 4294967296)"> ["i", "wi"]
+        (%i, %wi) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %p = wave.ptr_add %buffer, %off
+        : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+    %value, %token = wave.load %p
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>)
+        -> (!wave.simd<i8, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @buffer_modular_uniform_stride
+// CHECK-SAME: %[[BUFFER:[^ ]+]]: !wave.ptr<#waveamd.buffer, i8>, %[[STRIDE:[^ ]+]]: i32
+// CHECK: %[[WI:.*]] = wave.workitem_id 0
+// CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(wi, 4294967296)">
+// CHECK: scf.for {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
+// CHECK: %[[SCALED:.*]] = wave.binary muli
+// CHECK: %[[REMAT:.*]] = wave.index_expr <"Mod(wi + 128*x, 4294967296)">
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[REMAT]], %[[OFFSET]]
+// CHECK: wave.ptr_add %[[BUFFER]], %[[CHOICE]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(offset + 128*x_1, 4294967296)"> ["offset", "x_1"](%[[OFFSET]], %[[STRIDE]])
+// CHECK: scf.yield %[[NEXT]]
+func.func @buffer_modular_uniform_stride(
+    %buffer: !wave.ptr<#waveamd.buffer, i8>, %stride: i32, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %scaled = wave.binary muli %i, %stride : i32, i32 -> i32
+    %off = wave.index_expr <"Mod(128*x + wi, 4294967296)"> ["x", "wi"]
+        (%scaled, %wi)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %p = wave.ptr_add %buffer, %off
+        : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+    %value, %token = wave.load %p
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>)
+        -> (!wave.simd<i8, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// Explicit modular semantics belong to the expression and do not depend on a
+// pointer consumer.
+// CHECK-LABEL: func.func @explicit_modular_offset_without_pointer_user
+// CHECK-SAME: %[[STRIDE:[^ ]+]]: i32
+// CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(wi, 4294967296)">
+// CHECK: scf.for {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
+// CHECK: %[[SCALED:.*]] = wave.binary muli
+// CHECK: %[[REMAT:.*]] = wave.index_expr <"Mod(wi + 128*x, 4294967296)">
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[REMAT]], %[[OFFSET]]
+// CHECK: wave.binary addi %[[CHOICE]], %[[CHOICE]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(offset + 128*x_1, 4294967296)"> ["offset", "x_1"](%[[OFFSET]], %[[STRIDE]])
+// CHECK: scf.yield %[[NEXT]]
+func.func @explicit_modular_offset_without_pointer_user(
+    %stride: i32, %n: i32) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %scaled = wave.binary muli %i, %stride : i32, i32 -> i32
+    %off = wave.index_expr <"Mod(128*x + wi, 4294967296)"> ["x", "wi"]
+        (%scaled, %wi)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %twice = wave.binary addi %off, %off
+        : !wave.simd<index, 32>, !wave.simd<index, 32>
+        -> !wave.simd<index, 32>
+  }
+  return
+}
+
+// -----
+
+// Keep a buffer offset as an expression when the enclosing loop contains a
+// nested loop. The nested induction must see the original pointer relationship.
+// CHECK-LABEL: func.func @buffer_modular_offset_nested_loop
+// CHECK: scf.for %[[I:[^ ]+]] =
+// CHECK-NOT: iter_args
+// CHECK: %[[SCALED:.*]] = wave.binary muli %[[I]],
+// CHECK: %[[OFF:.*]] = wave.index_expr <"x + Mod(wi, 4294967296)"> ["wi", "x"]({{.*}}, %[[SCALED]])
+// CHECK: %[[PTR:.*]] = wave.ptr_add {{.*}}, %[[OFF]]
+// CHECK: scf.for {{.*}} iter_args({{.*}} = %[[PTR]])
+func.func @buffer_modular_offset_nested_loop(
+    %buffer: !wave.ptr<#waveamd.buffer, i8>, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c128 = arith.constant 128 : i32
+  %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %scaled = wave.binary muli %i, %c128 : i32, i32 -> i32
+    %off = wave.index_expr <"Mod(wi, 4294967296) + x"> ["wi", "x"]
+        (%wi, %scaled) : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+    %p = wave.ptr_add %buffer, %off
+        : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+    %unused = scf.for %j = %c0 to %n step %c1
+        iter_args(%nested = %p)
+        -> (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>) : i32 {
+      %value, %token = wave.load %nested
+          : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>)
+          -> (!wave.simd<i8, 32>, !wave.mem.token)
+      scf.yield %nested : !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+    }
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @drop_only_offset_carry
 // CHECK: scf.for %[[IV:[^ ]+]] =
 // CHECK-NOT: iter_args
@@ -741,6 +874,134 @@ func.func @extract_non_normalized_shared_pointer_carry(
     %value, %token = wave.load %ptr
         : (!wave.simd<!wave.ptr<#wave.shared, i8>, 64>)
         -> (!wave.simd<i32, 64>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_wrap_i16
+// CHECK: scf.for {{.*}} iter_args(
+// CHECK: wave.materialization_variants
+// CHECK: return
+func.func @signed_wrap_i16(%n: i16) attributes {wave.kernel} {
+  %start = arith.constant -2 : i16
+  %step = arith.constant 1 : i16
+  %factor = arith.constant 32767 : i16
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %start to %n step %step : i16 {
+    %scaled = wave.binary muli %i, %factor : i16, i16 -> i16
+    %offset = wave.index_expr <"Mod(x + lane, 65536)"> ["x", "lane"](%scaled, %lane)
+        : (i16, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %used = wave.binary addi %offset, %offset
+        : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @signed_wrap_shift
+// CHECK: scf.for {{.*}} iter_args(
+// CHECK: wave.materialization_variants
+// CHECK: return
+func.func @signed_wrap_shift(%n: i32) attributes {wave.kernel} {
+  %start = arith.constant -2 : i32
+  %step = arith.constant 1 : i32
+  %factor = arith.constant 30 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %start to %n step %step : i32 {
+    %scaled = wave.binary shli %i, %factor : i32, i32 -> i32
+    %offset = wave.index_expr <"Mod(x + lane, 4294967296)"> ["x", "lane"](%scaled, %lane)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %used = wave.binary addi %offset, %offset
+        : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @wider_modulus_preserves_signed_wrap
+// CHECK: scf.for
+// CHECK-NOT: iter_args
+// CHECK-NOT: wave.materialization_variants
+// CHECK: return
+func.func @wider_modulus_preserves_signed_wrap(%n: i16) attributes {wave.kernel} {
+  %start = arith.constant -2 : i16
+  %step = arith.constant 1 : i16
+  %factor = arith.constant 32767 : i16
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %start to %n step %step : i16 {
+    %scaled = wave.binary muli %i, %factor : i16, i16 -> i16
+    %offset = wave.index_expr <"Mod(x + lane, 4294967296)"> ["x", "lane"](%scaled, %lane)
+        : (i16, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %used = wave.binary addi %offset, %offset
+        : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @non_power_of_two_modulus
+// CHECK: scf.for
+// CHECK-NOT: iter_args
+// CHECK-NOT: wave.materialization_variants
+// CHECK: return
+func.func @non_power_of_two_modulus(%n: i32) attributes {wave.kernel} {
+  %start = arith.constant -2 : i32
+  %step = arith.constant 1 : i32
+  %factor = arith.constant 32767 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %start to %n step %step : i32 {
+    %scaled = wave.binary muli %i, %factor : i32, i32 -> i32
+    %offset = wave.index_expr <"Mod(x + lane, 65535)"> ["x", "lane"](%scaled, %lane)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %used = wave.binary addi %offset, %offset
+        : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @too_wide_modulus
+// CHECK: scf.for
+// CHECK-NOT: iter_args
+// CHECK-NOT: wave.materialization_variants
+// CHECK: return
+func.func @too_wide_modulus(%n: i32) attributes {wave.kernel} {
+  %start = arith.constant -2 : i32
+  %step = arith.constant 1 : i32
+  %factor = arith.constant 32767 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %start to %n step %step : i32 {
+    %scaled = wave.binary muli %i, %factor : i32, i32 -> i32
+    %offset = wave.index_expr <"Mod(x + lane, 8589934592)"> ["x", "lane"](%scaled, %lane)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %used = wave.binary addi %offset, %offset
+        : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @lane_varying_modular_stride
+// CHECK: scf.for
+// CHECK-NOT: iter_args
+// CHECK-NOT: wave.materialization_variants
+// CHECK: return
+func.func @lane_varying_modular_stride(%n: i32) attributes {wave.kernel} {
+  %zero = arith.constant 0 : i32
+  %one = arith.constant 1 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  scf.for %i = %zero to %n step %one : i32 {
+    %offset = wave.index_expr <"Mod(i*lane, 4294967296)"> ["i", "lane"](%i, %lane)
+        : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+    %used = wave.binary addi %offset, %offset
+        : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
   }
   return
 }

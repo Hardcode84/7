@@ -290,3 +290,28 @@ func.func @simd_chain_no_crash(%v: !wave.simd<i32, 32>)
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
   return %sum : !wave.simd<i32, 32>
 }
+
+// CHECK-LABEL: func.func @equivalent_choices_keep_bounds
+// CHECK-NEXT: %[[TRUE:.*]] = arith.constant true
+// CHECK-NEXT: return %[[TRUE]] : i1
+func.func @equivalent_choices_keep_bounds(%x: i32) -> i1 {
+  %bounded = wave.assume %x as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x < 256">] : i32
+  %choice = wave.materialization_variants %x, %bounded : i32
+  %limit = arith.constant 256 : i32
+  %less = arith.cmpi slt, %choice, %limit : i32
+  return %less : i1
+}
+
+// CHECK-LABEL: func.func @equivalent_simd_choices_keep_bounds
+// CHECK-NEXT: %[[TRUE:.*]] = arith.constant true
+// CHECK-NEXT: return %[[TRUE]] : i1
+func.func @equivalent_simd_choices_keep_bounds(%x: !wave.simd<i32, 32>) -> i1 {
+  %bounded = wave.assume %x as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x < 256">] : !wave.simd<i32, 32>
+  %choice = wave.materialization_variants %bounded, %x : !wave.simd<i32, 32>
+  %first = wave.read_first %choice : !wave.simd<i32, 32> -> i32
+  %zero = arith.constant 0 : i32
+  %nonnegative = arith.cmpi sge, %first, %zero : i32
+  return %nonnegative : i1
+}

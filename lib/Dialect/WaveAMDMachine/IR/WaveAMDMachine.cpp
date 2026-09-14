@@ -10,6 +10,7 @@
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 
 #include "Utils/AMDGPUBaseInfo.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
@@ -150,6 +151,33 @@ void WaveAMDMachineDialect::registerTypes() {
 #define GET_TYPEDEF_LIST
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineOpsTypes.cpp.inc"
       >();
+}
+
+namespace {
+struct MaterializeMachinePoison : OpRewritePattern<ub::PoisonOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ub::PoisonOp op,
+                                PatternRewriter &rewriter) const override {
+    Type type = op.getType();
+    if (isa<MemTokenType>(type)) {
+      rewriter.replaceOpWithNewOp<TokenOp>(op, type);
+      return success();
+    }
+    auto reg = dyn_cast<RegType>(type);
+    if (!reg || (reg.getRegClass() != RegClass::SGPR &&
+                 reg.getRegClass() != RegClass::VGPR &&
+                 reg.getRegClass() != RegClass::AGPR))
+      return failure();
+    rewriter.replaceOpWithNewOp<UninitOp>(op, type);
+    return success();
+  }
+};
+} // namespace
+
+void WaveAMDMachineDialect::getCanonicalizationPatterns(
+    RewritePatternSet &patterns) const {
+  patterns.add<MaterializeMachinePoison>(getContext());
 }
 
 static bool isSingletonFlagRegClass(RegClass regClass) {

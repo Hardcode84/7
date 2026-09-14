@@ -314,10 +314,12 @@ def WaveExtractLoopStrides : Pass<"wave-extract-loop-strides"> {
     Rewrites loop-local `wave.ptr_add(base, wave.index_expr(... iv ...))`
     address formation into a pointer iter_arg when ixsimpl proves the
     per-iteration stride `expr(iv + step) - expr(iv)` no longer depends on the
-    loop IV. Proofs consume only the closed expression and explicit assumptions
-    serialized in that `wave.index_expr`; producer SSA is opaque. Machine
-    lowering can then choose SGPR base carries, buffer soffset marching, or
-    fallback from the ordinary carried-pointer form.
+    loop IV. Proofs use the expression, its SSA producers, and explicit
+    assumptions. Fixed-width producers retain their signed wrapping semantics.
+    An explicit power-of-two modulus can
+    produce a choice between rematerialization and a loop-carried offset.
+    The modular stride must be uniform and loop-invariant. Choice consumers
+    must support materialization variants through machine selection.
   }];
   let dependentDialects = [
     "func::FuncDialect",

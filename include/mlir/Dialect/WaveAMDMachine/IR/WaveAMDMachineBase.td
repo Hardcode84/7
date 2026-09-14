@@ -22,6 +22,7 @@ def WaveAMDMachine_Dialect : Dialect {
   }];
 
   let useDefaultTypePrinterParser = 1;
+  let hasCanonicalizer = 1;
   let extraClassDeclaration = [{
     void registerTypes();
   }];

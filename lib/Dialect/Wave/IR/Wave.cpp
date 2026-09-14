@@ -2873,6 +2873,21 @@ buildAssumePredicateRange(sym::Store &store, Value binding, StringRef name,
   return ConstantIntRanges::fromSigned(loValue, hiValue);
 }
 
+void MaterializationVariantsOp::inferResultRanges(
+    ArrayRef<ConstantIntRanges> argRanges, SetIntRangeFn setResultRange) {
+  Type type = getResult().getType();
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  if (!type.isIntOrIndex())
+    return;
+  unsigned bits = waveBinaryElementWidth(type);
+  ConstantIntRanges range = normalizeWaveArithRange(argRanges.front(), bits);
+  // Equivalent choices share every proven bound.
+  for (const ConstantIntRanges &other : argRanges.drop_front())
+    range = range.intersection(normalizeWaveArithRange(other, bits));
+  setResultRange(getResult(), range);
+}
+
 void SplatOp::inferResultRanges(ArrayRef<ConstantIntRanges> argRanges,
                                 SetIntRangeFn setResultRange) {
   SimdType simd = cast<SimdType>(getResult().getType());
@@ -2929,7 +2944,8 @@ void AssumeOp::inferResultRangesFromOptional(
   IntegerValueRange out =
       incoming.isUninitialized()
           ? IntegerValueRange{*asserted}
-          : IntegerValueRange{asserted->intersection(incoming.getValue())};
+          : IntegerValueRange{asserted->intersection(normalizeWaveArithRange(
+                incoming.getValue(), asserted->smin().getBitWidth()))};
   setResultRange(getResult(), out);
 }
 

@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 
@@ -117,6 +118,21 @@ scaleExpr(sym::Store &store, sym::ExprHandle expr, int64_t scale) {
     return failure();
   return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mul,
                                 *scaleExpr);
+}
+
+static FailureOr<sym::ExprHandle>
+wrapBufferElementOffset(sym::Store &store, sym::ExprHandle expr,
+                        int64_t elementBytes) {
+  if (!expr || elementBytes <= 0)
+    return failure();
+
+  // Convert the byte-offset period to element units.
+  constexpr int64_t byteRing = int64_t{1} << 32;
+  int64_t elementRing = byteRing / std::gcd(byteRing, elementBytes);
+  FailureOr<sym::ExprHandle> modulus = sym::composeExprInt(store, elementRing);
+  if (failed(modulus))
+    return failure();
+  return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mod, *modulus);
 }
 
 static bool isIndexExprBindingType(Type type) {
@@ -361,12 +377,111 @@ public:
     });
     if (walkResult.wasInterrupted())
       return failure();
+    if (failed(normalizeBufferOffsets()))
+      return failure();
     if (changed)
       eraseDeadPointerOps();
     return success();
   }
 
 private:
+  static bool hasExplicitBufferRing(IndexExprOp index, int64_t elementRing) {
+    sym::ExprView expression(index.getExpr().getValue());
+    if (expression.getKind() != sym::ExprKind::Mod)
+      return false;
+    std::optional<int64_t> modulus =
+        sym::getIntegerLiteralValue(expression.getBinaryRhs());
+    // Preserve the recurrence's smaller ring.
+    return modulus && *modulus > 0 && *modulus <= elementRing;
+  }
+
+  FailureOr<bool> proveOffsetInRing(SymbolicOffset &symbolic, int64_t ring) {
+    if (failed(appendAnalyzedBindingRanges(store, rangeSolver, symbolic)))
+      return failure();
+    FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+        createClosedIndexExprAnalysis(store, symbolic.assumptions);
+    if (failed(analysis))
+      return failure();
+    sym::PredHandle lower = (*analysis)->compare(
+        symbolic.expr, sym::PredCmpOp::Ge, (*analysis)->composeInteger(0));
+    sym::PredHandle upper = (*analysis)->compare(
+        symbolic.expr, sym::PredCmpOp::Lt, (*analysis)->composeInteger(ring));
+    FailureOr<bool> lowerProven = checkProven(**analysis, lower);
+    FailureOr<bool> upperProven = checkProven(**analysis, upper);
+    if (failed(lowerProven) || failed(upperProven))
+      return failure();
+    return *lowerProven && *upperProven;
+  }
+
+  FailureOr<std::optional<SymbolicOffset>>
+  getModularBufferOffset(IndexExprOp index, int64_t elementBytes) {
+    constexpr int64_t byteRing = int64_t{1} << 32;
+    int64_t elementRing = byteRing / std::gcd(byteRing, elementBytes);
+    if (hasExplicitBufferRing(index, elementRing))
+      return std::optional<SymbolicOffset>{};
+    FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(index);
+    if (failed(symbolic))
+      return failure();
+    FailureOr<bool> fits = proveOffsetInRing(*symbolic, elementRing);
+    if (failed(fits))
+      return failure();
+    // Preserve full-address offsets unless the modulus is an identity.
+    if (!*fits)
+      return std::optional<SymbolicOffset>{};
+    FailureOr<sym::ExprHandle> wrapped =
+        wrapBufferElementOffset(store, symbolic->expr, elementBytes);
+    if (failed(wrapped))
+      return index.emitError("failed to express buffer offset wrapping");
+    symbolic->expr = *wrapped;
+    return std::optional<SymbolicOffset>{std::move(*symbolic)};
+  }
+
+  LogicalResult normalizeBufferOffset(PtrAddOp add) {
+    IndexExprOp index = add.getOffset().getDefiningOp<IndexExprOp>();
+    SplatOp splat;
+    if (!index) {
+      splat = add.getOffset().getDefiningOp<SplatOp>();
+      if (splat)
+        index = splat.getSource().getDefiningOp<IndexExprOp>();
+    }
+    if (!index)
+      return success();
+    std::optional<int64_t> elementBytes =
+        getPointerElementBytes(add.getBase().getType());
+    if (!elementBytes)
+      return add.emitError("cannot determine buffer pointer element size");
+    FailureOr<std::optional<SymbolicOffset>> symbolic =
+        getModularBufferOffset(index, *elementBytes);
+    if (failed(symbolic))
+      return failure();
+    if (!*symbolic)
+      return success();
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(add);
+    FailureOr<Value> modular = materializeIndexExpr(
+        add.getOperation(), add.getLoc(), **symbolic, rewriter);
+    if (failed(modular))
+      return failure();
+    Value replacement = *modular;
+    if (splat)
+      replacement = SplatOp::create(rewriter, add.getLoc(),
+                                    add.getOffset().getType(), replacement);
+    rewriter.modifyOpInPlace(
+        add, [&] { add.getOffsetMutable().assign(replacement); });
+    return success();
+  }
+
+  LogicalResult normalizeBufferOffsets() {
+    WalkResult result = func.walk([&](PtrAddOp add) {
+      std::optional<PtrType> ptr = getPointerType(add.getBase().getType());
+      if (ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr->getAddressSpace()))
+        if (failed(normalizeBufferOffset(add)))
+          return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    return failure(result.wasInterrupted());
+  }
+
   FailureOr<bool> promoteOperand(Operation *op, Value ptr,
                                  unsigned operandIndex, int64_t bytes) {
     if (!isGlobalPointerLike(ptr.getType()))

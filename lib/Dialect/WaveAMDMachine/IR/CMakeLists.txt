@@ -26,6 +26,7 @@ add_mlir_dialect_library(MLIRWaveAMDMachineDialect
   MLIRInferIntRangeCommon
   MLIRInferIntRangeInterface
   MLIRIR
+  MLIRUBDialect
   )
 
 target_include_directories(obj.MLIRWaveAMDMachineDialect

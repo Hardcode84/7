@@ -3185,7 +3185,10 @@ recordCandidateScores(ArrayRef<std::unique_ptr<CandidateSchedule>> candidates) {
 
 static LogicalResult validateSchedulingFrequencies(Region &root) {
   WalkResult walk = root.walk([&](waveamdmachine::UniformLoopOp loop) {
-    auto trip = loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
+    Attribute rawTrip = loop->getAttr("waveamdmachine.trip_count");
+    if (!rawTrip)
+      return WalkResult::advance();
+    auto trip = dyn_cast<IntegerAttr>(rawTrip);
     if (!trip || !trip.getType().isInteger(64) || trip.getInt() < 0 ||
         (!loop.getEntryCond() && trip.getInt() == 0)) {
       loop.emitOpError("candidate scheduling requires an exact nonnegative i64 "
@@ -3493,8 +3496,7 @@ struct WaveAMDMachineSchedulePass
                              const waveamdmachine::ArchData &arch,
                              const waveamdmachine::EventSimConfig &config,
                              bool schedule) {
-    int64_t trips =
-        loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count").getInt();
+    int64_t trips = waveamdmachine::getModelLoopTripCount(loop, config);
     Block &body = loop.getBody().front();
     bindLoopEntry(state, loop);
     if (trips == 0 && schedule) {

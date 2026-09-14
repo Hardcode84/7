@@ -27,6 +27,7 @@ namespace mlir::waveamdmachine {
 
 struct ArchData;
 class CalibrationData;
+class UniformLoopOp;
 
 struct EventSimConfig {
   explicit EventSimConfig(unsigned wavefrontSize)
@@ -42,6 +43,9 @@ struct EventSimConfig {
   MemoryCounterLatencies counterLatencies;
   MemoryValueLatencies valueLatencies;
 };
+
+// Use the same loop frequency for scheduling and event simulation.
+int64_t getModelLoopTripCount(UniformLoopOp loop, const EventSimConfig &config);
 
 using EventSimCounter = MemoryCounterKind;
 

@@ -76,6 +76,17 @@ unsigned getEventSimCmaIssueCount(Operation *op, SchedClass cls,
   return std::max(1u, issues);
 }
 
+int64_t getModelLoopTripCount(UniformLoopOp loop,
+                              const EventSimConfig &config) {
+  if (config.tripCountOverride >= 0)
+    return config.tripCountOverride;
+  IntegerAttr trip =
+      loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
+  if (!trip)
+    return 1;
+  return std::max<int64_t>(0, trip.getInt());
+}
+
 namespace {
 
 namespace traits = ::mlir::OpTrait::waveamdmachine;
@@ -134,16 +145,6 @@ static int eventKindRank(EventSimEventKind kind) {
     return 3;
   }
   llvm_unreachable("bad event kind");
-}
-
-static int64_t getTripCount(UniformLoopOp loop, const EventSimConfig &config) {
-  if (config.tripCountOverride >= 0)
-    return config.tripCountOverride;
-  IntegerAttr trip =
-      loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
-  if (!trip)
-    return 1;
-  return std::max<int64_t>(0, trip.getInt());
 }
 
 static YieldOp getYield(Region &region) {
@@ -272,7 +273,7 @@ private:
       return failure();
 
     Block &body = op.getBody().front();
-    int64_t trips = getTripCount(op, config);
+    int64_t trips = getModelLoopTripCount(op, config);
     if (trips <= 0) {
       bindValues(op.getResults(), op.getInits());
       return success();

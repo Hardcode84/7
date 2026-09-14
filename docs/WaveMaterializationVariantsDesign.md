@@ -38,6 +38,26 @@ calibration. Then use it to compare both forms, correct model ranking errors,
 and measure compilation cost. Keep automatic selection opt-in until the
 production gates pass.
 
+## Modular offset proofs
+
+The compiler creates modular offset choices without a source flag. For an
+expression with a power-of-two modulus, it compares the expression at the
+current and next loop induction values. A loop-invariant uniform difference
+permits a carried offset. Fixed-width arithmetic keeps its signed wrapping
+semantics during this proof. The original expression and carried offset are
+equivalent choices.
+
+Buffer normalization must preserve pointer arithmetic. Add an element-offset
+modulus only when the compiler proves that it leaves the offset unchanged.
+Keep negative and wider offsets intact. Machine selection determines whether
+the address fits buffer fields or requires a full address. No source attribute
+changes this decision.
+
+Each choice result has all integer bounds proven for its equivalent operands.
+Range analysis intersects those bounds and normalizes SIMD ranges to their
+element width. Consumers use the result bounds through SSA. They do not infer
+assumptions from nearby operations or other uses.
+
 ## Terms
 
 - IR means intermediate representation. A block is an ordered sequence of
@@ -605,26 +625,19 @@ type. Cleanup must not invoke register-allocation spill policy.
 
 ## Frequency and scoring contract
 
-The initial experiment requires an exact nonnegative static trip count for
-every loop that affects the score. Preserve counts through construction, carry
-pruning, and lowering. Distinguish pre-tested zero-trip loops from post-tested
-loops. Reject missing or inconsistent frequency metadata before simulation.
+Use the cost model's loop frequencies for candidate scheduling and event
+simulation. Preserve known trip counts through construction, carry pruning,
+and lowering. Distinguish pre-tested zero-trip loops from post-tested loops.
+Reject malformed counts. When a count is unknown, use the model estimate;
+missing metadata must not prevent compilation. Estimated cycles are a ranking
+metric, not a proof of runtime duration.
 
-Selection requires a strict simulation mode. Missing trip metadata must
-produce an error, not an assumed iteration count. A command-line trip-count
-override must not replace the kernel's proven execution frequency. A frequency
-upper bound is insufficient because alternatives can exchange rank within it.
-Bounded or dynamic frequencies require a separate objective and proof
-contract.
-
-Score predicted completion cycles for the current search region at its exact
-execution frequencies and fixed external model context. Include its setup,
-loop bodies, required output completion, and actual exit effects. Do not
-substitute whole-function cycles or steady-state cycles per iteration. Fix the
-device, launch, resident-wave configuration, calibration data, and simulator
-options across candidates. The region simulator must account for nested
-execution and boundary state; a flat list of body instructions is not
-sufficient.
+Score predicted completion cycles for the current search region at fixed
+external model context. Include setup, loop bodies, required output completion,
+and exit effects. Keep device, launch, resident-wave configuration, calibration
+data, and simulator options equal across candidates. Copy the incoming
+scheduler state for each candidate. Continue with the winning candidate's
+state, including pending events and result readiness.
 
 Select the candidate with minimum predicted region completion cycles. On an
 exact cycle tie, select the lowest trial index. Pressure and
@@ -674,7 +687,7 @@ these failures as expensive candidates or hide them when another trial
 succeeds.
 
 Tracing records the function symbol, search-region ID and boundary context,
-choice ordinals and arities, selection vector, exact frequencies, predicted
+choice ordinals and arities, selection vector, model frequencies, predicted
 cycles, optional pressure and instruction diagnostics, and rejection reason
 for each trial. Final resource data belongs to the winner or to separate
 calibration runs. A definite error identifies its pass and trial. If no
@@ -828,6 +841,6 @@ All conditions must hold:
 
 A failed witness, protected row, or resource budget blocks production
 enablement. Gains elsewhere do not compensate. Passing these gates authorizes
-only the specified gfx950 loop-offset slice. More producers, dynamic
-frequencies, multiple kernels, or a larger per-region search require another
+only the specified gfx950 loop-offset slice. More producers,
+multiple kernels, or a larger per-region search require another
 evidence-backed design review.

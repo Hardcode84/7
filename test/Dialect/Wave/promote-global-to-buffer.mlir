@@ -13,9 +13,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-DAG: [[OUT_BUF:%.*]] = waveamd.make_buffer [[OUT]], {{%.*}} : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
 // CHECK: [[LANE:%.*]] = wave.lane_id : !wave.simd<i32, 32>
 // CHECK: [[LANE_OFFSET:%.*]] = wave.index_expr
-// CHECK: [[IN_PTR:%.*]] = wave.ptr_add [[IN_BUF]], [[LANE_OFFSET]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+// Buffer i32 element offsets have period 2^30.
+// CHECK: [[IN_MOD:%.*]] = wave.index_expr <"Mod(lane, 1073741824)">
+// CHECK: [[IN_PTR:%.*]] = wave.ptr_add [[IN_BUF]], [[IN_MOD]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
 // CHECK: [[V:%.*]], [[TOK:%.*]] = wave.load [[IN_PTR]]
-// CHECK: [[OUT_PTR:%.*]] = wave.ptr_add [[OUT_BUF]], [[LANE_OFFSET]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+// CHECK: [[OUT_MOD:%.*]] = wave.index_expr <"Mod(lane, 1073741824)">
+// CHECK: [[OUT_PTR:%.*]] = wave.ptr_add [[OUT_BUF]], [[OUT_MOD]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
 // CHECK: wave.store [[V]] -> [[OUT_PTR]] after [[TOK]]
 // MACHINE-LABEL: func.func @promote_load_store
 // MACHINE: waveamdmachine.make_buffer_rsrc
@@ -42,6 +45,31 @@ func.func @promote_load_store(
   %tok1 = wave.store %value -> %out_ptr after %tok0
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// An explicit buffer may require addr64 fallback, so promotion must not impose
+// its proven canonical-offset contract on it.
+// CHECK-LABEL: func.func @preserve_explicit_buffer_offset
+// CHECK: %[[OFFSET:.*]] = wave.index_expr <"8 + Mod(x, 4294967296)">
+// CHECK: wave.ptr_add {{.*}}, %[[OFFSET]] : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+func.func @preserve_explicit_buffer_offset(
+    %buffer: !wave.ptr<#waveamd.buffer, i8>, %raw: !wave.simd<i32, 32>)
+    attributes {wave.kernel} {
+  %offset = wave.index_expr <"8 + Mod(x, 4294967296)"> ["x"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %buffer, %offset
+      : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+  %value, %token = wave.load %ptr
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>)
+      -> (!wave.simd<i8, 32>, !wave.mem.token)
   return
 }
 
@@ -320,12 +348,14 @@ func.func @promote_index_expr_offset(
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// Promotion owns the range proof for a raw pointer offset and serializes that
-// exact packet for instruction selection.
+// Promotion owns the range proof for a raw pointer offset and serializes its
+// buffer element-offset ring for instruction selection.
 // DIRECT-LABEL: func.func @promote_raw_assume_offset
 // DIRECT: [[BUFFER:%.*]] = waveamd.make_buffer
 // DIRECT: [[PACKET:%.*]] = wave.index_expr
-// DIRECT: [[OFFSET:%.*]] = wave.splat [[PACKET]]
+// DIRECT: wave.splat [[PACKET]]
+// DIRECT: [[MODULAR:%.*]] = wave.index_expr <"Mod(raw0, 1073741824)">
+// DIRECT: [[OFFSET:%.*]] = wave.splat [[MODULAR]]
 // DIRECT: wave.ptr_add [[BUFFER]], [[OFFSET]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
 // MACHINE-LABEL: func.func @promote_raw_assume_offset
 // MACHINE: waveamdmachine.buffer_store_b32
@@ -489,4 +519,28 @@ func.func @promote_scf_if_result(
   return
 }
 
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+// CHECK-LABEL: func.func @preserve_wide_descriptor_offset
+// CHECK: %[[OFFSET:.*]] = wave.index_expr <"4294967296 + Mod(x, 4294967296)">
+// CHECK: wave.ptr_add {{.*}}, %[[OFFSET]]
+func.func @preserve_wide_descriptor_offset(
+    %base: !wave.ptr<#wave.global, i8>, %raw: !wave.simd<i32, 32>)
+    attributes {wave.kernel} {
+  %range = arith.constant -1 : i32
+  %buffer = waveamd.make_buffer %base, %range
+      : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
+  %offset = wave.index_expr <"4294967296 + Mod(x, 4294967296)"> ["x"](%raw)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %buffer, %offset
+      : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+  %value, %token = wave.load %ptr
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>)
+      -> (!wave.simd<i8, 32>, !wave.mem.token)
+  return
+}
 }

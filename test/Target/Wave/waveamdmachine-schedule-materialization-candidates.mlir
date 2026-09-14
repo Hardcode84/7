@@ -123,3 +123,23 @@ func.func @nested_loops(%condition: !waveamdmachine.reg<scc, 1>, %x: !waveamdmac
   return %r : !waveamdmachine.reg<sgpr, 1>
 }
 }
+
+// CHECK-LABEL: func.func @missing
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.candidate_yield {{.*}}cycles = {{[0-9]+}} : i64
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @missing(%condition: !waveamdmachine.reg<scc, 1>, %x: !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1> {
+  %r = waveamdmachine.materialization_candidates %condition, %x : !waveamdmachine.reg<scc, 1>, !waveamdmachine.reg<sgpr, 1> -> !waveamdmachine.reg<sgpr, 1> {
+  ^bb0(%cond: !waveamdmachine.reg<scc, 1>, %arg: !waveamdmachine.reg<sgpr, 1>):
+    waveamdmachine.candidate_yield %arg : !waveamdmachine.reg<sgpr, 1>
+  }, {
+  ^bb0(%cond: !waveamdmachine.reg<scc, 1>, %arg: !waveamdmachine.reg<sgpr, 1>):
+    %loop = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> carries(%arg : !waveamdmachine.reg<sgpr, 1>) {
+    ^bb0(%carry: !waveamdmachine.reg<sgpr, 1>):
+      waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1> carries(%carry : !waveamdmachine.reg<sgpr, 1>)
+    }  -> !waveamdmachine.reg<sgpr, 1>
+    waveamdmachine.candidate_yield %loop : !waveamdmachine.reg<sgpr, 1>
+  }
+  return %r : !waveamdmachine.reg<sgpr, 1>
+}
+}
