@@ -308,7 +308,7 @@ def check_calibration_entry(label: str, module) -> None:
         require_pass_order(
             label,
             applied_passes(ir, cleanup),
-            ["remove-dead-values", "cse", "canonicalize"],
+            ["waveamd-cleanup-materialization-variants"],
             "candidate cleanup order drifted",
         )
         check_backend_entry(label, ir, entry)
@@ -319,6 +319,21 @@ def check_calibration_entry(label: str, module) -> None:
         check_transform_finish(label, ir, transform_finish)
         check_post_regalloc(label, applied_passes(ir, post))
         check_emit_only(label, emit_only)
+    baseline = module.pipeline_text(BUILD_DIR, schedule_options={}, report_options={})
+    with ir.Context() as ctx:
+        register_dialects(ctx)
+        parsed = ir.Module.parse(baseline)
+        entry = require_sequence(ir, parsed, label, "__transform_main")
+        require(
+            label,
+            included_sequences(ir, entry)
+            == [
+                "waveamd_backend_preschedule",
+                "waveamd_select_first_materialization_variants",
+                "waveamd_backend_postschedule",
+            ],
+            "baseline must select first choices without scheduling",
+        )
     print(f"{label}: ok")
 
 

@@ -104,3 +104,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_cbranch
 // ASM: buffer_store_b32
 // ASM: s_endpgm
+
+// RUN: wave-opt %s --pass-pipeline='builtin.module(transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_backend_unscheduled})' | FileCheck %s --check-prefix=BASELINE --implicit-check-not=waveamdmachine.materialization --implicit-check-not=waveamdmachine.candidate_yield
+// BASELINE-LABEL: func.func @kernel
+// BASELINE: waveamdmachine.s_mul_i32
+// BASELINE: waveamdmachine.buffer_store_b32

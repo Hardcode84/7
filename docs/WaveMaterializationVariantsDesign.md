@@ -275,15 +275,15 @@ machine candidates, conditionals, and loops.
 MLIR regions have no attributes. The scheduling pass records a nonnegative i64
 `cycles` attribute on each successfully scheduled candidate's yield. The value
 is the model's cycle score for that entire candidate at the fixed scope
-context. Do not sum scores for nested scheduler blocks as if overlap and loop
-frequencies were independent. The score is valid only for that scheduled body.
+context. Add the normal model completion-cycle increments and preserve ordinary
+region resets. The score is valid only for that scheduled body.
 
 The `waveamd-collapse-materialization-variants` pass selects the minimum score
 and breaks exact ties by region order. It does not need a separate winner-index
 attribute. No graph-changing pass runs between scoring and collapse. Missing
-scores, malformed scores, or a
-broken candidate contract terminate compilation; they are not baseline
-fallbacks.
+scores on a wrapper with multiple candidates, malformed scores, or a broken
+candidate contract terminate compilation. A single candidate needs no comparison
+and can collapse without a score.
 
 Collapse is serial. Map winning block arguments to wrapper operands, inline
 the winning body at the wrapper position, replace wrapper results with yielded
@@ -292,10 +292,15 @@ instruction order. Do not reschedule the winner. The remaining postschedule
 pipeline runs once on the resulting function.
 
 The backend pipeline expands choices after common machine optimizations and
-multi-wave specialization. `remove-dead-values`, `cse`, and `canonicalize` clean
-functions that contain candidate wrappers. Scheduling and collapse run next,
-before packed-MFMA optimization and the postschedule pipeline. Calibration pipelines use the same
-expansion, scheduling, and collapse order when scheduling is enabled.
+multi-wave specialization. The registered cleanup pipeline nests
+`remove-dead-values`, `cse`, and `canonicalize` on candidate wrappers. The pass
+manager can process sibling wrappers in parallel without changing their shared
+inputs. Scheduling and collapse run next, before packed-MFMA optimization and
+the postschedule pipeline. Scheduled calibration uses the same cleanup and order.
+
+The unscheduled calibration baseline selects the first equivalent choice.
+Expansion retains one candidate, nested cleanup removes its dead setup, and
+collapse removes the wrapper without scheduling or a cycle score.
 
 ## Construction and lowering boundary
 

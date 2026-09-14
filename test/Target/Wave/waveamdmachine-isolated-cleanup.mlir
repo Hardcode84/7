@@ -1,4 +1,4 @@
-// RUN: wave-opt %s --pass-pipeline='builtin.module(func.func(waveamdmachine.materialization_candidates(remove-dead-values,cse,canonicalize)))' -o %t.parallel
+// RUN: wave-opt %s --pass-pipeline='builtin.module(func.func(waveamd-cleanup-materialization-variants))' -o %t.parallel
 // RUN: FileCheck %s < %t.parallel
 // RUN: wave-opt %s --mlir-disable-threading --pass-pipeline='builtin.module(func.func(waveamdmachine.materialization_candidates(remove-dead-values,cse,canonicalize)))' -o %t.serial
 // RUN: diff %t.parallel %t.serial

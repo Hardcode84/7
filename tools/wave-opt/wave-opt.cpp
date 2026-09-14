@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
         ctx->getOrLoadDialect<mlir::wavemeta::WaveMetaDialect>();
         ctx->getOrLoadDialect<mlir::waveamdmachine::WaveAMDMachineDialect>();
         ctx->getOrLoadDialect<mlir::ROCDL::ROCDLDialect>();
+        ctx->getOrLoadDialect<mlir::ub::UBDialect>();
       });
   mlir::registerCanonicalizerPass();
   mlir::registerRemoveDeadValuesPass();
@@ -96,6 +97,7 @@ int main(int argc, char **argv) {
   mlir::transform::registerInterpreterPass();
   mlir::transform::registerPreloadLibraryPass();
   mlir::wave::registerWavePasses();
+  mlir::wave::registerWaveMaterializationPipelines();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "Wave optimizer driver\n", registry));

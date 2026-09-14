@@ -33,6 +33,8 @@
 namespace mlir {
 namespace wave {
 
+void registerWaveMaterializationPipelines();
+
 #define GEN_PASS_DECL
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
 

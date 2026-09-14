@@ -185,6 +185,13 @@ def append_calibration_entry(
                 finish_input,
                 "waveamd-collapse-materialization-variants",
             ).result
+        else:
+            finish_input = transform.IncludeOp(
+                [any_op],
+                "waveamd_select_first_materialization_variants",
+                transform.FailurePropagationMode.Propagate,
+                [finish_input],
+            ).result
         finish_input = transform.IncludeOp(
             [any_op],
             "waveamd_backend_postschedule",

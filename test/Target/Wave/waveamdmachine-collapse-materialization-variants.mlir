@@ -69,3 +69,14 @@ func.func @effects() {
   }
   return
 }
+
+// CHECK-LABEL: func.func @single_without_score
+// CHECK-SAME: %[[X:.*]]: i32
+// CHECK-NEXT: return %[[X]] : i32
+func.func @single_without_score(%x: i32) -> i32 {
+  %r = waveamdmachine.materialization_candidates %x : i32 -> i32 {
+  ^bb0(%arg: i32):
+    waveamdmachine.candidate_yield %arg : i32
+  }
+  return %r : i32
+}

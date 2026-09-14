@@ -5,14 +5,18 @@ func.func @missing_later_score() {
   }, {
     // expected-error @+1 {{requires a cycle score before candidate collapse}}
     waveamdmachine.candidate_yield
+  }, {
+    waveamdmachine.candidate_yield {cycles = 1 : i64}
   }
   return
 }
 // -----
-func.func @single_missing_score() {
+func.func @missing_first_score() {
   waveamdmachine.materialization_candidates {
     // expected-error @+1 {{requires a cycle score before candidate collapse}}
     waveamdmachine.candidate_yield
+  }, {
+    waveamdmachine.candidate_yield {cycles = 1 : i64}
   }
   return
 }

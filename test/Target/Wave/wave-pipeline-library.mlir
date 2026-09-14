@@ -184,13 +184,13 @@
 // PIPELINE: transform.named_sequence @waveamd_backend_unscheduled
 // PIPELINE: transform.include @waveamd_backend_preschedule
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.include @waveamd_backend_postschedule
+// PIPELINE-NEXT: %{{.*}} = transform.include @waveamd_select_first_materialization_variants
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: %{{.*}} = transform.include @waveamd_backend_postschedule
 // PIPELINE: transform.named_sequence @waveamd_cleanup_materialization_variants
 // PIPELINE: transform.collect_matching @waveamd_match_materialization_candidates
 // PIPELINE: transform.get_parent_op %{{.*}} {op_name = "func.func", deduplicate}
-// PIPELINE: transform.apply_registered_pass "remove-dead-values"
-// PIPELINE: transform.apply_registered_pass "cse"
-// PIPELINE: transform.apply_registered_pass "canonicalize"
+// PIPELINE: transform.apply_registered_pass "waveamd-cleanup-materialization-variants"
 // PIPELINE: transform.named_sequence @waveamd_backend
 // PIPELINE: transform.include @waveamd_backend_preschedule
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op

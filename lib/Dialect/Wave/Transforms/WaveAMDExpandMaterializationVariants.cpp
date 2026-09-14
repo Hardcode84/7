@@ -15,6 +15,9 @@
 #include "mlir/IR/Threading.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
+#include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -372,3 +375,14 @@ struct WaveAMDExpandMaterializationVariantsPass
   }
 };
 } // namespace
+
+void mlir::wave::registerWaveMaterializationPipelines() {
+  static PassPipelineRegistration<> cleanup(
+      "waveamd-cleanup-materialization-variants",
+      "Clean isolated materialization candidate bodies", [](OpPassManager &pm) {
+        OpPassManager &nested = pm.nest<MaterializationCandidatesOp>();
+        nested.addPass(createRemoveDeadValuesPass());
+        nested.addPass(createCSEPass());
+        nested.addPass(createCanonicalizerPass());
+      });
+}

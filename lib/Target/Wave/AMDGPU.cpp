@@ -17,6 +17,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/Transforms/TransformInterpreterUtils.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
@@ -6357,11 +6358,13 @@ static LogicalResult runWaveAMDMachinePipeline(ModuleOp module,
   // discoverable even when this code path runs outside `wave-opt`
   // (e.g. via `wave-translate`).
   wave::registerWavePasses();
+  mlir::wave::registerWaveMaterializationPipelines();
   // Backend transform runs canonicalize + cse around selection too.
   registerCanonicalizerPass();
   registerCSEPass();
   registerRemoveDeadValuesPass();
   registerLoopInvariantCodeMotionPass();
+  ctx->getOrLoadDialect<ub::UBDialect>();
   ctx->getOrLoadDialect<transform::TransformDialect>();
   ctx->getOrLoadDialect<wave::WaveDialect>();
 

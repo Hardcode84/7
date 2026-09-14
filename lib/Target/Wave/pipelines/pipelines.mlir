@@ -257,7 +257,9 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
     %rpre = transform.include @waveamd_backend_preschedule failures(propagate) (%root)
         : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rpre)
+    %rselected = transform.include @waveamd_select_first_materialization_variants failures(propagate) (%rpre)
+        : (!transform.any_op) -> !transform.any_op
+    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rselected)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r1 : !transform.any_op
   }
@@ -275,13 +277,21 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %funcs = transform.get_parent_op %candidates {op_name = "func.func", deduplicate}
         : (!transform.any_op) -> !transform.any_op
-    %rdead = transform.apply_registered_pass "remove-dead-values" to %funcs
-        : (!transform.any_op) -> !transform.any_op
-    %rcse = transform.apply_registered_pass "cse" to %rdead
-        : (!transform.any_op) -> !transform.any_op
-    %rcanon = transform.apply_registered_pass "canonicalize" to %rcse
+    %rclean = transform.apply_registered_pass "waveamd-cleanup-materialization-variants" to %funcs
         : (!transform.any_op) -> !transform.any_op
     transform.yield %root : !transform.any_op
+  }
+
+  transform.named_sequence @waveamd_select_first_materialization_variants(
+      %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
+    %rvariants = transform.apply_registered_pass "waveamd-expand-materialization-variants" with
+        options = { "max-candidates" = 1 : i64 }
+        to %root : (!transform.any_op) -> !transform.any_op
+    %rclean = transform.include @waveamd_cleanup_materialization_variants failures(propagate) (%rvariants)
+        : (!transform.any_op) -> !transform.any_op
+    %rselected = transform.apply_registered_pass "waveamd-collapse-materialization-variants"
+        to %rclean : (!transform.any_op) -> !transform.any_op
+    transform.yield %rselected : !transform.any_op
   }
 
   transform.named_sequence @waveamd_backend(

@@ -27,6 +27,10 @@ struct WaveAMDCollapseMaterializationVariantsPass
     SmallVector<std::pair<MaterializationCandidatesOp, Block *>> winners;
     WalkResult result =
         getOperation()->walk([&](MaterializationCandidatesOp op) {
+          if (op.getCandidates().size() == 1) {
+            winners.emplace_back(op, &op.getCandidates().front().front());
+            return WalkResult::advance();
+          }
           Block *winner = nullptr;
           int64_t bestCycles = 0;
           for (Region &region : op.getCandidates()) {
