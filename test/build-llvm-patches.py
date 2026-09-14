@@ -98,7 +98,10 @@ class LLVMPatchTests(unittest.TestCase):
         patch_stamp = install / build_llvm.PATCH_STAMP_FILE
         self.assertFalse(build_llvm.already_installed(install, "commit", False, False))
         patch_stamp.write_text(build_llvm.patch_fingerprint() + "\n")
+        config_stamp = install / build_llvm.CONFIG_STAMP_FILE
+        config_stamp.write_text(build_llvm.build_config_stamp(False, False))
         self.assertTrue(build_llvm.already_installed(install, "commit", False, False))
+        self.assertFalse(build_llvm.already_installed(install, "commit", True, False))
         self.patch_path.write_text(
             self.patch_path.read_text().replace("+after", "+fixed")
         )

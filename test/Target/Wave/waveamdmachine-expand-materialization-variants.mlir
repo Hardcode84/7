@@ -11,9 +11,8 @@
 // CAP: waveamdmachine.materialization_candidates
 // CAP: [[A0:%.*]] = waveamdmachine.s_mov_b32_value {{.*}} {test.variant = "a"}
 // CAP-NEXT: waveamdmachine.candidate_yield [[A0]], [[A0]]
-// CAP: [[A1:%.*]] = waveamdmachine.s_mov_b32_value {{.*}} {test.variant = "a"}
-// CAP-NEXT: [[B1:%.*]] = waveamdmachine.s_mov_b32_value {{.*}} {test.variant = "b"}
-// CAP-NEXT: waveamdmachine.candidate_yield [[A1]], [[B1]]
+// CAP: [[B1:%.*]] = waveamdmachine.s_mov_b32_value {{.*}} {test.variant = "b"}
+// CAP-NEXT: waveamdmachine.candidate_yield [[B1]], [[B1]]
 // CAP: [[A2:%.*]] = waveamdmachine.s_mov_b32_value {{.*}} {test.variant = "a"}
 // CAP-NEXT: [[B2:%.*]] = waveamdmachine.s_mov_b32_value {{.*}} {test.variant = "b"}
 // CAP-NEXT: waveamdmachine.candidate_yield [[B2]], [[A2]]
@@ -141,4 +140,132 @@ func.func @chained(%x: !waveamdmachine.reg<sgpr, 1>, %y: !waveamdmachine.reg<sgp
   %a = waveamdmachine.materialization_variants %x, %y : !waveamdmachine.reg<sgpr, 1>
   %b = waveamdmachine.materialization_variants %a, %z : !waveamdmachine.reg<sgpr, 1>
   return %b : !waveamdmachine.reg<sgpr, 1>
+}
+
+// CHECK-LABEL: func.func @couple_effect_results_through_pure_ops
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK: waveamdmachine.buffer_load_b32
+// CHECK-NOT: waveamdmachine.buffer_load_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK: waveamdmachine.buffer_load_b32
+// CHECK-NOT: waveamdmachine.buffer_load_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK-NOT: waveamdmachine.candidate_yield
+// CHECK: return
+func.func @couple_effect_results_through_pure_ops(
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>, %zero: !waveamdmachine.imm,
+    %dep: !waveamdmachine.mem.token)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token) {
+  %value0, %token0 = waveamdmachine.buffer_load_b32
+      %off0, %desc, %zero after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %value1, %token1 = waveamdmachine.buffer_load_b32
+      %off1, %desc, %zero after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.imm, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %moved0 = waveamdmachine.v_mov_b32_tuple %value0
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %moved1 = waveamdmachine.v_mov_b32_tuple %value1
+      : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
+  %value = waveamdmachine.materialization_variants %moved0, %moved1
+      : !waveamdmachine.reg<vgpr, 1>
+  %token = waveamdmachine.materialization_variants %token0, %token1
+      : !waveamdmachine.mem.token
+  return %value, %token
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+}
+
+// CHECK-LABEL: func.func @remove_complete_effect_chains
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK-COUNT-2: waveamdmachine.buffer_store_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK-COUNT-2: waveamdmachine.buffer_store_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK-NOT: waveamdmachine.candidate_yield
+// CHECK: return
+func.func @remove_complete_effect_chains(
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %value: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>, %zero: !waveamdmachine.imm,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %first0 = waveamdmachine.buffer_store_b32
+      %off0, %value, %desc, %zero after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %last0 = waveamdmachine.buffer_store_b32
+      %off0, %value, %desc, %zero after %first0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %first1 = waveamdmachine.buffer_store_b32
+      %off1, %value, %desc, %zero after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %last1 = waveamdmachine.buffer_store_b32
+      %off1, %value, %desc, %zero after %first1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %token = waveamdmachine.materialization_variants %last0, %last1
+      : !waveamdmachine.mem.token
+  return %token : !waveamdmachine.mem.token
+}
+
+// CHECK-LABEL: func.func @loop_carried_shared_dependency
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.buffer_load_b32 {{.*}} {test.variant = "computed"}
+// CHECK-NOT: waveamdmachine.buffer_load_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.buffer_load_b32 {{.*}} {test.variant = "carried"}
+// CHECK-NOT: waveamdmachine.buffer_load_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK: return
+func.func @loop_carried_shared_dependency(
+    %initial_offset: !waveamdmachine.reg<vgpr, 1>,
+    %increment: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>, %zero: !waveamdmachine.imm,
+    %condition: !waveamdmachine.reg<scc, 1>,
+    %dependency: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %result:2 = waveamdmachine.uniform_loop if %condition
+      : !waveamdmachine.reg<scc, 1>
+      carries(%initial_offset, %dependency
+              : !waveamdmachine.reg<vgpr, 1>,
+                !waveamdmachine.mem.token) {
+  ^bb0(%carried_offset: !waveamdmachine.reg<vgpr, 1>,
+       %carried_dependency: !waveamdmachine.mem.token):
+    %computed_offset = waveamdmachine.v_add_u32
+        %carried_offset, %increment
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+        -> !waveamdmachine.reg<vgpr, 1>
+    %computed_value, %computed_token = waveamdmachine.buffer_load_b32
+        %computed_offset, %desc, %zero after %carried_dependency
+        {test.variant = "computed"}
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+           !waveamdmachine.imm, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %carried_value, %carried_token = waveamdmachine.buffer_load_b32
+        %carried_offset, %desc, %zero after %carried_dependency
+        {test.variant = "carried"}
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+           !waveamdmachine.imm, !waveamdmachine.mem.token)
+        -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %selected = waveamdmachine.materialization_variants
+        %computed_token, %carried_token : !waveamdmachine.mem.token
+    waveamdmachine.continue_if %condition
+        : !waveamdmachine.reg<scc, 1>
+        carries(%computed_offset, %selected
+                : !waveamdmachine.reg<vgpr, 1>,
+                  !waveamdmachine.mem.token)
+  } -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+  return %result#1 : !waveamdmachine.mem.token
 }

@@ -6,8 +6,8 @@
 // CHECK-NOT: waveamdmachine.candidate_yield
 // CHECK: return
 func.func @capped_product(%x: !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.reg<sgpr, 1> {
+  // expected-remark @+1 {{candidate limit reached; exploring 3 diverse assignments}}
   %a = waveamdmachine.materialization_variants %x, %x : !waveamdmachine.reg<sgpr, 1>
-  // expected-remark @+1 {{candidate limit reached; exploring first 3 assignments in operand order}}
   %b = waveamdmachine.materialization_variants %a, %a, %a : !waveamdmachine.reg<sgpr, 1>
   %c = waveamdmachine.materialization_variants %b, %b : !waveamdmachine.reg<sgpr, 1>
   return %c : !waveamdmachine.reg<sgpr, 1>

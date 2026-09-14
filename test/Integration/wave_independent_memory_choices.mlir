@@ -1,0 +1,57 @@
+// RUN: wave-opt %s --wave-materialize-memory-variants -o %t.once
+// RUN: wave-opt %t.once --wave-materialize-memory-variants -o %t.twice
+// RUN: diff %t.once %t.twice
+// RUN: FileCheck %s < %t.once
+// RUN: wave-opt %s --wave-materialize-memory-variants --waveamd-to-machine \
+// RUN:   --waveamd-expand-materialization-variants --canonicalize --cse \
+// RUN:   -o %t.expanded
+// RUN: FileCheck %s --check-prefix=EXPAND-STORES \
+// RUN:   --implicit-check-not=materialization_variants < %t.expanded
+// RUN: FileCheck %s --check-prefix=EXPAND-CANDIDATES < %t.expanded
+
+// CHECK-LABEL: func.func @independent_address_dependencies
+// CHECK: [[FIRST0:%.*]] = wave.store
+// CHECK: [[FIRST1:%.*]] = wave.store
+// CHECK: [[FIRST:%.*]] = wave.materialization_variants [[FIRST0]], [[FIRST1]]
+// CHECK: [[SECOND0:%.*]] = wave.store {{.*}} after [[FIRST]]
+// CHECK: [[SECOND1:%.*]] = wave.store {{.*}} after [[FIRST]]
+// CHECK: wave.materialization_variants [[SECOND0]], [[SECOND1]]
+// EXPAND-STORES-COUNT-8: waveamdmachine.buffer_store_b32
+// EXPAND-CANDIDATES-COUNT-4: waveamdmachine.candidate_yield
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+func.func @independent_address_dependencies(
+    %out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %range = arith.constant 4096 : i32
+  %buffer = waveamd.make_buffer %out, %range
+      : !wave.ptr<#wave.global, i32>, i32
+      -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %two = arith.constant 2 : i32
+  %four = arith.constant 4 : i32
+  %a0 = wave.binary muli %lane, %two
+      : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+  %a1 = wave.binary addi %lane, %lane
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+      -> !wave.simd<i32, 32>
+  %a = wave.materialization_variants %a0, %a1 : !wave.simd<i32, 32>
+  %b0 = wave.binary muli %lane, %four
+      : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+  %b1 = wave.binary shli %lane, %two
+      : !wave.simd<i32, 32>, i32 -> !wave.simd<i32, 32>
+  %b = wave.materialization_variants %b0, %b1 : !wave.simd<i32, 32>
+  %first_ptr = wave.ptr_add %buffer, %a
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %first = wave.store %lane -> %first_ptr
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> !wave.mem.token
+  %second_ptr = wave.ptr_add %buffer, %b
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %second = wave.store %lane -> %second_ptr after %first
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>,
+         !wave.mem.token) -> !wave.mem.token
+  return
+}
+}

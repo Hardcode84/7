@@ -42,6 +42,7 @@ DEFAULT_INSTALL_DIR = REPO_ROOT / "build" / "llvm-install"
 DEFAULT_WAVE_BUILD_DIR = REPO_ROOT / "build"
 STAMP_FILE = ".wave-mlir-commit"
 PATCH_STAMP_FILE = ".wave-mlir-patches"
+CONFIG_STAMP_FILE = ".wave-mlir-config"
 PATCH_DIR = REPO_ROOT / "build_tools" / "llvm_patches"
 LLVM_DISTRIBUTION_COMPONENTS = (
     "FileCheck",
@@ -65,11 +66,11 @@ LLVM_DISTRIBUTION_COMPONENTS = (
     "mlir-cmake-exports",
     "mlir-headers",
     "mlir-libraries",
-    "mlir-python-sources",
     "mlir-tblgen",
     "not",
     "split-file",
 )
+MLIR_PYTHON_DISTRIBUTION_COMPONENTS = ("mlir-python-sources",)
 ROCM_RUNNER_DISTRIBUTION_COMPONENTS = (
     "mlir-runner",
     "mlir_apfloat_wrappers",
@@ -168,6 +169,14 @@ def patch_fingerprint() -> str:
         digest.update(b"\0")
         digest.update(patch.read_bytes())
     return digest.hexdigest()
+
+
+def build_config_stamp(enable_python_bindings: bool,
+                       enable_rocm_runner: bool) -> str:
+    return (
+        f"python_bindings={int(enable_python_bindings)}\n"
+        f"rocm_runner={int(enable_rocm_runner)}\n"
+    )
 
 
 def patch_paths(source_dir: Path, patches: list[Path]) -> list[str]:
@@ -275,6 +284,13 @@ def already_installed(
         or patch_stamp.read_text().strip() != patch_fingerprint()
     ):
         return False
+    config_stamp = install_dir / CONFIG_STAMP_FILE
+    if (
+        not config_stamp.is_file()
+        or config_stamp.read_text()
+        != build_config_stamp(enable_python_bindings, enable_rocm_runner)
+    ):
+        return False
     for package in ("llvm", "mlir", "clang", "lld"):
         if not (install_dir / "lib" / "cmake" / package).is_dir():
             return False
@@ -297,6 +313,11 @@ def configure_and_build(
 ) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
     install_dir.mkdir(parents=True, exist_ok=True)
+    distribution_components = [*LLVM_DISTRIBUTION_COMPONENTS]
+    if enable_python_bindings:
+        distribution_components.extend(MLIR_PYTHON_DISTRIBUTION_COMPONENTS)
+    if enable_rocm_runner:
+        distribution_components.extend(ROCM_RUNNER_DISTRIBUTION_COMPONENTS)
     cmake_args = [
         "cmake",
         "-G",
@@ -318,12 +339,7 @@ def configure_and_build(
         "-DLLVM_INCLUDE_EXAMPLES=OFF",
         "-DLLVM_INCLUDE_DOCS=OFF",
         "-DMLIR_INCLUDE_TESTS=OFF",
-        "-DLLVM_DISTRIBUTION_COMPONENTS="
-        + ";".join(
-            (*LLVM_DISTRIBUTION_COMPONENTS, *ROCM_RUNNER_DISTRIBUTION_COMPONENTS)
-            if enable_rocm_runner
-            else LLVM_DISTRIBUTION_COMPONENTS
-        ),
+        "-DLLVM_DISTRIBUTION_COMPONENTS=" + ";".join(distribution_components),
         f"-DMLIR_ENABLE_ROCM_RUNNER={'ON' if enable_rocm_runner else 'OFF'}",
         f"-DMLIR_ENABLE_BINDINGS_PYTHON={'ON' if enable_python_bindings else 'OFF'}",
         f"-DPython3_EXECUTABLE={sys.executable}",
@@ -458,6 +474,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     (install_dir / STAMP_FILE).write_text(commit + "\n")
     (install_dir / PATCH_STAMP_FILE).write_text(patch_fingerprint() + "\n")
+    (install_dir / CONFIG_STAMP_FILE).write_text(
+        build_config_stamp(args.python_bindings, args.rocm_runner)
+    )
     print(f"\nLLVM/MLIR installed at {install_dir} (commit {commit[:12]})")
     if not args.no_refresh_wave_build:
         refresh_wave_build(

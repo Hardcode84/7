@@ -49,9 +49,9 @@ equivalent choices.
 
 Buffer normalization must preserve pointer arithmetic. If the compiler proves
 that an element-offset modulus leaves the offset unchanged, use the modular
-offset directly. Otherwise, keep the full offset and the modular buffer offset
-as one coupled materialization choice. Duplicate the memory operations before
-machine selection so that each alternative contains a complete address tree.
+offset directly. If the proof fails, keep the full offset. Do not offer a
+wrapped offset as an equivalent choice. Duplicate the memory operations before
+machine selection so that each valid alternative contains a complete address tree.
 Machine selection determines whether the full address fits buffer fields or
 requires an addr64 instruction. No source attribute changes this decision.
 
@@ -127,12 +127,16 @@ decision. The experiment setup checks this restriction before constructing
 alternatives. A direct experimental invocation outside this scope reports an
 error.
 
-Each search region has a configurable candidate limit. The driver retains
-the first assignments in stable operand order, up to this limit. Larger search
-spaces do not cause compilation to fail. Each retained assignment resolves all
-choices. The limit bounds exploration; it does not prove that the retained
-assignments contain the lowest-cost candidate. A remark identifies each scope
-whose search stops at the limit.
+Each search region has a configurable candidate limit. The driver enumerates
+the complete Cartesian product when it fits. For a bounded search, it starts
+with the all-first assignment, then coherent alternatives across all
+dimensions, then single-dimension alternatives, and then stable Cartesian
+assignments until it reaches the limit. This order exposes shared setup that
+only becomes dead when several independent choices change together, while
+single-dimension assignments expose independent costs. Each retained
+assignment resolves all choices. The limit bounds exploration; it does not
+prove that the retained assignments contain the lowest-cost candidate. A
+remark identifies each scope whose search stops at the limit.
 
 The producer owns fixed-width semantics, definedness, and dominance. The model
 owns target cost, occupancy policy, and legal resource limits. Candidate
@@ -293,8 +297,9 @@ values, and erase the yield, losing regions, and wrapper. Retain the chosen
 instruction order. Do not reschedule the winner. The remaining postschedule
 pipeline runs once on the resulting function.
 
-The backend pipeline expands choices after common machine optimizations and
-multi-wave specialization. The registered cleanup pipeline nests
+The backend pipeline expands live choices after common machine optimizations
+and multi-wave specialization. Generic dead-code elimination can remove an
+unused value or token choice before expansion. The registered cleanup pipeline nests
 `remove-dead-values`, `cse`, and `canonicalize` on candidate wrappers. The pass
 manager can process sibling wrappers in parallel without changing their shared
 inputs. Scheduling and collapse run next, before packed-MFMA optimization and
@@ -319,9 +324,9 @@ the result one common machine representation. Pointer metadata and split
 machine values must preserve the independent-choice contract.
 
 Common machine optimizations run on this choice graph and can add choices.
-They must preserve all alternatives. A use-count profitability heuristic must
-record a choice instead of discarding an equivalent form. Semantic legality
-checks remain required.
+They must preserve all live alternatives. A use-count profitability heuristic
+must record a choice instead of discarding an equivalent form. Semantic
+legality checks remain required.
 
 After common optimizations, form search scopes and expand the machine choices
 into `waveamdmachine.materialization_candidates`. Create private block
@@ -448,25 +453,31 @@ separate candidate counts. Block terminators and machine return instructions
 stay outside each wrapper.
 
 The pass caps each candidate count before cloning. `max-candidates` must be
-positive. The first choice changes slowest. If the full product exceeds the
-cap, the pass retains its first `max-candidates` assignments.
-It reports the cap once per affected scope.
+positive. It enumerates the full Cartesian product in stable operand order
+when that product fits. If the product exceeds the cap, it prioritizes the
+all-first assignment, coherent alternatives across all dimensions, and
+single-dimension alternatives before it fills remaining slots in Cartesian
+order. It reports the cap once per affected scope.
 It computes capped counts without overflow. It creates private input arguments
 serially, then clones and resolves each assignment in parallel. Dead operations
 are removed within each candidate. External uses receive the wrapper results.
 
-Each choice is an independent dimension, including choices with different
+Each source choice is an independent dimension, including choices with different
 operand counts. Data and explicit token edges determine which scopes merge.
 A load result can feed a store whose address uses another choice. An address
 can combine several choices. Enumerate their joint assignments within the
 merged scope; do not couple choices by operand ordinal.
 
-Machine selection lowers each value choice directly. Memory operations remain
-single operations until scope expansion clones the complete region. Their
-result and token edges use the same clone mapping as all other SSA edges.
-Thus each candidate contains one copy of each required memory operation.
-Collapse removes every losing region, including its side effects. No choice
-group attributes or separate memory-alternative cloning pass are required.
+Before machine selection, duplicate a memory operation whose address uses a
+choice. Each duplicate contains one complete address tree. Put an independent
+choice on each result and token. Candidate construction traces each operand
+through pure operations and token dependencies. It removes effects common to
+all operands and couples result choices only when their remaining per-operand
+effect slices are identical. It does not use an operation attribute. A token
+choice used as a dependency remains independent from the address choice of the
+dependent memory operation. Candidate construction enumerates both dimensions
+and removes the unselected memory operations. Ordinary dead-code elimination
+removes their unused pure address setup.
 
 Scope formation uses SSA edges, including explicit memory tokens. It does not
 infer memory ordering. Separate scopes alone do not prove that model costs are
@@ -512,12 +523,10 @@ are searched together; do not choose an inner winner greedily before scoring
 its outer-loop alternatives. A whole-function scope is permitted only when the
 choices are coupled and the merged scope meets the choice bound.
 
-Scope formation uses the pre-lowering SSA graph and known pass effects. Retain
-stable internal scope identities through lowering. Candidate construction
-establishes the machine boundary contract for the downstream scheduling model.
-A violation is a definite diagnostic; stop and correct the partition or
-construction boundary. Do not silently accept a local score for a graph with
-escaping choice-dependent effects.
+Scope formation uses the machine SSA graph and operation effects. Candidate
+construction establishes the boundary contract for the downstream scheduling
+model. A violation is a definite diagnostic. Do not silently accept a local
+score for a graph with escaping choice-dependent effects.
 
 This is model independence at a fixed target configuration. It does not prove
 independent final allocation or occupancy. Validate the combined selected
@@ -528,15 +537,18 @@ regalloc.
 
 Assign scope IDs in stable lexical order before cloning. Within each scope,
 assign choice ordinals by a stable operation walk and use operand order for
-alternatives. Enumerate the Cartesian product with the first choice changing
-slowest. Candidate zero selects the first operand at each choice. Each source
-variants op remains an independent choice; there is no grouping attribute.
+alternatives. Candidate zero selects the first operand at each choice. A
+bounded search first includes assignments that change all dimensions
+coherently, then assignments that change one dimension. These are search
+points, not coupled semantics. Each source variants op remains an independent
+choice; there is no grouping attribute.
 
 For a configured cap `M` and binary choice counts `c_1, ..., c_R`, the
 candidate count is `sum(min(2^c_i, M))`, bounded by `M * R`. Independent
 scopes add their candidate counts instead of multiplying them. If a merged
-scope exceeds the cap, retain the first assignments up to the cap. Do not split
-coupled choices. Each retained candidate resolves every choice in the scope.
+scope exceeds the cap, use the bounded priority order above. Do not split
+coupled effect results. Each retained candidate resolves every choice in the
+scope.
 
 Create the wrapper, its external operands, all destination regions, and each
 region's block arguments serially. Build a private `IRMapping` for each
@@ -598,7 +610,8 @@ silent search cutoff is permitted.
 
 Prune rejected recurrences after machine choices expand into regions. An
 unused loop result is not sufficient: a body argument, update, and yield can
-form a dead cycle in `waveamdmachine.uniform_loop`. Reuse MLIR dataflow liveness and region-branch canonicalization.
+form a dead cycle in `waveamdmachine.uniform_loop`. Reuse MLIR dataflow
+liveness and region-branch canonicalization.
 Do not add a separate carry-liveness algorithm or producer-shaped matching.
 
 The `remove-dead-values` pass uses dataflow liveness to replace dead forwarded
@@ -658,18 +671,13 @@ model policy for greedy choices and steady-state refinement. Candidate scoring
 does not use a separate scheduling strategy and does not replay iterations.
 Keep loop metadata intact for its existing consumers.
 
-Add the model completion-cycle increments from the scheduled regions in a
-candidate. Multiply an increment in a loop body by the product of its enclosing
-loop trip counts. Use the static trip count when it is available. For a loop
-without a static trip count, use the same four-iteration horizon that the
-scheduler uses for steady-state refinement. This horizon
-includes the first recurrence and exposes recurring costs that amortize loop
-setup. Saturate the score if the product or sum exceeds the signed 64-bit
-range. Respect the normal state resets between regions. The score is a
-scheduling estimate, not a proof of runtime duration. Keep device, launch,
-resident-wave configuration, calibration data, and model options equal across
-candidates. Copy the incoming scheduler state at each wrapper and continue
-with the winner's state, including pending events and result readiness.
+Add the same model completion-cycle increments that the normal scheduler
+produces for the scheduled regions in a candidate. Do not multiply a region
+cost by a loop trip count or by the scheduler refinement horizon. Respect the
+normal state resets between regions. Keep device, launch, resident-wave
+configuration, calibration data, and model options equal across candidates.
+Copy the incoming scheduler state at each wrapper and continue with the
+winner's state, including pending events and result readiness.
 
 Select the candidate with minimum predicted region completion cycles. On an
 exact cycle tie, select the lowest trial index. Pressure and
@@ -727,10 +735,11 @@ feasible candidate remains, emit one error with all rejection reasons. Do not
 silently install the baseline. Normal successful compilation does not print
 selection diagnostics.
 
-A discardable diagnostic attribute can record the collapsed choice for tests.
-It is not a second selection input. Remove it before emission. Artifact
-retention uses deterministic trial names. Never serialize SSA or structural
-proof data through printed strings to communicate between phases.
+Tests inspect candidate order and yield scores directly. Passes do not attach
+choice groups, owner IDs, selected alternatives, or other phase state to
+operations. Artifact retention uses deterministic trial names. Never serialize
+SSA or structural proof data through printed strings to communicate between
+phases.
 
 ## Correctness tests
 
@@ -773,7 +782,8 @@ Region tests cover independent sibling loops, shared unchanged inputs, shared
 choice-dependent producers, nested carries, escaping live values, and pending
 DMA dependencies. Check merge decisions and the configured candidate cap after
 merging. Independent loops must have separate candidate counts. For small
-cases within the cap, use exhaustive joint evaluation as a test oracle. Reverse region processing order and vary worker limits; require
+cases within the cap, use exhaustive joint evaluation as a test oracle. Reverse
+region processing order and vary worker limits; require
 identical choices and regional scores. Test scope identity through loop
 rebuilding and require a definite failure when lowering violates a declared
 boundary.

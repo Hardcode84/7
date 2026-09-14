@@ -724,26 +724,6 @@ _attn_fwd_async_prefetch:
 		buffer_load_dwordx4 v2, s[32:35], 0 offen lds
 		s_mul_i32 s11, s4, 64
 		v_mov_b32_e32 v2, 0xff800000
-		v_mbcnt_lo_u32_b32 v9, -1, 0
-		v_mbcnt_hi_u32_b32 v9, -1, v9
-		v_and_b32_e32 v9, 31, v9
-		v_add_u32_e32 v11, 32, v9
-		v_mov_b32_e32 v16, 0x3e0293ee
-		v_mov_b32_e32 v17, 0x3e0293ee
-		v_lshlrev_b32_e32 v12, 4, v20
-		v_lshrrev_b32_e32 v24, 4, v10
-		v_lshlrev_b32_e32 v24, 8, v24
-		v_and_b32_e32 v10, 15, v10
-		v_mov_b32_e32 v25, 0x410
-		v_mul_lo_u32 v25, v25, v10
-		v_and_b32_e32 v10, 3, v0
-		v_lshlrev_b32_e32 v10, 3, v10
-		v_mov_b32_e32 v26, 0x2200
-		v_mul_lo_u32 v26, v26, v1
-		v_lshlrev_b32_e32 v27, 5, v8
-		v_and_b32_e32 v3, 1, v3
-		v_mov_b32_e32 v28, 0x440
-		v_mul_lo_u32 v28, v28, v3
 		s_lshl_b32 s13, s15, 7
 		s_add_i32 s13, s13, s2
 		s_add_i32 s13, s13, s3
@@ -776,6 +756,26 @@ _attn_fwd_async_prefetch:
 		s_add_i32 s1, s39, s1
 		s_add_i32 s1, s1, s10
 		s_add_i32 s1, s1, s12
+		v_mbcnt_lo_u32_b32 v9, -1, 0
+		v_mbcnt_hi_u32_b32 v9, -1, v9
+		v_and_b32_e32 v9, 31, v9
+		v_add_u32_e32 v11, 32, v9
+		v_mov_b32_e32 v16, 0x3e0293ee
+		v_mov_b32_e32 v17, 0x3e0293ee
+		v_lshlrev_b32_e32 v12, 4, v20
+		v_lshrrev_b32_e32 v24, 4, v10
+		v_lshlrev_b32_e32 v24, 8, v24
+		v_and_b32_e32 v10, 15, v10
+		v_mov_b32_e32 v25, 0x410
+		v_mul_lo_u32 v25, v25, v10
+		v_and_b32_e32 v10, 3, v0
+		v_lshlrev_b32_e32 v10, 3, v10
+		v_mov_b32_e32 v26, 0x2200
+		v_mul_lo_u32 v26, v26, v1
+		v_lshlrev_b32_e32 v27, 5, v8
+		v_and_b32_e32 v3, 1, v3
+		v_mov_b32_e32 v28, 0x440
+		v_mul_lo_u32 v28, v28, v3
 		v_lshlrev_b32_e32 v3, 2, v9
 		v_lshlrev_b32_e32 v9, 2, v11
 		s_cmp_lt_i32 0, s11

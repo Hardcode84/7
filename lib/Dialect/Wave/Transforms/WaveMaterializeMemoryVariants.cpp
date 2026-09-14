@@ -8,15 +8,12 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallPtrSet.h"
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEMATERIALIZEMEMORYVARIANTS
@@ -27,35 +24,6 @@ using namespace mlir;
 using namespace mlir::wave;
 
 namespace {
-
-struct Choice {
-  MaterializationVariantsOp op;
-  int64_t group;
-};
-
-static LogicalResult verifyCoupledOperand(Operation *op, Value value,
-                                          Choice addressChoice) {
-  auto choice = value.getDefiningOp<MaterializationVariantsOp>();
-  if (!choice)
-    return success();
-  auto group =
-      choice->getAttrOfType<IntegerAttr>(kMaterializationChoiceGroupAttrName);
-  if (!group || group.getInt() != addressChoice.group)
-    return op->emitOpError(
-        "memory alternative combines independent materialization groups");
-  if (choice.getChoices().size() != addressChoice.op.getChoices().size())
-    return op->emitOpError(
-        "coupled materialization choices must have equal arity");
-  return success();
-}
-
-static Value selectCoupledOperand(Value value, Choice addressChoice,
-                                  unsigned alternative) {
-  auto choice = value.getDefiningOp<MaterializationVariantsOp>();
-  if (!choice)
-    return value;
-  return choice.getChoices()[alternative];
-}
 
 using ConcreteAlternatives = DenseMap<Value, SmallVector<Value>>;
 
@@ -69,7 +37,7 @@ static Operation *cloneWithMappedOperands(IRRewriter &rewriter, Operation *op,
 
 static LogicalResult
 mapAlternativeOperands(IRMapping &map, Operation *op,
-                       const ConcreteAlternatives &concrete, Choice choice,
+                       const ConcreteAlternatives &concrete,
                        unsigned alternative) {
   for (Value operand : op->getOperands()) {
     auto found = concrete.find(operand);
@@ -78,9 +46,8 @@ mapAlternativeOperands(IRMapping &map, Operation *op,
         return op->emitOpError(
             "concrete materialization has inconsistent alternative count");
       map.map(operand, found->second[alternative]);
-    } else {
-      map.map(operand, selectCoupledOperand(operand, choice, alternative));
-    }
+    } else
+      map.map(operand, operand);
     if (!map.lookupOrNull(operand))
       return op->emitOpError("materialization produced a null operand");
   }
@@ -89,34 +56,21 @@ mapAlternativeOperands(IRMapping &map, Operation *op,
 
 static LogicalResult duplicateAccess(IRRewriter &rewriter, Operation *access,
                                      const ConcreteAlternatives &concrete,
-                                     Choice choice) {
-  if (auto existingGroup = access->getAttrOfType<IntegerAttr>(
-          kMaterializationChoiceGroupAttrName))
-    return access->emitOpError("memory access already belongs to group ")
-           << existingGroup.getInt() << " while materializing group "
-           << choice.group;
+                                     MaterializationVariantsOp choice) {
   if (access->getNumRegions() != 0)
     return access->emitOpError(
         "effectful materialization alternative must be region-free");
-  for (Value operand : access->getOperands())
-    if (failed(verifyCoupledOperand(access, operand, choice)))
-      return failure();
-
   SmallVector<SmallVector<Value>> resultAlternatives(access->getNumResults());
   if (llvm::any_of(access->getResultTypes(), [](Type type) { return !type; }))
     return access->emitOpError("materialization access has a null result type");
   rewriter.setInsertionPoint(access);
-  for (unsigned alternative : llvm::seq(choice.op.getChoices().size())) {
+  for (unsigned alternative : llvm::seq(choice.getChoices().size())) {
     IRMapping accessMap;
-    if (failed(mapAlternativeOperands(accessMap, access, concrete, choice,
-                                      alternative)))
+    if (failed(
+            mapAlternativeOperands(accessMap, access, concrete, alternative)))
       return failure();
     Operation *concreteAccess =
         cloneWithMappedOperands(rewriter, access, accessMap);
-    concreteAccess->setAttr(kMaterializationChoiceGroupAttrName,
-                            rewriter.getI64IntegerAttr(choice.group));
-    concreteAccess->setAttr(kMaterializationAlternativeAttrName,
-                            rewriter.getI64IntegerAttr(alternative));
     if (llvm::any_of(concreteAccess->getResultTypes(),
                      [](Type type) { return !type; }))
       return concreteAccess->emitOpError(
@@ -132,32 +86,24 @@ static LogicalResult duplicateAccess(IRRewriter &rewriter, Operation *access,
        llvm::zip_equal(access->getResults(), resultAlternatives)) {
     auto resultChoice = MaterializationVariantsOp::create(
         rewriter, access->getLoc(), result.getType(), alternatives);
-    resultChoice->setAttr(kMaterializationChoiceGroupAttrName,
-                          rewriter.getI64IntegerAttr(choice.group));
-    resultChoice->setAttr(kMaterializationEffectOwnerAttrName,
-                          rewriter.getUnitAttr());
     replacements.push_back(resultChoice.getResult());
   }
   rewriter.replaceOp(access, replacements);
   return success();
 }
 
-static LogicalResult
-duplicatePureAddressOp(IRRewriter &rewriter, Operation *op,
-                       ConcreteAlternatives &concrete, Choice choice) {
+static LogicalResult duplicatePureAddressOp(IRRewriter &rewriter, Operation *op,
+                                            ConcreteAlternatives &concrete,
+                                            MaterializationVariantsOp choice) {
   if (op->getNumRegions() != 0 || !isMemoryEffectFree(op))
     return op->emitOpError(
         "operation in a materialization address tree must be pure and "
         "region-free");
-  for (Value operand : op->getOperands())
-    if (failed(verifyCoupledOperand(op, operand, choice)))
-      return failure();
-
   SmallVector<SmallVector<Value>> resultAlternatives(op->getNumResults());
   rewriter.setInsertionPoint(op);
-  for (unsigned alternative : llvm::seq(choice.op.getChoices().size())) {
+  for (unsigned alternative : llvm::seq(choice.getChoices().size())) {
     IRMapping map;
-    if (failed(mapAlternativeOperands(map, op, concrete, choice, alternative)))
+    if (failed(mapAlternativeOperands(map, op, concrete, alternative)))
       return failure();
     Operation *clone = cloneWithMappedOperands(rewriter, op, map);
     for (auto [result, alternatives] :
@@ -175,13 +121,6 @@ struct WaveMaterializeMemoryVariantsPass
           WaveMaterializeMemoryVariantsPass> {
   void runOnOperation() override {
     llvm::SetVector<Operation *> cleanupRoots;
-    int64_t nextGroup = 0;
-    getOperation()->walk([&](MaterializationVariantsOp op) {
-      if (auto group = op->getAttrOfType<IntegerAttr>(
-              kMaterializationChoiceGroupAttrName))
-        nextGroup = std::max(nextGroup, group.getInt() + 1);
-    });
-
     SmallVector<MaterializationVariantsOp> addressChoices;
     DenseMap<Operation *, SmallVector<PtrAddOp>> pointersByChoice;
     getOperation()->walk([&](PtrAddOp op) {
@@ -196,46 +135,22 @@ struct WaveMaterializeMemoryVariantsPass
 
     IRRewriter rewriter(&getContext());
     for (MaterializationVariantsOp sourceChoice : addressChoices) {
-      if (sourceChoice->hasAttr(kMaterializationChoiceGroupAttrName))
-        continue;
-      sourceChoice->setAttr(kMaterializationChoiceGroupAttrName,
-                            rewriter.getI64IntegerAttr(nextGroup++));
-    }
-    llvm::DenseSet<int64_t> processedGroups;
-    for (MaterializationVariantsOp sourceChoice : addressChoices) {
-      auto group = sourceChoice->getAttrOfType<IntegerAttr>(
-          kMaterializationChoiceGroupAttrName);
-      if (!processedGroups.insert(group.getInt()).second)
-        continue;
-      Choice choice{sourceChoice, group.getInt()};
-
       ConcreteAlternatives concrete;
       llvm::SetVector<Value> dependentValues;
-      for (MaterializationVariantsOp groupChoice : addressChoices) {
-        auto candidateGroup = groupChoice->getAttrOfType<IntegerAttr>(
-            kMaterializationChoiceGroupAttrName);
-        if (candidateGroup.getInt() != choice.group)
-          continue;
-        if (groupChoice.getChoices().size() != sourceChoice.getChoices().size()) {
-          groupChoice.emitOpError(
-              "materialization choices in one group must have equal arity");
-          return signalPassFailure();
-        }
-        cleanupRoots.insert(groupChoice);
-        for (PtrAddOp ptrAdd : pointersByChoice.lookup(groupChoice)) {
+      cleanupRoots.insert(sourceChoice);
+      for (PtrAddOp ptrAdd : pointersByChoice.lookup(sourceChoice)) {
           cleanupRoots.insert(ptrAdd);
           SmallVector<Value> concretePointers;
           rewriter.setInsertionPoint(ptrAdd);
-          for (Value concreteOffset : groupChoice.getChoices()) {
+        for (Value concreteOffset : sourceChoice.getChoices()) {
             IRMapping map;
-            map.map(groupChoice.getResult(), concreteOffset);
+          map.map(sourceChoice.getResult(), concreteOffset);
             concretePointers.push_back(
                 cloneWithMappedOperands(rewriter, ptrAdd, map)->getResult(0));
           }
           concrete[ptrAdd.getResult()] = std::move(concretePointers);
           dependentValues.insert(ptrAdd.getResult());
         }
-      }
 
       llvm::SetVector<Operation *> reachable;
       for (size_t index = 0; index < dependentValues.size(); ++index) {
@@ -267,16 +182,16 @@ struct WaveMaterializeMemoryVariantsPass
         for (Operation *user : readyUsers) {
           pending.remove(user);
           if (!isMemoryEffectFree(user)) {
-            if (failed(duplicateAccess(rewriter, user, concrete, choice)))
+            if (failed(duplicateAccess(rewriter, user, concrete, sourceChoice)))
               return signalPassFailure();
             continue;
           }
-          if (failed(duplicatePureAddressOp(rewriter, user, concrete, choice)))
+          if (failed(duplicatePureAddressOp(rewriter, user, concrete,
+                                            sourceChoice)))
             return signalPassFailure();
           cleanupRoots.insert(user);
         }
       }
-
     }
     RewritePatternSet patterns(&getContext());
     GreedyRewriteConfig config;
@@ -285,8 +200,7 @@ struct WaveMaterializeMemoryVariantsPass
         .enableConstantCSE(false);
     if (failed(applyOpPatternsGreedily(
             cleanupRoots.getArrayRef(),
-            FrozenRewritePatternSet(std::move(patterns)),
-            config)))
+            FrozenRewritePatternSet(std::move(patterns)), config)))
       return signalPassFailure();
   }
 };

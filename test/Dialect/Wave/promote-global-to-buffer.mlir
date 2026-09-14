@@ -54,13 +54,11 @@ func.func @promote_load_store(
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// Keep the full offset for addr64 fallback and expose the equivalent low-32-bit
-// buffer offset as a coupled materialization choice.
+// Keep the full offset for addr64 fallback when ring identity is not proven.
 // CHECK-LABEL: func.func @preserve_explicit_buffer_offset
 // CHECK: %[[OFFSET:.*]] = wave.index_expr <"8 + Mod(x, 4294967296)">
-// CHECK: %[[MODULAR:.*]] = wave.index_expr <"Mod(8 + x, 4294967296)">
-// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[OFFSET]], %[[MODULAR]] {materialization_choice_group = 0 : i64}
-// CHECK: wave.ptr_add {{.*}}, %[[CHOICE]] : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+// CHECK-NOT: wave.materialization_variants
+// CHECK: wave.ptr_add {{.*}}, %[[OFFSET]] : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
 func.func @preserve_explicit_buffer_offset(
     %buffer: !wave.ptr<#waveamd.buffer, i8>, %raw: !wave.simd<i32, 32>)
     attributes {wave.kernel} {
@@ -528,9 +526,8 @@ func.func @promote_scf_if_result(
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-LABEL: func.func @preserve_wide_descriptor_offset
 // CHECK: %[[OFFSET:.*]] = wave.index_expr <"4294967296 + Mod(x, 4294967296)">
-// CHECK: %[[MODULAR:.*]] = wave.index_expr <"Mod(x, 4294967296)">
-// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[OFFSET]], %[[MODULAR]] {materialization_choice_group = 0 : i64}
-// CHECK: wave.ptr_add {{.*}}, %[[CHOICE]]
+// CHECK-NOT: wave.materialization_variants
+// CHECK: wave.ptr_add {{.*}}, %[[OFFSET]]
 func.func @preserve_wide_descriptor_offset(
     %base: !wave.ptr<#wave.global, i8>, %raw: !wave.simd<i32, 32>)
     attributes {wave.kernel} {

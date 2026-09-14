@@ -720,8 +720,10 @@ def WaveAMDExpandMaterializationVariants
     Include dependent consumers and removable alternative setup. Merge scopes
     that overlap or share this setup. Keep independent loops in separate scopes.
     Block terminators and machine return instructions stay outside the wrapper.
-    Enumerate up to max-candidates assignments in operand order, with the first
-    choice changing slowest. Report when the limit bounds the search.
+    Enumerate the full Cartesian product when it fits. For a bounded search,
+    prioritize the all-first assignment, coherent alternatives across all
+    dimensions, and single-dimension alternatives before other assignments.
+    Report when the limit bounds the search.
     Clone candidates with private block arguments, resolve choices,
     and remove dead operations. This pass does not select or score candidates.
   }];
@@ -735,10 +737,12 @@ def WaveMaterializeMemoryVariants
   let summary = "Duplicate memory operations for concrete address variants";
   let description = [{
     Replace a memory operation through a pointer-offset materialization choice
-    with one operation per concrete address. Put grouped choices on the
-    duplicated result values and tokens. All alternatives reach machine
-    selection with a complete address tree. Candidate construction removes the
-    alternatives that do not match its selected group index.
+    with one operation per concrete address. Put choices on the duplicated
+    result values and tokens. Keep choices from other operands independent.
+    All alternatives reach machine selection with a complete address tree.
+    Candidate construction derives coupled results from identical
+    alternative-specific effect slices and removes the unselected memory
+    operations.
   }];
   let dependentDialects = [
     "func::FuncDialect",

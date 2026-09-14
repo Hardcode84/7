@@ -8,7 +8,6 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/Wave/Transforms/SymbolicValue.h"
 
 #include "../IR/WaveIndexExpr.h"
@@ -415,30 +414,26 @@ private:
     return *lowerProven && *upperProven;
   }
 
-  struct ModularBufferOffset {
-    SymbolicOffset symbolic;
-    bool isIdentity;
-  };
-
-  FailureOr<std::optional<ModularBufferOffset>>
+  FailureOr<std::optional<SymbolicOffset>>
   getModularBufferOffset(IndexExprOp index, int64_t elementBytes) {
     constexpr int64_t byteRing = int64_t{1} << 32;
     int64_t elementRing = byteRing / std::gcd(byteRing, elementBytes);
     if (hasExplicitBufferRing(index, elementRing))
-      return std::optional<ModularBufferOffset>{};
+      return std::optional<SymbolicOffset>{};
     FailureOr<SymbolicOffset> symbolic = getIndexExprSymbolicOffset(index);
     if (failed(symbolic))
       return failure();
     FailureOr<bool> fits = proveOffsetInRing(*symbolic, elementRing);
     if (failed(fits))
       return failure();
+    if (!*fits)
+      return std::optional<SymbolicOffset>{};
     FailureOr<sym::ExprHandle> wrapped =
         wrapBufferElementOffset(store, symbolic->expr, elementBytes);
     if (failed(wrapped))
       return index.emitError("failed to express buffer offset wrapping");
     symbolic->expr = *wrapped;
-    return std::optional<ModularBufferOffset>{
-        ModularBufferOffset{std::move(*symbolic), *fits}};
+    return std::optional<SymbolicOffset>{std::move(*symbolic)};
   }
 
   LogicalResult normalizeBufferOffset(PtrAddOp add) {
@@ -455,7 +450,7 @@ private:
         getPointerElementBytes(add.getBase().getType());
     if (!elementBytes)
       return add.emitError("cannot determine buffer pointer element size");
-    FailureOr<std::optional<ModularBufferOffset>> modularOffset =
+    FailureOr<std::optional<SymbolicOffset>> modularOffset =
         getModularBufferOffset(index, *elementBytes);
     if (failed(modularOffset))
       return failure();
@@ -464,33 +459,19 @@ private:
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(add);
     FailureOr<Value> modular = materializeIndexExpr(
-        add.getOperation(), add.getLoc(), (**modularOffset).symbolic, rewriter);
+        add.getOperation(), add.getLoc(), **modularOffset, rewriter);
     if (failed(modular))
       return failure();
     Value replacement = *modular;
     if (splat)
       replacement = SplatOp::create(rewriter, add.getLoc(),
                                     add.getOffset().getType(), replacement);
-    if (!(**modularOffset).isIdentity) {
-      auto variants = MaterializationVariantsOp::create(
-          rewriter, add.getLoc(), add.getOffset().getType(),
-          ValueRange{add.getOffset(), replacement});
-      variants->setAttr(kMaterializationChoiceGroupAttrName,
-                        rewriter.getI64IntegerAttr(bufferOffsetChoiceGroup));
-      replacement = variants;
-    }
     rewriter.modifyOpInPlace(
         add, [&] { add.getOffsetMutable().assign(replacement); });
     return success();
   }
 
   LogicalResult normalizeBufferOffsets() {
-    func.walk([&](MaterializationVariantsOp variants) {
-      if (auto group = variants->getAttrOfType<IntegerAttr>(
-              kMaterializationChoiceGroupAttrName))
-        bufferOffsetChoiceGroup =
-            std::max(bufferOffsetChoiceGroup, group.getInt() + 1);
-    });
     WalkResult result = func.walk([&](PtrAddOp add) {
       std::optional<PtrType> ptr = getPointerType(add.getBase().getType());
       if (ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr->getAddressSpace()))
@@ -794,7 +775,6 @@ private:
   sym::Store &store;
   DataFlowSolver &rangeSolver;
   unsigned nextSymbol = 0;
-  int64_t bufferOffsetChoiceGroup = 0;
 };
 
 struct WavePromoteGlobalToBufferPass
