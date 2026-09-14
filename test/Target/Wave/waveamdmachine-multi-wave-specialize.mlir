@@ -336,8 +336,7 @@ func.func @nested_regions(
   return
 }
 
-// DIAG: waveamd-machine-schedule region func=pressure_model
-// DIAG-SAME: action=apply reason=loop_wait
+// DIAG: waveamd-machine-schedule region func=pressure_model {{.*}}action=apply reason=loop_wait
 // DIAG-NEXT: waveamd-machine-schedule region func=pressure_model
 // DIAG-SAME: action=apply reason=loop_wait
 func.func @pressure_model(

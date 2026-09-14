@@ -76,8 +76,8 @@ unsigned getEventSimCmaIssueCount(Operation *op, SchedClass cls,
   return std::max(1u, issues);
 }
 
-int64_t getModelLoopTripCount(UniformLoopOp loop,
-                              const EventSimConfig &config) {
+static int64_t getModelLoopTripCount(UniformLoopOp loop,
+                                     const EventSimConfig &config) {
   if (config.tripCountOverride >= 0)
     return config.tripCountOverride;
   IntegerAttr trip =

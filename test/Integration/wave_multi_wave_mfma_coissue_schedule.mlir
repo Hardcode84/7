@@ -18,8 +18,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NEXT: waveamdmachine.v_pk_add_f32
 // CHECK-NEXT: waveamdmachine.v_pk_add_f32
 // CHECK-NEXT: waveamdmachine.mfma_f32_16x16x32_f16
-// DIAG: waveamd-machine-schedule region func=cohort_mfma_coissue_resource_fill
-// DIAG-SAME: action=apply reason=compute_resource
+// DIAG: waveamd-machine-schedule region func=cohort_mfma_coissue_resource_fill {{.*}}action=apply reason=compute_resource
 // DIAG-SAME: resource_stall_fills=3
 // DIAG-NEXT: waveamd-machine-schedule region func=cohort_mfma_coissue_resource_fill
 // DIAG-SAME: action=apply reason=compute_resource
@@ -122,8 +121,7 @@ func.func @cohort_mfma_result_stall_rejects_resource_fill(
 // CHECK: waveamdmachine.mfma_f32_32x32x16_f16
 // CHECK: waveamdmachine.v_add_f32
 // CHECK: waveamdmachine.mfma_f32_32x32x16_f16
-// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_fill
-// DIAG-SAME: action=apply reason=coexec_window
+// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_fill {{.*}}action=apply reason=coexec_window
 // DIAG-SAME: filled_gaps=2
 // DIAG-SAME: coexec_window_gaps=1
 // DIAG-NEXT: waveamd-machine-schedule region func=cohort_mfma_coexec_window_fill
@@ -183,8 +181,7 @@ func.func @cohort_mfma_coexec_window_fill(
 // CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
 // CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
 // CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
-// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_reject_salu
-// DIAG-SAME: action=apply reason=coexec_window
+// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_reject_salu {{.*}}action=apply reason=coexec_window
 // DIAG-SAME: coexec_window_gaps=1
 func.func @cohort_mfma_coexec_window_reject_salu(
     %cond: !waveamdmachine.reg<scc, 1>,
@@ -256,8 +253,7 @@ func.func @cohort_mfma_coexec_window_single_wave(
 // CHECK-NEXT: waveamdmachine.v_cmpx_eq_u32
 // CHECK-NEXT: waveamdmachine.mfma_f32_32x32x16_f16
 // CHECK-NEXT: waveamdmachine.v_pk_add_f32
-// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_reject_ready_packed
-// DIAG-SAME: action=keep reason=same_order
+// DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_reject_ready_packed {{.*}}action=keep reason=same_order
 // DIAG-SAME: filled_gaps=0
 // DIAG-SAME: coexec_window_gaps=1
 func.func @cohort_mfma_coexec_window_reject_ready_packed(

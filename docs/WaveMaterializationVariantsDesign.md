@@ -553,6 +553,10 @@ work queue, with per-candidate analysis, model, and diagnostic state. Preload
 required dialects and snapshot immutable target configuration before workers
 start.
 
+Use one scheduler walk for functions and candidate bodies. Keep the normal
+state resets at ordinary scheduling-region boundaries. Treat a candidate
+wrapper as an opaque separator that accepts and returns model state.
+
 At a candidate wrapper, copy the incoming greedy scheduler state for each
 candidate. Preserve pending memory events, value readiness, resource use, and
 issue position. Bind wrapper inputs to each candidate's private arguments.
@@ -638,21 +642,19 @@ a live wait, effect, or result keeps its carry alive. Do not infer alias
 ordering, add user token carries, or retain every token solely because of its
 type. Cleanup must not invoke register-allocation spill policy.
 
-## Frequency and scoring contract
+## Scheduling score contract
 
-Use the cost model's loop frequencies for candidate scheduling and event
-simulation. Preserve known trip counts through construction, carry pruning,
-and lowering. Distinguish pre-tested zero-trip loops from post-tested loops.
-Reject malformed counts. When a count is unknown, use the model estimate;
-missing metadata must not prevent compilation. Estimated cycles are a ranking
-metric, not a proof of runtime duration.
+Run the normal scheduling workflow in each candidate. Preserve the existing
+model policy for greedy choices and steady-state refinement. The pass does
+not calculate loop frequencies, replay runtime iterations, or use a separate
+branch-scoring strategy. Keep loop metadata intact for its existing consumers.
 
-Score predicted completion cycles for the current search region at fixed
-external model context. Include setup, loop bodies, required output completion,
-and exit effects. Keep device, launch, resident-wave configuration, calibration
-data, and simulator options equal across candidates. Copy the incoming
-scheduler state for each candidate. Continue with the winning candidate's
-state, including pending events and result readiness.
+Add the model completion-cycle increments from the scheduled regions in a
+candidate. Respect the normal state resets between those regions. The score
+is a scheduling estimate, not a proof of runtime duration. Keep device,
+launch, resident-wave configuration, calibration data, and model options equal
+across candidates. Copy the incoming scheduler state at each wrapper and
+continue with the winner's state, including pending events and result readiness.
 
 Select the candidate with minimum predicted region completion cycles. On an
 exact cycle tie, select the lowest trial index. Pressure and
@@ -745,7 +747,8 @@ Carry tests cover Wave/SCF and machine loops, nested loops, mutually dependent
 dead carries, live cross-carry dependencies, live control conditions,
 zero-trip results, attributes, and async DMA wait-token dependencies.
 
-Scoring tests cover missing and zero trip counts, nested frequency metadata,
+Scoring tests cover unchanged scheduling for missing, zero, and large loop
+counts, preserved nested loop metadata, ordinary region resets,
 finite region costs, cycle ties despite different pressure or instruction
 counts, definite pass failure despite another successful trial, and
 all-candidate rejection. Verify that only selected bodies reach allocation and

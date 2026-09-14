@@ -84,8 +84,7 @@ func.func @block_schedule(
 // CHECK-NEXT: waveamdmachine.v_xor_b32
 // CHECK-NEXT: waveamdmachine.v_add_u32
 // CHECK-NEXT: waveamdmachine.dma_issue_delay
-// DIAG: waveamd-machine-schedule region func=two_slot_replay_cohorts
-// DIAG-SAME: action=apply reason=loop_wait
+// DIAG: waveamd-machine-schedule region func=two_slot_replay_cohorts {{.*}}action=apply reason=loop_wait
 // DIAG-SAME: steady_state_refinements=3
 // DIAG-NEXT: waveamd-machine-schedule region func=two_slot_replay_cohorts
 // DIAG-SAME: action=apply reason=latency_priority
