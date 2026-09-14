@@ -1728,6 +1728,34 @@ static Value findM0Operand(Operation *op) {
   return {};
 }
 
+static bool eliminateRedundantM0Moves(func::FuncOp func) {
+  SmallVector<SMovM0Op> moves;
+  func.walk([&](SMovM0Op move) { moves.push_back(move); });
+  bool changed = false;
+  for (SMovM0Op move : moves) {
+    for (Operation *previous = move->getPrevNode(); previous;
+         previous = previous->getPrevNode()) {
+      // A nested region can change the physical M0 register. Do not infer its
+      // final value from the parent block.
+      if (previous->getNumRegions() != 0)
+        break;
+      if (!isWaveAMDMachineOp(previous))
+        continue;
+      HardwareResourceEffects effects = getHardwareResourceEffects(previous);
+      if (!llvm::is_contained(effects.writes, HardwareResourceKind::M0))
+        continue;
+      auto priorMove = dyn_cast<SMovM0Op>(previous);
+      if (priorMove && priorMove.getSource() == move.getSource()) {
+        move.getResult().replaceAllUsesWith(priorMove.getResult());
+        move.erase();
+        changed = true;
+      }
+      break;
+    }
+  }
+  return changed;
+}
+
 static std::optional<Value> findPreviousDmaM0(SAddM0I32Op add) {
   Value dmaM0;
   for (Operation *op = add->getPrevNode(); op; op = op->getPrevNode()) {
@@ -1922,6 +1950,7 @@ struct WaveAMDMachineCleanupPass
         changed |= combineMaxTrees(func);
         changed |= combineDirectPackedMulSub(func);
         changed |= combinePackedMulSubs(func, packedAccTupleCaches);
+        changed |= eliminateRedundantM0Moves(func);
         changed |= chainDmaM0Increments(func);
         changed |= foldVccCndmask(func);
         FailureOr<bool> uniformShiftChanged =

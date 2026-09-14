@@ -35,6 +35,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
 #include <array>
@@ -3166,6 +3167,40 @@ struct ScheduleScope {
   int64_t cycles = 0;
 };
 
+static int64_t getScoringTripCount(waveamdmachine::UniformLoopOp loop) {
+  IntegerAttr tripCount =
+      loop->getAttrOfType<IntegerAttr>("waveamdmachine.trip_count");
+  if (!tripCount)
+    return kMachineScheduleSteadyStateIterations;
+  return std::max<int64_t>(0, tripCount.getInt());
+}
+
+static int64_t getBlockExecutionCount(Block &block) {
+  uint64_t count = 1;
+  for (Operation *ancestor = block.getParentOp(); ancestor;
+       ancestor = ancestor->getParentOp()) {
+    auto loop = dyn_cast<waveamdmachine::UniformLoopOp>(ancestor);
+    if (!loop)
+      continue;
+    count = llvm::SaturatingMultiply(
+        count, static_cast<uint64_t>(getScoringTripCount(loop)));
+  }
+  return static_cast<int64_t>(
+      std::min<uint64_t>(count, std::numeric_limits<int64_t>::max()));
+}
+
+static void addScopeCycles(ScheduleScope &scope, Block &block,
+                           int64_t cycles) {
+  assert(cycles >= 0 && "schedule cycle increment must be nonnegative");
+  uint64_t weighted = llvm::SaturatingMultiply(
+      static_cast<uint64_t>(cycles),
+      static_cast<uint64_t>(getBlockExecutionCount(block)));
+  uint64_t total = llvm::SaturatingAdd(static_cast<uint64_t>(scope.cycles),
+                                       weighted);
+  scope.cycles = static_cast<int64_t>(
+      std::min<uint64_t>(total, std::numeric_limits<int64_t>::max()));
+}
+
 static unsigned
 recordCandidateScores(ArrayRef<std::unique_ptr<ScheduleScope>> candidates) {
   unsigned winner = 0;
@@ -3392,7 +3427,7 @@ struct WaveAMDMachineSchedulePass
         if (failed(processRegion(*region, arch, config, scope.origins,
                                  *scope.model, scope.timing, &state)))
           return failure();
-        scope.cycles += state.completionCycle - start;
+        addScopeCycles(scope, block, state.completionCycle - start);
         index += region->ops.size();
         continue;
       }
@@ -3420,10 +3455,12 @@ struct WaveAMDMachineSchedulePass
       resetIssueState(state, scope, arch, config);
     if (auto specialization = dyn_cast<waveamdmachine::UniformIfOp>(op);
         specialization && op->hasAttr(kMultiWaveScheduleAttr)) {
+      int64_t cycles = 0;
       if (failed(processSpecialization(
               specialization, arch, config, scope.origins, *scope.model,
-              scope.timing, &scope.diagnostics, state, scope.cycles)))
+              scope.timing, &scope.diagnostics, state, cycles)))
         return failure();
+      addScopeCycles(scope, *op->getBlock(), cycles);
       op->removeAttr(kMultiWaveScheduleAttr);
       return success();
     }

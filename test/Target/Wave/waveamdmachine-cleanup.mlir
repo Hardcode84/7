@@ -39,6 +39,80 @@ func.func @reuse_uniform_workitem_shift(%lane: !waveamdmachine.reg<vgpr, 1>)
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
+// CHECK-LABEL: func.func @deduplicate_m0_move(
+// CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0 [[BASE:%.*]]
+// CHECK: [[T0:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]] after
+// CHECK-NOT: waveamdmachine.s_mov_m0
+// CHECK: [[T1:%.*]] = waveamdmachine.buffer_load_lds_b128 {{.*}}, [[M0]] after [[T0]]
+// CHECK: return [[T1]]
+func.func @deduplicate_m0_move(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %m0 = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t0 = waveamdmachine.buffer_load_lds_b128
+      %off0, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %duplicate = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t1 = waveamdmachine.buffer_load_lds_b128
+      %off1, %desc, %soff, %duplicate after %t0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return %t1 : !waveamdmachine.mem.token
+}
+
+// CHECK-LABEL: func.func @keep_m0_move_after_write(
+// CHECK: [[FIRST:%.*]] = waveamdmachine.s_mov_m0 [[BASE:%.*]]
+// CHECK: waveamdmachine.buffer_load_lds_b128 {{.*}}, [[FIRST]] after
+// CHECK: [[OTHER_M0:%.*]] = waveamdmachine.s_mov_m0 [[OTHER:%.*]]
+// CHECK: waveamdmachine.buffer_load_lds_b128 {{.*}}, [[OTHER_M0]] after
+// CHECK: [[RESTORED:%.*]] = waveamdmachine.s_mov_m0 [[BASE]]
+// CHECK: waveamdmachine.buffer_load_lds_b128 {{.*}}, [[RESTORED]] after
+func.func @keep_m0_move_after_write(
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %other: !waveamdmachine.reg<sgpr, 1>,
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %first = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t0 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff, %first after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %other_m0 = waveamdmachine.s_mov_m0 %other
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t1 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff, %other_m0 after %t0
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %restored = waveamdmachine.s_mov_m0 %base
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %t2 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff, %restored after %t1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  return %t2 : !waveamdmachine.mem.token
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
 // CHECK-LABEL: func.func @combine_balanced_max_tree(
 // CHECK-SAME: [[A:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>
 // CHECK-SAME: [[B:%[^:]+]]: !waveamdmachine.reg<vgpr, 1>

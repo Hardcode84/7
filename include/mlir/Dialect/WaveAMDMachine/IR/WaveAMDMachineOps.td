@@ -1947,7 +1947,8 @@ def WaveAMDMachine_MaterializationVariantsTypesMatch : AllTypesMatch<["choices",
 }
 
 def WaveAMDMachine_MaterializationVariantsOp : WaveAMDMachine_Op<"materialization_variants", [
-    Pure, WaveAMDMachine_MaterializationVariantsTypesMatch,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    WaveAMDMachine_MaterializationVariantsTypesMatch,
     PredOpTrait<"at least one choice", CPred<"$_op.getNumOperands() != 0">>]> {
   let summary = "independent choice between equivalent materializations";
   let description = [{

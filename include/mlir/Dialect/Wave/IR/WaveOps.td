@@ -33,7 +33,8 @@ def Wave_MaterializationVariantsTypesMatch : AllTypesMatch<["choices", "result"]
 }
 
 def Wave_MaterializationVariantsOp : Wave_Op<"materialization_variants", [
-    Pure, Wave_MaterializationVariantsTypesMatch,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    Wave_MaterializationVariantsTypesMatch,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>,
     PredOpTrait<"at least one choice", CPred<"$_op.getNumOperands() != 0">>]> {
   let summary = "independent choice between equivalent materializations";

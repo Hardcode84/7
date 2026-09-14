@@ -37,6 +37,7 @@ struct EventSimConfig;
 namespace wave {
 
 inline constexpr unsigned kMultiWaveScheduleClassCount = 2;
+inline constexpr unsigned kMachineScheduleSteadyStateIterations = 4;
 
 struct ReadyScheduleWorkStats {
   uint64_t stateBuilds = 0;

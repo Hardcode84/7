@@ -730,6 +730,22 @@ def WaveAMDExpandMaterializationVariants
   let dependentDialects = ["waveamdmachine::WaveAMDMachineDialect"];
 }
 
+def WaveMaterializeMemoryVariants
+    : Pass<"wave-materialize-memory-variants"> {
+  let summary = "Duplicate memory operations for concrete address variants";
+  let description = [{
+    Replace a memory operation through a pointer-offset materialization choice
+    with one operation per concrete address. Put grouped choices on the
+    duplicated result values and tokens. All alternatives reach machine
+    selection with a complete address tree. Candidate construction removes the
+    alternatives that do not match its selected group index.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveAMDCollapseMaterializationVariants
     : Pass<"waveamd-collapse-materialization-variants"> {
   let summary = "Keep the lowest-cycle materialization candidate";

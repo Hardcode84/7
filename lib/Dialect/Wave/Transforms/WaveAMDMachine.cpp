@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
+#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/Dialect/Wave/IR/WaveAMDABI.h"
@@ -680,8 +681,16 @@ LogicalResult WaveAMDMachineSelector::run() {
     if (failed(selectOperation(op)))
       return failure();
 
-  for (Operation *op : llvm::reverse(opsToErase))
+  for (Operation *op : llvm::reverse(opsToErase)) {
+    if (!op->use_empty()) {
+      InFlightDiagnostic diag = op->emitError(
+          "machine selection left a source operation with live uses:");
+      for (Operation *user : op->getUsers())
+        diag << " " << user->getName();
+      return failure();
+    }
     op->erase();
+  }
 
   eraseDeadFoldedMmaAccumulatorMaterializations(
       foldedMmaAccumulatorMaterializations);
@@ -3056,7 +3065,14 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   Operation *parentOp = op->getBlock()->getParentOp();
   if (parentOp == func || isa<waveamdmachine::UniformLoopOp>(parentOp))
     builder.setInsertionPoint(op);
-  return llvm::TypeSwitch<Operation *, LogicalResult>(op)
+  Block *insertionBlock = builder.getInsertionBlock();
+  auto insertionPoint = builder.getInsertionPoint();
+  Operation *insertionBoundary =
+      insertionPoint == insertionBlock->end() ? nullptr : &*insertionPoint;
+  Operation *previous = insertionBoundary ? insertionBoundary->getPrevNode()
+                        : insertionBlock->empty() ? nullptr
+                                                  : &insertionBlock->back();
+  LogicalResult result = llvm::TypeSwitch<Operation *, LogicalResult>(op)
       .Case<MaterializationVariantsOp>(
           [&](auto choice) { return selectMaterializationVariants(choice); })
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
@@ -3143,6 +3159,45 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
         return op->emitError(
             "unsupported operation in WaveAMDMachine selection");
       });
+  if (failed(result))
+    return failure();
+
+  Attribute group = op->getAttr(kMaterializationChoiceGroupAttrName);
+  Attribute alternative = op->getAttr(kMaterializationAlternativeAttrName);
+  if (alternative) {
+    if (!group)
+      return op->emitError(
+          "materialization alternative requires a choice group");
+    llvm::SmallPtrSet<Operation *, 16> insertedOps;
+    Operation *inserted = previous                  ? previous->getNextNode()
+                          : insertionBlock->empty() ? nullptr
+                                                    : &insertionBlock->front();
+    while (inserted && inserted != insertionBoundary) {
+      insertedOps.insert(inserted);
+      inserted = inserted->getNextNode();
+    }
+
+    SmallVector<Value> pending;
+    for (Value resultValue : op->getResults()) {
+      auto selected = values.find(resultValue);
+      if (selected != values.end())
+        pending.push_back(selected->second);
+    }
+    llvm::SmallPtrSet<Operation *, 16> visited;
+    while (!pending.empty()) {
+      Operation *producer = pending.pop_back_val().getDefiningOp();
+      if (!producer || !insertedOps.contains(producer) ||
+          !visited.insert(producer).second)
+        continue;
+      if (!isMemoryEffectFree(producer)) {
+        producer->setAttr(kMaterializationChoiceGroupAttrName, group);
+        producer->setAttr(kMaterializationAlternativeAttrName, alternative);
+        continue;
+      }
+      llvm::append_range(pending, producer->getOperands());
+    }
+  }
+  return success();
 }
 
 LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantIntOp op) {
@@ -3592,8 +3647,13 @@ LogicalResult WaveAMDMachineSelector::selectMaterializationVariants(
   SmallVector<Value> choices;
   for (Value choice : op.getChoices())
     choices.push_back(expect(choice, op));
-  values[op.getResult()] = waveamdmachine::MaterializationVariantsOp::create(
+  auto selected = waveamdmachine::MaterializationVariantsOp::create(
       builder, op.getLoc(), choices.front().getType(), choices);
+  if (Attribute group = op->getAttr(kMaterializationChoiceGroupAttrName))
+    selected->setAttr(kMaterializationChoiceGroupAttrName, group);
+  if (Attribute owner = op->getAttr(kMaterializationEffectOwnerAttrName))
+    selected->setAttr(kMaterializationEffectOwnerAttrName, owner);
+  values[op.getResult()] = selected;
   eraseIfTopLevel(op);
   return success();
 }

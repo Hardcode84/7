@@ -47,11 +47,13 @@ permits a carried offset. Fixed-width arithmetic keeps its signed wrapping
 semantics during this proof. The original expression and carried offset are
 equivalent choices.
 
-Buffer normalization must preserve pointer arithmetic. Add an element-offset
-modulus only when the compiler proves that it leaves the offset unchanged.
-Keep negative and wider offsets intact. Machine selection determines whether
-the address fits buffer fields or requires a full address. No source attribute
-changes this decision.
+Buffer normalization must preserve pointer arithmetic. If the compiler proves
+that an element-offset modulus leaves the offset unchanged, use the modular
+offset directly. Otherwise, keep the full offset and the modular buffer offset
+as one coupled materialization choice. Duplicate the memory operations before
+machine selection so that each alternative contains a complete address tree.
+Machine selection determines whether the full address fits buffer fields or
+requires an addr64 instruction. No source attribute changes this decision.
 
 Each choice result has all integer bounds proven for its equivalent operands.
 Range analysis intersects those bounds and normalizes SIMD ranges to their
@@ -652,16 +654,22 @@ type. Cleanup must not invoke register-allocation spill policy.
 ## Scheduling score contract
 
 Run the normal scheduling workflow in each candidate. Preserve the existing
-model policy for greedy choices and steady-state refinement. The pass does
-not calculate loop frequencies, replay runtime iterations, or use a separate
-branch-scoring strategy. Keep loop metadata intact for its existing consumers.
+model policy for greedy choices and steady-state refinement. Candidate scoring
+does not use a separate scheduling strategy and does not replay iterations.
+Keep loop metadata intact for its existing consumers.
 
 Add the model completion-cycle increments from the scheduled regions in a
-candidate. Respect the normal state resets between those regions. The score
-is a scheduling estimate, not a proof of runtime duration. Keep device,
-launch, resident-wave configuration, calibration data, and model options equal
-across candidates. Copy the incoming scheduler state at each wrapper and
-continue with the winner's state, including pending events and result readiness.
+candidate. Multiply an increment in a loop body by the product of its enclosing
+loop trip counts. Use the static trip count when it is available. For a loop
+without a static trip count, use the same four-iteration horizon that the
+scheduler uses for steady-state refinement. This horizon
+includes the first recurrence and exposes recurring costs that amortize loop
+setup. Saturate the score if the product or sum exceeds the signed 64-bit
+range. Respect the normal state resets between regions. The score is a
+scheduling estimate, not a proof of runtime duration. Keep device, launch,
+resident-wave configuration, calibration data, and model options equal across
+candidates. Copy the incoming scheduler state at each wrapper and continue
+with the winner's state, including pending events and result readiness.
 
 Select the candidate with minimum predicted region completion cycles. On an
 exact cycle tie, select the lowest trial index. Pressure and
@@ -754,8 +762,8 @@ Carry tests cover Wave/SCF and machine loops, nested loops, mutually dependent
 dead carries, live cross-carry dependencies, live control conditions,
 zero-trip results, attributes, and async DMA wait-token dependencies.
 
-Scoring tests cover unchanged scheduling for missing, zero, and large loop
-counts, preserved nested loop metadata, ordinary region resets,
+Scoring tests cover estimated, zero, and large loop counts, nested loop-count
+products, preserved loop metadata, ordinary region resets,
 finite region costs, cycle ties despite different pressure or instruction
 counts, definite pass failure despite another successful trial, and
 all-candidate rejection. Verify that only selected bodies reach allocation and

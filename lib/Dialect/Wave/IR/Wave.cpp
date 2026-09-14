@@ -175,6 +175,12 @@ OpFoldResult MaterializationVariantsOp::fold(FoldAdaptor) {
   return {};
 }
 
+void MaterializationVariantsOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  if ((*this)->hasAttr(kMaterializationEffectOwnerAttrName))
+    effects.emplace_back(MemoryEffects::Write::get());
+}
+
 void MaterializationVariantsOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
   patterns.add<FlattenMaterializationVariants<MaterializationVariantsOp>>(

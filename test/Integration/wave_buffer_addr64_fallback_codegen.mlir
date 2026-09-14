@@ -5,9 +5,9 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // ASM-LABEL: buffer_addr64_fallback:
-// ASM: global_load_b32 v{{[0-9]+}}, v[{{[0-9]+}}:{{[0-9]+}}], off
+// ASM: buffer_load_b32 v{{[0-9]+}}, v{{[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], s{{[0-9]+}} offen
 // ASM: s_waitcnt vmcnt(0)
-// ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
+// ASM: buffer_store_b32 v{{[0-9]+}}, v{{[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], s{{[0-9]+}} offen
 func.func @buffer_addr64_fallback(
     %out: !wave.ptr<#wave.global, i32>, %raw: i32)
     attributes {wave.kernel,

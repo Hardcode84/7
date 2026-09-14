@@ -952,6 +952,7 @@ v9_beyond_hotloop:
 		s_and_saveexec_b64 s[56:57], s[34:35]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_3
 		buffer_store_dwordx2 v[8:9], v2, s[20:23], 0 offen
+		buffer_store_dwordx2 v[8:9], v2, s[20:23], 0 offen
 .Lv9_beyond_hotloop.exec_else_3:
 		s_andn2_b64 exec, s[56:57], s[34:35]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_endif_3
@@ -968,6 +969,7 @@ v9_beyond_hotloop:
 		s_and_saveexec_b64 s[56:57], s[36:37]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_4
 		buffer_store_dwordx2 v[10:11], v2, s[20:23], 0 offen
+		buffer_store_dwordx2 v[10:11], v2, s[20:23], 0 offen
 .Lv9_beyond_hotloop.exec_else_4:
 		s_andn2_b64 exec, s[56:57], s[36:37]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_endif_4
@@ -983,6 +985,7 @@ v9_beyond_hotloop:
 		v_lshl_add_u32 v2, v1, 3, v2
 		s_and_saveexec_b64 s[56:57], s[38:39]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_5
+		buffer_store_dwordx2 v[48:49], v2, s[20:23], 0 offen
 		buffer_store_dwordx2 v[48:49], v2, s[20:23], 0 offen
 .Lv9_beyond_hotloop.exec_else_5:
 		s_andn2_b64 exec, s[56:57], s[38:39]
@@ -1305,6 +1308,7 @@ v9_beyond_hotloop:
 		s_and_saveexec_b64 s[56:57], s[32:33]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_19
 		buffer_store_dwordx2 v[8:9], v2, s[20:23], 0 offen
+		buffer_store_dwordx2 v[8:9], v2, s[20:23], 0 offen
 .Lv9_beyond_hotloop.exec_else_19:
 		s_andn2_b64 exec, s[56:57], s[32:33]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_endif_19
@@ -1321,6 +1325,7 @@ v9_beyond_hotloop:
 		s_and_saveexec_b64 s[56:57], s[34:35]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_20
 		buffer_store_dwordx2 v[10:11], v2, s[20:23], 0 offen
+		buffer_store_dwordx2 v[10:11], v2, s[20:23], 0 offen
 .Lv9_beyond_hotloop.exec_else_20:
 		s_andn2_b64 exec, s[56:57], s[34:35]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_endif_20
@@ -1336,6 +1341,7 @@ v9_beyond_hotloop:
 		v_lshl_add_u32 v2, v1, 3, v2
 		s_and_saveexec_b64 s[56:57], s[2:3]
 		s_cbranch_execz .Lv9_beyond_hotloop.exec_else_21
+		buffer_store_dwordx2 v[12:13], v2, s[20:23], 0 offen
 		buffer_store_dwordx2 v[12:13], v2, s[20:23], 0 offen
 .Lv9_beyond_hotloop.exec_else_21:
 		s_andn2_b64 exec, s[56:57], s[2:3]
