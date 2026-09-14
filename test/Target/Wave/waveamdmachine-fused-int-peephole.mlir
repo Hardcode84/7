@@ -78,6 +78,30 @@ func.func @add_shift(%a: !waveamdmachine.reg<vgpr, 1>,
   return %out : !waveamdmachine.reg<vgpr, 1>
 }
 
+// A common scale belongs outside an addition. The fused form removes both
+// materialized shifts, including a scalar shift with a dead SCC result.
+// CHECK-LABEL: func.func @common_shift_add
+// CHECK-NOT: waveamdmachine.s_lshl_b32
+// CHECK-NOT: waveamdmachine.v_lshlrev_b32
+// CHECK-NOT: waveamdmachine.v_add_u32
+// CHECK: [[OUT:%.*]] = waveamdmachine.v_add_lshl_u32 %{{.*}}, %{{.*}}, %{{.*}}
+func.func @common_shift_add(%a: !waveamdmachine.reg<sgpr, 1>,
+                            %b: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
+  %one0 = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %one1 = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %sa, %scc = waveamdmachine.s_lshl_b32 %a, %one0
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+          -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %vb = waveamdmachine.v_lshlrev_b32 %b, %one1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm)
+          -> !waveamdmachine.reg<vgpr, 1>
+  %out = waveamdmachine.v_add_u32 %sa, %vb
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+  return %out : !waveamdmachine.reg<vgpr, 1>
+}
+
 // CHECK-LABEL: func.func @and_or
 // CHECK-NOT: waveamdmachine.v_and_b32
 // CHECK: [[OUT:%.*]] = waveamdmachine.v_and_or_b32

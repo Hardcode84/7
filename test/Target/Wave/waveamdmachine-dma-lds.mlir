@@ -557,12 +557,13 @@ func.func @buffer_dma_lds_bounded_source_soffset(
 // SELECT-DAG: %[[DESC:.*]] = waveamdmachine.make_buffer_rsrc
 // SELECT-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // SELECT-DAG: %[[USCALED:.*]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
-// SELECT-DAG: %[[X4:.*]] = waveamdmachine.v_lshlrev_b32
-// SELECT-DAG: %[[Y4:.*]] = waveamdmachine.v_lshlrev_b32
-// SELECT-DAG: %[[Z4:.*]] = waveamdmachine.v_lshlrev_b32
-// SELECT-DAG: %[[XY:.*]] = waveamdmachine.v_add_u32 %[[X4]], %[[Y4]]
-// SELECT-DAG: %[[XYZ:.*]] = waveamdmachine.v_add_u32 %[[XY]], %[[Z4]]
-// SELECT: waveamdmachine.buffer_load_lds_b128 %[[XYZ]], %[[DESC]], %[[USCALED]],
+// SELECT-DAG: %[[X:.*]] = waveamdmachine.v_mbcnt_hi
+// SELECT-DAG: %[[Y:.*]] = waveamdmachine.v_add_u32 {{.*}}, %[[X]]
+// SELECT-DAG: %[[Z:.*]] = waveamdmachine.v_add_u32 {{.*}}, %[[X]]
+// SELECT-DAG: %[[XY:.*]] = waveamdmachine.v_add_u32 %[[X]], %[[Y]]
+// SELECT-DAG: %[[XYZ:.*]] = waveamdmachine.v_add_u32 %[[XY]], %[[Z]]
+// SELECT-DAG: %[[VBYTES:.*]] = waveamdmachine.v_lshlrev_b32 %[[XYZ]],
+// SELECT: waveamdmachine.buffer_load_lds_b128 %[[VBYTES]], %[[DESC]], %[[USCALED]],
 
 // ASM-LABEL: buffer_dma_lds_lane_terms_before_uniform:
 // ASM: buffer_load_dwordx4 {{.*}}, s{{[0-9]+}} offen lds

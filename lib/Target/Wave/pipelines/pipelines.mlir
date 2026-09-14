@@ -147,8 +147,11 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rpz = transform.apply_registered_pass "waveamd-pack-vgpr-zero-moves" to %rpds
         : (!transform.any_op) -> !transform.any_op
+    %rint = transform.apply_registered_pass
+        "waveamd-postschedule-int-canonicalize"
+        to %rpz : (!transform.any_op) -> !transform.any_op
     // Preserve structured exec_if until waits see real control flow.
-    %r6 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rpz
+    %r6 = transform.apply_registered_pass "waveamd-insert-ticket-waits" to %rint
         : (!transform.any_op) -> !transform.any_op
     %r7 = transform.apply_registered_pass "waveamd-insert-hazard-waits" to %r6
         : (!transform.any_op) -> !transform.any_op

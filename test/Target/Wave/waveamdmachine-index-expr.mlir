@@ -35,6 +35,33 @@ func.func @mixed_offset(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes 
   return
 }
 
+// A common coefficient is materialized after the sum. This keeps the common
+// scale visible for target-specific fused-add formation.
+// CHECK-LABEL: func.func @factored_common_scale
+// CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// CHECK: %[[WGID:.*]] = waveamdmachine.s_workgroup_id_y
+// CHECK-NOT: waveamdmachine.s_lshl_b32
+// CHECK: %[[SUM:.*]] = waveamdmachine.v_add_u32 %[[WGID]], %[[LANE]]
+// CHECK: %[[SCALED:.*]] = waveamdmachine.v_lshlrev_b32 %[[SUM]],
+// CHECK: waveamdmachine.global_store_b32 %[[SCALED]],
+func.func @factored_common_scale(%out: !wave.ptr<#wave.global, i32>)
+    attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %wgid_raw = wave.workgroup_id 1
+  %wgid = wave.assume %wgid_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %off = wave.index_expr <"2*lid + 2*wgid"> ["lid", "wgid"]
+      (%lane, %wgid)
+      : (!wave.simd<i32, 32>, i32) -> !wave.simd<index, 32>
+  %ptrs = wave.ptr_add %out, %off
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+  %token = wave.store %lane -> %ptrs
+      : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
+      -> !wave.mem.token
+  return
+}
+
 // CHECK-LABEL: func.func @shallow_factored_root_add
 // CHECK: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // CHECK: %[[WGID:.*]] = waveamdmachine.s_workgroup_id_y
@@ -149,9 +176,8 @@ func.func @raw_simd_index_offset(%out: !wave.ptr<#wave.global, i32>,
 // CHECK: %[[WGX:.*]] = waveamdmachine.s_workgroup_id_x
 // CHECK: %[[WGY:.*]] = waveamdmachine.s_workgroup_id_y
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[SX:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGX]],
-// CHECK: %[[SY:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[WGY]],
-// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[SX]], %[[SY]]
+// CHECK: %[[SSUM:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[WGX]], %[[WGY]]
+// CHECK: %[[SBYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SSUM]],
 // CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]],{{.*}}, %[[SBYTE]] offset 32
 func.func @buffer_buckets(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -384,8 +410,9 @@ func.func @whole_field_proof_selects_cheaper_material_form(
 // CHECK: %[[Q:.*]], %{{.*}} = waveamdmachine.s_lshr_b32 %[[HI]], %[[SHIFT]]
 // CHECK: %[[DIVISOR:.*]] = waveamdmachine.imm 3
 // CHECK: %[[SCALED:.*]] = waveamdmachine.s_mul_i32 %[[Q]], %[[DIVISOR]]
-// CHECK: waveamdmachine.s_xor_b32 %[[SCALED]],
-// CHECK: waveamdmachine.s_add_i32 %[[RAW]],
+// CHECK: %[[NOT:[^,]+]], %{{.*}} = waveamdmachine.s_xor_b32 %[[SCALED]],
+// CHECK: %[[NEG:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[NOT]],
+// CHECK: waveamdmachine.s_add_i32 %[[RAW]], %[[NEG]]
 func.func @non_power_of_two_mod_uniform(%out: !wave.ptr<#wave.global, i32>,
                                         %raw_in: i32)
     attributes {wave.kernel} {
@@ -407,8 +434,8 @@ func.func @non_power_of_two_mod_uniform(%out: !wave.ptr<#wave.global, i32>,
 // CHECK: %[[Q:.*]] = waveamdmachine.v_lshrrev_b32 %[[HI]], %[[SHIFT]]
 // CHECK: %[[DIVISOR:.*]] = waveamdmachine.imm 3
 // CHECK: %[[SCALED:.*]] = waveamdmachine.v_mul_lo_u32 %[[Q]], %[[DIVISOR]]
-// CHECK: waveamdmachine.v_xor_b32 %[[SCALED]],
-// CHECK: waveamdmachine.v_add_u32 %[[LANE]],
+// CHECK-NOT: waveamdmachine.v_xor_b32
+// CHECK: waveamdmachine.v_sub_u32 %[[LANE]], %[[SCALED]]
 func.func @non_power_of_two_mod_lane(%out: !wave.ptr<#wave.global, i32>,
                                      %x: i32)
     attributes {wave.kernel} {
@@ -614,9 +641,8 @@ func.func @flat_nary_integer_or(%u_raw: i32, %v_raw: i32)
 // CHECK-DAG: %[[U:.*]] = waveamdmachine.arg {index = 1 : i64, pointer = false}
 // CHECK-DAG: %[[V:.*]] = waveamdmachine.arg {index = 2 : i64, pointer = false}
 // CHECK-DAG: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
-// CHECK: %[[VSCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[V]],
-// CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]],
-// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_add_u32 %[[VSCALE]], %[[VBYTE]]
+// CHECK: %[[VSUM:.*]] = waveamdmachine.v_add_u32 %[[V]], %[[LANE]]
+// CHECK: %[[VOFFSET:.*]] = waveamdmachine.v_lshlrev_b32 %[[VSUM]],
 // CHECK: %[[USCALE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[U]],
 // CHECK: waveamdmachine.buffer_store_b32 %[[VOFFSET]], {{.*}}, {{.*}}, %[[USCALE]]
 func.func @buffer_subset_packs_uniform_slots(%out: !wave.ptr<#wave.global, i32>,
@@ -645,9 +671,8 @@ func.func @buffer_subset_packs_uniform_slots(%out: !wave.ptr<#wave.global, i32>,
 // CHECK: %[[LOOP:.*]] = waveamdmachine.uniform_loop
 // CHECK: ^bb0(%[[IV:.*]]: !waveamdmachine.reg<sgpr, 1>):
 // CHECK: %[[VBYTE:.*]] = waveamdmachine.v_lshlrev_b32
-// CHECK: %[[OUTER_BYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[OUTER]],
-// CHECK: %[[IV_BYTE:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[IV]],
-// CHECK: %[[SOFFSET:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[OUTER_BYTE]], %[[IV_BYTE]]
+// CHECK: %[[SSUM:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %[[OUTER]], %[[IV]]
+// CHECK: %[[SOFFSET:[^,]+]], %{{.*}} = waveamdmachine.s_lshl_b32 %[[SSUM]],
 // CHECK: waveamdmachine.buffer_store_b32 %[[VBYTE]], {{.*}}, {{.*}}, %[[SOFFSET]]
 func.func @uniform_depth_order(%out: !wave.ptr<#wave.global, i32>,
                                %outer_raw: i32, %n: i32) attributes {wave.kernel} {

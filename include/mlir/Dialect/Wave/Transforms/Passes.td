@@ -481,6 +481,20 @@ def WaveAMDFormFusedInt
   ];
 }
 
+def WaveAMDPostScheduleIntCanonicalize
+    : Pass<"waveamd-postschedule-int-canonicalize"> {
+  let summary = "Canonicalize scheduled WaveAMDMachine integer operations";
+  let description = [{
+    Contracts multi-operation integer idioms only after machine scheduling has
+    fixed the instruction order. The pass preserves the scheduled consumer's
+    position and attributes, and it removes single-use producer operations.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "waveamdmachine::WaveAMDMachineDialect"
+  ];
+}
+
 def WaveAMDCrossLanePeepholes
     : Pass<"waveamd-cross-lane-peepholes"> {
   let summary = "Form cheaper WaveAMDMachine cross-lane ops";

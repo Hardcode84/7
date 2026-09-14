@@ -654,6 +654,55 @@ FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                 const llvm::StringMap<Value> &subs,
                                 ArrayRef<sym::PredHandle> assumptions,
                                 IndexExprAddOrder addOrder) {
+  sym::ExprView view(expr);
+  std::optional<int64_t> commonScale;
+  unsigned nonzeroParts = 0;
+  auto includeCoefficient = [&](sym::ExprHandle coefficient) {
+    std::optional<int64_t> value = staticIntLiteral(coefficient);
+    if (value && *value == 0)
+      return;
+    if (!value || *value < 0 || !llvm::isPowerOf2_64(*value)) {
+      commonScale = 0;
+      return;
+    }
+    ++nonzeroParts;
+    if (!commonScale)
+      commonScale = *value;
+    else if (*commonScale != *value)
+      commonScale = 0;
+  };
+  includeCoefficient(view.getAddConstant());
+  for (uint32_t i = 0, e = view.getAddTermCount(); i != e; ++i)
+    includeCoefficient(view.getAddTerm(i).coefficient);
+
+  // Keep a shared power-of-two scale outside the sum. Besides reducing the
+  // number of shifts, this exposes (a + b) << k to the fused-int pass.
+  if (nonzeroParts >= 2 && commonScale && *commonScale > 1 &&
+      llvm::isUInt<32>(*commonScale)) {
+    sym::ExprHandle quotient;
+    {
+      FailureOr<std::unique_ptr<sym::Analysis>> analysis =
+          sym::Analysis::create(S.symbolStore());
+      if (failed(analysis))
+        return user->emitError(
+            "wave.index_expr failed to analyze common scale");
+      sym::ExactDivideResult divided =
+          (*analysis)->tryExactDivide(expr, *commonScale);
+      if (divided.status != sym::ExactDivideStatus::Proven)
+        return user->emitError(
+            "wave.index_expr failed to divide proven common scale");
+      quotient = divided.quotient;
+    }
+    FailureOr<Value> sum = materializeIndexExprNode(S, quotient, user, subs,
+                                                    assumptions, addOrder);
+    if (failed(sum))
+      return failure();
+    Value factor = createImm(S.builder, user->getLoc(), *commonScale);
+    if (S.isUniformValue(*sum))
+      return S.mulUniformValues(user->getLoc(), *sum, factor);
+    return S.mulIndexValues(user->getLoc(), *sum, factor);
+  }
+
   std::unique_ptr<sym::Analysis> analysis;
   FailureOr<bool> rational = canMaterializeIntegerRationalExpr(
       S, expr, user, subs, assumptions, analysis);
@@ -759,28 +808,6 @@ static Value addIndexValues(WaveAMDMachineSelector &S, Location loc, Value lhs,
   return S.addByteOffsets(loc, lhs, rhs);
 }
 
-static Value xorPreservingDomain(WaveAMDMachineSelector &S, Location loc,
-                                 Value value, int64_t rhs) {
-  if (std::optional<int64_t> imm = S.getImmediateValue(value))
-    return createImm(S.builder, loc,
-                     static_cast<int64_t>(static_cast<uint32_t>(*imm) ^
-                                          static_cast<uint32_t>(rhs)));
-  Value rhsValue = createImm(S.builder, loc, rhs);
-  if (S.isUniformValue(value))
-    return waveamdmachine::SXorB32Op::create(
-               S.builder, loc,
-               getRegType(S.builder.getContext(),
-                          waveamdmachine::RegClass::SGPR),
-               getSCCType(S.builder.getContext()), S.ensureSGPR1(loc, value),
-               rhsValue)
-        .getResult();
-  value = S.ensureVGPRForVSrc1(loc, value);
-  return waveamdmachine::VXorB32Op::create(
-      S.builder, loc,
-      getRegType(S.builder.getContext(), waveamdmachine::RegClass::VGPR), value,
-      rhsValue);
-}
-
 static Value subIndexValues(WaveAMDMachineSelector &S, Location loc, Value lhs,
                             Value rhs) {
   std::optional<int64_t> lhsImm = S.getImmediateValue(lhs);
@@ -790,9 +817,32 @@ static Value subIndexValues(WaveAMDMachineSelector &S, Location loc, Value lhs,
         static_cast<uint32_t>(*lhsImm) - static_cast<uint32_t>(*rhsImm);
     return createImm(S.builder, loc, static_cast<int64_t>(diff));
   }
-  Value notRhs = xorPreservingDomain(S, loc, rhs, -1);
-  Value negRhs = addIndexValues(S, loc, notRhs, createImm(S.builder, loc, 1));
-  return addIndexValues(S, loc, lhs, negRhs);
+
+  MLIRContext *context = S.builder.getContext();
+  if (S.isUniformValue(lhs) && S.isUniformValue(rhs)) {
+    // Preserve the expanded dependency graph through scheduling. The
+    // post-schedule integer canonicalizer contracts it to s_sub_i32 after the
+    // schedule is fixed.
+    rhs = S.ensureSGPR1(loc, rhs);
+    Value minusOne = createImm(S.builder, loc, -1);
+    Value inverted =
+        waveamdmachine::SXorB32Op::create(
+            S.builder, loc, getRegType(context, waveamdmachine::RegClass::SGPR),
+            getSCCType(context), rhs, minusOne)
+            .getResult();
+    Value negated =
+        S.addUniformBytes(loc, inverted, createImm(S.builder, loc, 1));
+    return S.addUniformBytes(loc, S.materializeSGPR1(loc, lhs), negated);
+  }
+
+  rhs = S.ensureVGPRForVSrc1(loc, rhs);
+  Type resultType = getRegType(context, waveamdmachine::RegClass::VGPR);
+  if (S.target && S.target->isa.Major == 8)
+    return waveamdmachine::VSubU32VccOp::create(S.builder, loc, resultType,
+                                                getVCCType(context), lhs, rhs)
+        .getResult();
+  return waveamdmachine::VSubU32Op::create(S.builder, loc, resultType, lhs,
+                                           rhs);
 }
 
 static Value mulHiU32(WaveAMDMachineSelector &S, Location loc, Value value,
