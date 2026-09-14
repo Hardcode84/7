@@ -467,7 +467,7 @@ def WaveAMDPackVGPRZeroMoves
 
 def WaveAMDFormFusedInt
     : Pass<"waveamd-form-fused-int"> {
-  let summary = "Form fused integer WaveAMDMachine VALU ops";
+  let summary = "Form fused integer WaveAMDMachine ops";
   let description = [{
     Function-local greedy peephole over selected WaveAMDMachine integer ops.
     The pass only rewrites same-block single-use producer/consumer chains into

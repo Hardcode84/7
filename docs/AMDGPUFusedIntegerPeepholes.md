@@ -1,6 +1,6 @@
 # AMDGPU Fused Integer Peepholes
 
-Local WaveAMDMachine greedy rewrite pass. It forms typed fused VALU ops when
+Local WaveAMDMachine greedy rewrite pass. It forms typed scalar and vector ops when
 the replacement is target-legal, semantics-exact, and cheaper after copies and
 pressure.
 
@@ -42,6 +42,17 @@ users.
 
 Commutative operands may be swapped only for that instruction. Do not rebuild
 larger expression trees outside the local add-base factoring patterns.
+
+## Scalar Subtraction
+
+Replace `lhs + (~rhs + 1)` with `s_sub_i32 lhs, rhs`. Require single-use
+XOR and negation results, and unused SCC results on all three operations.
+The outer add and subtraction have different overflow flags when `rhs` is
+`INT_MIN`. Keep a shared chain or a chain with a live SCC result.
+
+Run this rewrite in the early integer fusion pass. The replacement extends
+`rhs` lifetime to the outer add. Scheduling and register allocation must see
+that lifetime before they assign physical registers.
 
 ## Uniform Values
 

@@ -1548,6 +1548,47 @@ struct AddFusionPattern : public OpRewritePattern<VAddU32Op> {
   llvm::AMDGPU::IsaVersion isa;
 };
 
+struct ScalarSubtractionPattern : public OpRewritePattern<SAddI32Op> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SAddI32Op op,
+                                PatternRewriter &rewriter) const override {
+    // Add overflow differs from subtraction overflow at INT_MIN.
+    if (!op.getScc().use_empty())
+      return failure();
+    if (succeeded(tryContract(op, op.getLhs(), op.getRhs(), rewriter)))
+      return success();
+    return tryContract(op, op.getRhs(), op.getLhs(), rewriter);
+  }
+
+  static LogicalResult tryContract(SAddI32Op op, Value lhs, Value negated,
+                                   PatternRewriter &rewriter) {
+    SAddI32Op negate = matchDeadSCCSAddProducer(negated, op);
+    if (!negate || !isa<RegType>(lhs.getType()) ||
+        getMachineImmValue(negate.getRhs()) != 1)
+      return failure();
+    Value inverted = negate.getLhs();
+    SXorB32Op bitwiseNot = matchSingleUseProducer<SXorB32Op>(inverted, negate);
+    if (!bitwiseNot || !bitwiseNot.getScc().use_empty())
+      return failure();
+    Value rhs;
+    if (getMachineImmValue(bitwiseNot.getLhs()) == -1)
+      rhs = bitwiseNot.getRhs();
+    else if (getMachineImmValue(bitwiseNot.getRhs()) == -1)
+      rhs = bitwiseNot.getLhs();
+    else
+      return failure();
+    SSubI32Op sub =
+        SSubI32Op::create(rewriter, op.getLoc(), op.getResult().getType(),
+                          op.getScc().getType(), lhs, rhs);
+    sub->setAttrs(op->getAttrs());
+    rewriter.replaceOp(op, sub->getResults());
+    rewriter.eraseOp(negate);
+    rewriter.eraseOp(bitwiseNot);
+    return success();
+  }
+};
+
 struct M0AddFusionPattern : public OpRewritePattern<SMovM0Op> {
   M0AddFusionPattern(MLIRContext *context)
       : OpRewritePattern<SMovM0Op>(context) {}
@@ -1623,7 +1664,7 @@ static bool hasFusedIntCandidate(func::FuncOp func) {
   WalkResult result = func.walk([&](Operation *op) {
     if (!isa<VAddU32Op, VAdd3U32Op, VLshlrevB32Op, VLshrrevB32Op, VAndB32Op,
              VOrB32Op, VXorB32Op, VLshlAddU32Op, VAddLshlU32Op, VAndOrB32Op,
-             VOr3B32Op, SMovM0Op>(op))
+             VOr3B32Op, SMovM0Op, SAddI32Op>(op))
       return WalkResult::advance();
     found = true;
     return WalkResult::interrupt();
@@ -1648,7 +1689,7 @@ static LogicalResult runOnFunc(func::FuncOp func) {
     return func.emitError("IntegerRangeAnalysis failed for fused-int pass");
 
   patterns.add<Mad24FusionPattern>(func.getContext(), *isa, solver);
-  patterns.add<M0AddFusionPattern>(func.getContext());
+  patterns.add<M0AddFusionPattern, ScalarSubtractionPattern>(func.getContext());
   patterns.add<ScalarAddBaseFactorPattern>(func.getContext(), *isa);
   patterns
       .add<AddChainFactorPattern<VAddU32Op>, AddChainFactorPattern<VAdd3U32Op>>(
