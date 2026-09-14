@@ -197,6 +197,56 @@ static LogicalResult tryFuseScalarAdd(PatternRewriter &rewriter, VAddU32Op op,
   return failure();
 }
 
+struct ShiftedAddend {
+  Value source;
+  Value amount;
+  Operation *producer;
+};
+
+static std::optional<ShiftedAddend> matchShiftedAddend(Value value,
+                                                       VAddU32Op consumer) {
+  if (VLshlrevB32Op shift =
+          matchSingleUseProducer<VLshlrevB32Op>(value, consumer))
+    return ShiftedAddend{shift.getLhs(), shift.getRhs(), shift};
+
+  SLshlB32Op shift = value.getDefiningOp<SLshlB32Op>();
+  if (!shift || shift->getBlock() != consumer->getBlock() ||
+      !shift.getResult().hasOneUse() || !shift.getScc().use_empty())
+    return std::nullopt;
+  return ShiftedAddend{shift.getLhs(), shift.getRhs(), shift};
+}
+
+static bool haveSameShiftAmount(Value lhs, Value rhs) {
+  if (lhs == rhs)
+    return true;
+  std::optional<int64_t> lhsImm = getMachineImmValue(lhs);
+  std::optional<int64_t> rhsImm = getMachineImmValue(rhs);
+  return lhsImm && rhsImm && *lhsImm == *rhsImm;
+}
+
+static LogicalResult tryFactorCommonShift(PatternRewriter &rewriter,
+                                          VAddU32Op op,
+                                          const llvm::AMDGPU::IsaVersion &isa) {
+  std::optional<ShiftedAddend> lhs = matchShiftedAddend(op.getLhs(), op);
+  std::optional<ShiftedAddend> rhs = matchShiftedAddend(op.getRhs(), op);
+  if (!lhs || !rhs || lhs->producer == rhs->producer ||
+      !haveSameShiftAmount(lhs->amount, rhs->amount))
+    return failure();
+
+  std::array<Value, 3> operands = {lhs->source, rhs->source, lhs->amount};
+  if (!canCreateTernary<VAddLshlU32Op>(operands, isa))
+    return failure();
+
+  VAddLshlU32Op fused =
+      VAddLshlU32Op::create(rewriter, op.getLoc(), op.getResult().getType(),
+                            operands[0], operands[1], operands[2]);
+  fused->setAttrs(op->getAttrs());
+  rewriter.replaceOp(op, fused.getResult());
+  rewriter.eraseOp(lhs->producer);
+  rewriter.eraseOp(rhs->producer);
+  return success();
+}
+
 static bool isScalarAddBaseHardBoundary(Operation *op) {
   if (!isWaveAMDMachineOp(op))
     return true;
@@ -1479,6 +1529,8 @@ struct AddFusionPattern : public OpRewritePattern<VAddU32Op> {
 
   LogicalResult matchAndRewrite(VAddU32Op op,
                                 PatternRewriter &rewriter) const override {
+    if (succeeded(tryFactorCommonShift(rewriter, op, isa)))
+      return success();
     if (succeeded(tryFuseNestedBinary<VLshlrevB32Op, VLshlAddU32Op>(rewriter,
                                                                     op, isa)))
       return success();

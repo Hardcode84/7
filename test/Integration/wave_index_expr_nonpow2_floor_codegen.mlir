@@ -38,8 +38,7 @@ func.func @floor_div_3(%input: !wave.ptr<#wave.global, i32>,
 // ASM-LABEL: floor_div_7:
 // ASM: buffer_load_dword
 // ASM: v_mul_hi_u32
-// ASM: v_xor_b32
-// ASM: v_add3_u32
+// ASM: v_sub_u32
 // ASM: v_lshrrev_b32
 // ASM: v_add_u32
 // ASM: buffer_store_dword

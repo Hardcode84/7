@@ -150,12 +150,13 @@
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:4096
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
-// MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 // MXFP4-PERF-ASM: ds_add_rtn_u32
+// MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 // MXFP4-PERF-ASM: [[MXFP4_WAIT:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // MXFP4-PERF-ASM: ds_read_b32
 // MXFP4-PERF-ASM: s_cbranch_scc1 [[MXFP4_WAIT]]
-// MXFP4-PERF-ASM: buffer_load_dwordx4 {{.*}} lds
+// MXFP4-PERF-ASM: s_barrier
+// MXFP4-PERF-ASM: ds_read_b64_tr_b8
 // MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
