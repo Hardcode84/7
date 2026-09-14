@@ -86,7 +86,13 @@ static LogicalResult checkScope(unsigned limit, CandidateScope &scope) {
   }
   for (MaterializationVariantsOp choice : scope.choices) {
     size_t arity = choice.getChoices().size();
-    scope.count = arity > limit / scope.count ? limit : scope.count * arity;
+    if (arity > limit / scope.count) {
+      scope.count = limit;
+      choice.emitRemark() << "candidate limit reached; exploring first "
+                          << limit << " assignments in operand order";
+      break;
+    }
+    scope.count *= arity;
   }
   return success();
 }

@@ -129,7 +129,8 @@ Each search region has a configurable candidate limit. The driver retains
 the first assignments in stable operand order, up to this limit. Larger search
 spaces do not cause compilation to fail. Each retained assignment resolves all
 choices. The limit bounds exploration; it does not prove that the retained
-assignments contain the lowest-cost candidate.
+assignments contain the lowest-cost candidate. A remark identifies each scope
+whose search stops at the limit.
 
 The producer owns fixed-width semantics, definedness, and dominance. The model
 owns target cost, occupancy policy, and legal resource limits. Candidate
@@ -440,9 +441,23 @@ stay outside each wrapper.
 The pass caps each candidate count before cloning. `max-candidates` must be
 positive. The first choice changes slowest. If the full product exceeds the
 cap, the pass retains its first `max-candidates` assignments.
+It reports the cap once per affected scope.
 It computes capped counts without overflow. It creates private input arguments
 serially, then clones and resolves each assignment in parallel. Dead operations
 are removed within each candidate. External uses receive the wrapper results.
+
+Each choice is an independent dimension, including choices with different
+operand counts. Data and explicit token edges determine which scopes merge.
+A load result can feed a store whose address uses another choice. An address
+can combine several choices. Enumerate their joint assignments within the
+merged scope; do not couple choices by operand ordinal.
+
+Machine selection lowers each value choice directly. Memory operations remain
+single operations until scope expansion clones the complete region. Their
+result and token edges use the same clone mapping as all other SSA edges.
+Thus each candidate contains one copy of each required memory operation.
+Collapse removes every losing region, including its side effects. No choice
+group attributes or separate memory-alternative cloning pass are required.
 
 Scope formation uses SSA edges, including explicit memory tokens. It does not
 infer memory ordering. Separate scopes alone do not prove that model costs are

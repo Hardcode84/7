@@ -721,7 +721,8 @@ def WaveAMDExpandMaterializationVariants
     that overlap or share this setup. Keep independent loops in separate scopes.
     Block terminators and machine return instructions stay outside the wrapper.
     Enumerate up to max-candidates assignments in operand order, with the first
-    choice changing slowest. Clone candidates with private block arguments, resolve choices,
+    choice changing slowest. Report when the limit bounds the search.
+    Clone candidates with private block arguments, resolve choices,
     and remove dead operations. This pass does not select or score candidates.
   }];
   let options = [Option<"maxCandidates", "max-candidates", "unsigned", "16",
