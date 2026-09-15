@@ -1035,3 +1035,61 @@ func.func @lane_varying_modular_stride(%n: i32) attributes {wave.kernel} {
   }
   return
 }
+
+// -----
+
+// CHECK-LABEL: func.func @negative_dividend_remainder_stays
+// CHECK: scf.for
+// CHECK: [[REM:%.*]] = wave.binary remsi
+// CHECK: wave.index_expr <"4*slot"> ["slot"]([[REM]])
+
+func.func @negative_dividend_remainder_stays(
+    %a: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %c0 = arith.constant -8 : i32
+  %c1 = arith.constant 1 : i32
+  %c4 = arith.constant 4 : i32
+  %c8 = arith.constant 0 : i32
+  scf.for %i = %c0 to %c8 step %c1 : i32 {
+    %bounded = wave.assume %i as "i"
+        [#wave.pred<"i >= -8">, #wave.pred<"i <= -1">] : i32
+    %slot = wave.binary remsi %bounded, %c4 : i32, i32 -> i32
+    %off = wave.index_expr <"4*slot"> ["slot"](%slot)
+        : (i32) -> index
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %v, %t = wave.load %p
+        : (!wave.ptr<#wave.global, i32>)
+        -> (!wave.simd<i32, 32>, !wave.mem.token)
+  }
+  return
+}
+
+
+// -----
+
+// CHECK-LABEL: func.func @negative_divisor_remainder_stays
+// CHECK: scf.for
+// CHECK: [[REM:%.*]] = wave.binary remsi
+// CHECK: wave.index_expr <"4*slot"> ["slot"]([[REM]])
+
+func.func @negative_divisor_remainder_stays(
+    %a: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c4 = arith.constant 4 : i32
+  %c8 = arith.constant 8 : i32
+  scf.for %i = %c0 to %c8 step %c1 : i32 {
+    %bounded = wave.assume %i as "i"
+        [#wave.pred<"i >= 0">, #wave.pred<"i <= 7">] : i32
+    %negative = arith.constant -4 : i32
+    %slot = wave.binary remsi %bounded, %negative : i32, i32 -> i32
+    %off = wave.index_expr <"4*slot"> ["slot"](%slot)
+        : (i32) -> index
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %v, %t = wave.load %p
+        : (!wave.ptr<#wave.global, i32>)
+        -> (!wave.simd<i32, 32>, !wave.mem.token)
+  }
+  return
+}
