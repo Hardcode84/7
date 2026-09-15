@@ -49,7 +49,7 @@ namespace mlir::wave::wmsel {
 // through `Const` / `Uniform` paths can land in `instOffset` / `soffset`;
 // anything reaching a `Lane` symbol falls through to `voffset`.
 enum class TermKind { Const = 0, Uniform = 1, Lane = 2 };
-enum class IndexExprAddOrder { UniformFirst, LaneFirst };
+enum class IndexExprAddOrder { UniformFirst, LaneFirst, LoopDepthFirst };
 
 enum class CmpRelation { Eq, Ne, Lt, Le, Gt, Ge };
 
@@ -281,9 +281,9 @@ matchSelectedBufferSources(WaveAMDMachineSelector &S, Operation *user,
 
 bool hasOnlyVOffsetField(const AddressPlan &plan);
 
-LogicalResult rebaseSelectedBufferPlan(WaveAMDMachineSelector &S,
-                                       const AddressPlan &active,
-                                       AddressPlan &inactive);
+LogicalResult normalizeSelectedBufferPlans(WaveAMDMachineSelector &S,
+                                           AddressPlan &active,
+                                           AddressPlan &inactive);
 
 std::optional<Value> lookupSelectedPointerVOffset(WaveAMDMachineSelector &S,
                                                   Value ptr);

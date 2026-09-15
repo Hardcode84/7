@@ -204,21 +204,19 @@ func.func @buffer_load_tuple_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wa
 // SELECT-LABEL: func.func @buffer_selected_oob_load
 // SELECT: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // SELECT: %[[MASK:.*]] = waveamdmachine.v_cmp_lt_u32 %[[LANE]]
-// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
-// SELECT: %[[SOFF:.*]], {{%.*}} = waveamdmachine.s_lshl_b32
-// SELECT: %[[NEG:.*]] = waveamdmachine.s_mul_i32
-// SELECT: %[[REBASED:.*]], {{%.*}} = waveamdmachine.s_add_i32 %[[NEG]]
-// SELECT-NOT: waveamdmachine.s_and_b32
-// SELECT: %[[OOB:.*]] = waveamdmachine.v_mov_b32_tuple %[[REBASED]]
+// SELECT: %[[ACTIVE_ELEMS:.*]] = waveamdmachine.v_add_u32 {{.*}}, %[[LANE]]
+// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_lshlrev_b32 %[[ACTIVE_ELEMS]]
+// SELECT: %[[OOB:.*]] = waveamdmachine.v_mov_b32_tuple {{.*}}
 // SELECT: %[[VOFF:.*]] = waveamdmachine.v_cndmask_b32_tuple %[[OOB]], %[[ACTIVE]], %[[MASK]]
 // SELECT-NOT: waveamdmachine.v_cndmask_b32_tuple
-// SELECT: waveamdmachine.buffer_load_b32 %[[VOFF]], {{.*}}, %[[SOFF]]
+// SELECT: %[[ZERO:.*]] = waveamdmachine.imm 0
+// SELECT: waveamdmachine.buffer_load_b32 %[[VOFF]], {{.*}}, %[[ZERO]]
 
 // ASM-LABEL: buffer_selected_oob_load:
-// ASM: s_lshl_b32 [[SOFF:s[0-9]+]], {{s[0-9]+}}, 2
-// ASM: v_mov_b32_e32 [[OOB:v[0-9]+]], {{s[0-9]+}}
+// ASM: v_add_lshl_u32 [[ACTIVE:v[0-9]+]], {{s[0-9]+}}, {{v[0-9]+}}, 2
+// ASM: v_mov_b32_e32 [[OOB:v[0-9]+]], 0x80000000
 // ASM: v_cndmask_b32_e64 [[VOFF:v[0-9]+]], [[OOB]], [[ACTIVE:v[0-9]+]], {{s[0-9]+}}
-// ASM: buffer_load_b32 {{v[0-9]+}}, [[VOFF]], {{s\[[0-9]+:[0-9]+\]}}, [[SOFF]] offen
+// ASM: buffer_load_b32 {{v[0-9]+}}, [[VOFF]], {{s\[[0-9]+:[0-9]+\]}}, 0 offen
 func.func @buffer_selected_oob_load(
     %in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>,
     %raw: i32) -> !wave.mem.token attributes {wave.kernel} {
@@ -259,21 +257,19 @@ func.func @buffer_selected_oob_load(
 // SELECT-LABEL: func.func @buffer_selected_oob_store
 // SELECT: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
 // SELECT: %[[MASK:.*]] = waveamdmachine.v_cmp_lt_u32 %[[LANE]]
-// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_lshlrev_b32 %[[LANE]]
-// SELECT: %[[SOFF:.*]], {{%.*}} = waveamdmachine.s_lshl_b32
-// SELECT: %[[NEG:.*]] = waveamdmachine.s_mul_i32
-// SELECT: %[[REBASED:.*]], {{%.*}} = waveamdmachine.s_add_i32 %[[NEG]]
-// SELECT-NOT: waveamdmachine.s_and_b32
-// SELECT: %[[OOB:.*]] = waveamdmachine.v_mov_b32_tuple %[[REBASED]]
+// SELECT: %[[ACTIVE_ELEMS:.*]] = waveamdmachine.v_add_u32 {{.*}}, %[[LANE]]
+// SELECT: %[[ACTIVE:.*]] = waveamdmachine.v_lshlrev_b32 %[[ACTIVE_ELEMS]]
+// SELECT: %[[OOB:.*]] = waveamdmachine.v_mov_b32_tuple {{.*}}
 // SELECT: %[[VOFF:.*]] = waveamdmachine.v_cndmask_b32_tuple %[[OOB]], %[[ACTIVE]], %[[MASK]]
 // SELECT-NOT: waveamdmachine.v_cndmask_b32_tuple
-// SELECT: waveamdmachine.buffer_store_b32 %[[VOFF]], {{.*}}, {{.*}}, %[[SOFF]]
+// SELECT: %[[ZERO:.*]] = waveamdmachine.imm 0
+// SELECT: waveamdmachine.buffer_store_b32 %[[VOFF]], {{.*}}, {{.*}}, %[[ZERO]]
 
 // ASM-LABEL: buffer_selected_oob_store:
-// ASM: s_lshl_b32 [[SOFF:s[0-9]+]], {{s[0-9]+}}, 2
-// ASM: v_mov_b32_e32 [[OOB:v[0-9]+]], {{s[0-9]+}}
+// ASM: v_add_lshl_u32 [[ACTIVE:v[0-9]+]], {{s[0-9]+}}, {{v[0-9]+}}, 2
+// ASM: v_mov_b32_e32 [[OOB:v[0-9]+]], 0x80000000
 // ASM: v_cndmask_b32_e64 [[VOFF:v[0-9]+]], [[OOB]], [[ACTIVE:v[0-9]+]], {{s[0-9]+}}
-// ASM: buffer_store_b32 {{v[0-9]+}}, [[VOFF]], {{s\[[0-9]+:[0-9]+\]}}, [[SOFF]] offen
+// ASM: buffer_store_b32 {{v[0-9]+}}, [[VOFF]], {{s\[[0-9]+:[0-9]+\]}}, 0 offen
 func.func @buffer_selected_oob_store(%out: !wave.ptr<#wave.global, i32>,
                                      %raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
