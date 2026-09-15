@@ -2400,6 +2400,34 @@ struct MemoryTransactionAddressMaterializer::Impl {
   }
 
   FailureOr<Value>
+  materializeSplitBufferPointer(const MemoryTransaction &transaction,
+                                Value base, const BufferAddressFields &fields,
+                                sym::PredHandle active) {
+    FailureOr<Value> uniform =
+        materializeUniformAddressExpr(transaction, fields.uniform, active);
+    FailureOr<Value> lane = materializeExpr(transaction, fields.lane, active);
+    if (failed(uniform) || failed(lane))
+      return failure();
+    Value uniformOffset = *uniform;
+    if (!uniformOffset.getType().isInteger(32))
+      uniformOffset =
+          CastOp::create(rewriter, location, rewriter.getI32Type(),
+                         CastKind::IntConvert, uniformOffset, DictionaryAttr());
+    Type type = getNarrowDynamicType(lane->getType());
+    Value laneOffset = *lane;
+    if (laneOffset.getType() != type)
+      laneOffset =
+          CastOp::create(rewriter, location, type, CastKind::IntConvert,
+                         laneOffset, DictionaryAttr());
+    // Wrap the complete byte offset before zero-extension to a pointer index.
+    Value sum =
+        createIntegerBinary(type, BinaryKind::AddI, uniformOffset, laneOffset);
+    Value offset = extendBufferOffset(base, sum);
+    return createPointerOffset(base, offset, getPointerOffsetType(base, offset),
+                               active);
+  }
+
+  FailureOr<Value>
   materializeResidualPointer(const MemoryTransaction &transaction, Value base,
                              sym::ExprHandle residual, sym::PredHandle active) {
     std::optional<int64_t> literal = sym::getIntegerLiteralValue(residual);
@@ -2413,14 +2441,9 @@ struct MemoryTransactionAddressMaterializer::Impl {
           splitBufferAddressFields(transaction, residual);
       if (failed(fields))
         return failure();
-      if (*fields) {
-        FailureOr<Value> uniform = appendPointerOffset(
-            transaction, base, (**fields).uniform, active, /*uniform=*/true);
-        if (failed(uniform))
-          return failure();
-        return appendPointerOffset(transaction, *uniform, (**fields).lane,
-                                   active, /*uniform=*/false);
-      }
+      if (*fields)
+        return materializeSplitBufferPointer(transaction, base, **fields,
+                                             active);
     }
     return appendPointerOffset(transaction, base, residual, active,
                                /*uniform=*/false);

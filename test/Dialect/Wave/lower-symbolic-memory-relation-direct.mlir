@@ -143,17 +143,16 @@ func.func @wrapped_dynamic_remainder_is_i32(
 
 // -----
 
-// Project an additive loop-uniform term to a scalar buffer-pointer add before
-// lowering the lane-varying remainder. The remainder stays grouped so it is
-// still emitted as one signed remainder rather than quotient arithmetic.
+// Add uniform and lane offsets in i32 before zero-extension.
 // CHECK-LABEL: func.func @wrapped_dynamic_remainder_projects_uniform_field
 // CHECK: %[[UNIFORM_EXPR:.*]] = wave.index_expr {{.*}}(%arg3) : (i32) -> index
 // CHECK: %[[UNIFORM_I32:.*]] = wave.cast intconvert %[[UNIFORM_EXPR]] : index -> i32
-// CHECK: %[[UNIFORM:.*]] = wave.cast intconvert %[[UNIFORM_I32]] policy {extension = #wave.cast_extension<zero>} : i32 -> index
-// CHECK: %[[SCALAR_BASE:.*]] = wave.ptr_add {{.*}}, %[[UNIFORM]] : !wave.ptr<#waveamd.buffer, i8>, index -> !wave.ptr<#waveamd.buffer, i8>
+// CHECK-NOT: wave.ptr_add
 // CHECK: wave.binary remsi
-// CHECK: %[[POINTER:.*]] = wave.ptr_add %[[SCALAR_BASE]], {{.*}} : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
-// CHECK: wave.load %[[POINTER]]
+// CHECK: [[SUM:%.*]] = wave.binary addi %[[UNIFORM_I32]], {{%.*}} : i32, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+// CHECK-NEXT: [[OFFSET:%.*]] = wave.cast intconvert [[SUM]] policy {extension = #wave.cast_extension<zero>}
+// CHECK-NEXT: [[POINTER:%.*]] = wave.ptr_add {{%.*}}, [[OFFSET]]
+// CHECK: wave.load [[POINTER]]
 // CHECK-NOT: wave.gather
 func.func @wrapped_dynamic_remainder_projects_uniform_field(
     %base: !wave.ptr<#waveamd.buffer, f16>, %origin: i32, %divisor: i32,
