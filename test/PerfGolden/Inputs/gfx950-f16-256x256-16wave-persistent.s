@@ -49,7 +49,7 @@ gfx950_persistent_f16_gemm:
 		s_mov_b32 s21, s5
 		s_mov_b32 s22, s6
 		s_mov_b32 s23, s7
-		s_add_i32 s6, s0, -12
+		s_sub_i32 s6, s0, 12
 		s_add_i32 s7, s8, 1
 		s_lshl_b32 s8, 1, s6
 		s_cmp_eq_u32 s6, 0
@@ -71,12 +71,12 @@ gfx950_persistent_f16_gemm:
 		v_add_u32_e32 v2, 0xffd00000, v1
 		s_lshl_b32 s9, s10, 22
 		s_add_i32 s9, s9, s11
-		v_add_u32_e32 v3, s9, v0
-		v_add_u32_e32 v0, 0xffd00000, v3
+		v_add_u32_e32 v0, s9, v0
+		v_add_u32_e32 v3, 0xffd00000, v0
 		v_add_u32_e32 v4, 0xffe00000, v1
-		v_add_u32_e32 v5, 0xffe00000, v3
+		v_add_u32_e32 v5, 0xffe00000, v0
 		v_add_u32_e32 v6, 0xfff00000, v1
-		v_add_u32_e32 v7, 0xfff00000, v3
+		v_add_u32_e32 v7, 0xfff00000, v0
 		s_mov_b32 s16, s2
 		s_mov_b32 s17, s3
 		s_mov_b32 s20, s4
@@ -86,15 +86,13 @@ gfx950_persistent_f16_gemm:
 .Lgfx950_persistent_f16_gemm.loop_head_0:
 		s_cmp_ge_u32 s2, 3
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_1
-		s_add_i32 s3, s2, -3
+		s_sub_i32 s3, s2, 3
 		s_lshl_b32 s3, s3, 12
 		s_add_i32 s3, s3, 0xfff
 		s_mul_hi_u32 s4, s2, 0xaaaaaaab
 		s_lshr_b32 s4, s4, 1
 		s_mul_i32 s4, s4, 3
-		s_xor_b32 s4, s4, -1
-		s_add_i32 s4, s4, 1
-		s_add_i32 s4, s2, s4
+		s_sub_i32 s4, s2, s4
 		s_lshl_b32 s4, s4, 2
 		s_add_i32 s4, s4, 0x10000
 		v_mov_b32_e32 v8, s4
@@ -124,9 +122,7 @@ gfx950_persistent_f16_gemm:
 		s_mul_hi_u32 s3, s2, 0xaaaaaaab
 		s_lshr_b32 s3, s3, 1
 		s_mul_i32 s3, s3, 3
-		s_xor_b32 s3, s3, -1
-		s_add_i32 s3, s3, 1
-		s_add_i32 s3, s2, s3
+		s_sub_i32 s3, s2, s3
 		s_lshl_b32 s4, s3, 15
 		s_add_i32 s4, s0, s4
 		s_add_i32 m0, s4, 0xffffd000
@@ -135,7 +131,7 @@ gfx950_persistent_f16_gemm:
 		s_lshl_b32 s5, s2, 4
 		s_add_i32 m0, m0, 0x4000
 		s_nop 0
-		buffer_load_dwordx4 v0, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v3, s[20:23], 0 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0xffffd000
 		s_nop 0
@@ -159,7 +155,7 @@ gfx950_persistent_f16_gemm:
 		s_add_i32 s3, s3, 0x10000
 		s_add_i32 m0, m0, 0x4000
 		s_add_i32 s4, s5, 15
-		buffer_load_dwordx4 v3, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v0, s[20:23], 0 offen lds
 		s_getreg_b32 s9, hwreg(HW_REG_IB_STS)
 		s_and_b32 s10, s9, 15
 		s_lshr_b32 s9, s9, 18
@@ -227,9 +223,7 @@ gfx950_persistent_f16_gemm:
 		s_mul_hi_u32 s2, s0, 0xaaaaaaab
 		s_lshr_b32 s2, s2, 1
 		s_mul_i32 s3, s2, 3
-		s_xor_b32 s3, s3, -1
-		s_add_i32 s3, s3, 1
-		s_add_i32 s3, s0, s3
+		s_sub_i32 s3, s0, s3
 		s_cmp_eq_u32 s3, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_7
 		s_add_i32 s3, s8, 1
@@ -301,9 +295,7 @@ gfx950_persistent_f16_gemm:
 		s_mul_hi_u32 s16, s8, 0xaaaaaaab
 		s_lshr_b32 s16, s16, 1
 		s_mul_i32 s16, s16, 3
-		s_xor_b32 s16, s16, -1
-		s_add_i32 s16, s16, 1
-		s_add_i32 s16, s8, s16
+		s_sub_i32 s16, s8, s16
 		s_lshl_b32 s17, s16, 2
 		s_add_i32 s17, s17, 0x10000
 		v_mov_b32_e32 v100, s17
@@ -583,9 +575,7 @@ gfx950_persistent_f16_gemm:
 		s_mul_hi_u32 s18, s16, 0xaaaaaaab
 		s_lshr_b32 s18, s18, 1
 		s_mul_i32 s18, s18, 3
-		s_xor_b32 s18, s18, -1
-		s_add_i32 s18, s18, 1
-		s_add_i32 s18, s16, s18
+		s_sub_i32 s18, s16, s18
 		s_lshl_b32 s19, s18, 2
 		s_add_i32 s19, s19, 0x10000
 		v_mov_b32_e32 v9, s19
