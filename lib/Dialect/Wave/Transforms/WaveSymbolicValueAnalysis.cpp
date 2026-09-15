@@ -333,17 +333,10 @@ FailureOr<sym::PredHandle> SymbolicValueBuilder::buildPredicateExprImpl(
   return buildSelectPredicate(select, skip, context);
 }
 
-FailureOr<sym::ExprHandle>
-SymbolicValueBuilder::simplifyPacketExpr(sym::ExprHandle expr) {
-  std::string diagnostic;
-  FailureOr<sym::ExprHandle> simplified =
-      offset.assumptions.empty()
-          ? sym::simplifyExpr(store, expr, &diagnostic)
-          : sym::simplifyExpr(store, expr, offset.assumptions, &diagnostic);
-  if (failed(simplified))
-    return emitError(rootValue.getLoc())
-           << "failed to simplify symbolic SSA packet: " << diagnostic;
-  return shouldUseSimplifiedIndexExpr(*simplified, expr) ? *simplified : expr;
+sym::ExprHandle SymbolicValueBuilder::simplifyPacketExpr(sym::ExprHandle expr) {
+  sym::ExprHandle simplified =
+      sym::simplifyExpr(store, expr, offset.assumptions);
+  return shouldUseSimplifiedIndexExpr(simplified, expr) ? simplified : expr;
 }
 
 FailureOr<bool> SymbolicValueBuilder::validatePacketExpr(sym::ExprHandle expr) {
@@ -402,10 +395,7 @@ SymbolicValueBuilder::buildExpandedRoot(Value value, bool allowRootLeaf,
     return failure();
   }
   appendRootSSAFacts(value);
-  FailureOr<sym::ExprHandle> simplified = simplifyPacketExpr(*expr);
-  if (failed(simplified))
-    return failure();
-  return finishBuiltOffset(*simplified);
+  return finishBuiltOffset(simplifyPacketExpr(*expr));
 }
 
 FailureOr<std::optional<SymbolicOffset>>

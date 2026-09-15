@@ -252,6 +252,11 @@ fact-backed queries, so the caller discards that analysis instead of continuing
 with a silently weaker domain. Structural builders remain available for
 reporting the failure.
 
+Symbolic builders and simplifiers preserve domain-error sentinels. A sentinel
+cannot become an IR attribute. Fact simplification distinguishes allocation
+failure from a proof resource limit: allocation failure terminates through
+`report_bad_alloc_error`; a resource limit rejects the proof attempt.
+
 Assumption roots are comparisons, canonical true/false, or AND trees of those
 roots. Unsupported boolean shapes reject as a unit. Ordered construction may
 derive later facts from earlier roots; direct construction imports one already

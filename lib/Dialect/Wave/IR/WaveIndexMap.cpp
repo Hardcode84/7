@@ -469,10 +469,9 @@ static LogicalResult buildFreeInputRelation(
   return success();
 }
 
-static LogicalResult
-appendDefinedInputRelations(sym::Store &store, const IndexMap &source,
-                            SmallVectorImpl<sym::ExprSubstitution> &relational,
-                            std::string *diagnostic) {
+static void appendDefinedInputRelations(
+    sym::Store &store, const IndexMap &source,
+    SmallVectorImpl<sym::ExprSubstitution> &relational) {
   for (const IndexMap::Input &input : source.inputs) {
     const sym::ExprSubstitution *definition =
         findDefinition(source, input.variable);
@@ -480,13 +479,9 @@ appendDefinedInputRelations(sym::Store &store, const IndexMap &source,
       continue;
     sym::ExprHandle substituted =
         sym::substituteExpr(store, definition->replacement, relational);
-    FailureOr<sym::ExprHandle> replacement =
-        sym::simplifyExpr(store, substituted, diagnostic);
-    if (failed(replacement))
-      return failure();
-    relational.push_back({input.variable, *replacement});
+    sym::ExprHandle replacement = sym::simplifyExpr(store, substituted);
+    relational.push_back({input.variable, replacement});
   }
-  return success();
 }
 
 static LogicalResult
@@ -536,11 +531,9 @@ remapPredicate(sym::Store &store, IndexMap &result, sym::PredHandle predicate,
                ArrayRef<sym::ExprSubstitution> relational,
                std::string *diagnostic) {
   sym::PredHandle remapped = sym::substitutePred(store, predicate, relational);
-  FailureOr<sym::ExprHandle> simplified =
-      sym::simplifyExpr(store, sym::asExpr(remapped), diagnostic);
+  sym::ExprHandle simplified = sym::simplifyExpr(store, sym::asExpr(remapped));
   FailureOr<sym::ExprHandle> concrete =
-      failed(simplified) ? FailureOr<sym::ExprHandle>(failure())
-                         : materialize(store, result, *simplified, diagnostic);
+      materialize(store, result, simplified, diagnostic);
   std::optional<sym::PredHandle> material =
       failed(concrete) ? std::nullopt : sym::asPred(*concrete);
   return material ? FailureOr<sym::PredHandle>(*material)
@@ -561,19 +554,15 @@ static LogicalResult appendRemappedPredicates(
   return success();
 }
 
-static LogicalResult appendRemappedExpressions(
-    sym::Store &store, const IndexMap &source, IndexMap &result,
-    ArrayRef<sym::ExprSubstitution> relational, std::string *diagnostic) {
+static void
+appendRemappedExpressions(sym::Store &store, const IndexMap &source,
+                          IndexMap &result,
+                          ArrayRef<sym::ExprSubstitution> relational) {
   result.exprs.reserve(source.exprs.size());
   for (sym::ExprHandle expr : source.exprs) {
     sym::ExprHandle remapped = sym::substituteExpr(store, expr, relational);
-    FailureOr<sym::ExprHandle> simplified =
-        sym::simplifyExpr(store, remapped, diagnostic);
-    if (failed(simplified))
-      return failure();
-    result.exprs.push_back(*simplified);
+    result.exprs.push_back(sym::simplifyExpr(store, remapped));
   }
-  return success();
 }
 
 } // namespace
@@ -733,7 +722,7 @@ mlir::wave::indexing::materialize(sym::Store &store, const IndexMap &map,
     return expression;
   sym::ExprHandle result =
       sym::substituteExpr(store, expression, map.definitions);
-  return sym::simplifyExpr(store, result, diagnostic);
+  return sym::simplifyExpr(store, result);
 }
 
 FailureOr<SmallVector<sym::ExprHandle>>
@@ -832,19 +821,18 @@ mlir::wave::indexing::pullback(sym::Store &store, const IndexMap &source,
   SmallVector<sym::ExprSubstitution> relational;
   relational.reserve(source.inputs.size());
   if (failed(buildFreeInputRelation(store, source, result, substitutions, scope,
-                                    relational, diagnostic)) ||
-      failed(
-          appendDefinedInputRelations(store, source, relational, diagnostic)) ||
-      failed(appendDefinitionRequirements(store, source, result, relational,
+                                    relational, diagnostic)))
+    return failure();
+  appendDefinedInputRelations(store, source, relational);
+  if (failed(appendDefinitionRequirements(store, source, result, relational,
                                           diagnostic)) ||
       failed(appendRemappedPredicates(store, result, source.requirements,
                                       relational, result.requirements,
                                       diagnostic)) ||
       failed(appendRemappedPredicates(store, result, source.facts, relational,
-                                      result.facts, diagnostic)) ||
-      failed(appendRemappedExpressions(store, source, result, relational,
-                                       diagnostic)))
+                                      result.facts, diagnostic)))
     return failure();
+  appendRemappedExpressions(store, source, result, relational);
   return result;
 }
 

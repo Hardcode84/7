@@ -664,7 +664,7 @@ private:
   buildPredicateExprImpl(Value value, bool &skip,
                          const ProducerProofContext &context);
 
-  FailureOr<sym::ExprHandle> simplifyPacketExpr(sym::ExprHandle expr);
+  sym::ExprHandle simplifyPacketExpr(sym::ExprHandle expr);
 
   FailureOr<bool> validatePacketExpr(sym::ExprHandle expr);
 

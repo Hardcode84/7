@@ -498,6 +498,24 @@ def _check_typed_predicate_bindings(raw_expr):
         ),
     )
 
+    # Symbolic poison cannot become an IR attribute.
+    poison = w.sym_ctx.parse("1/0")
+    for attr_type, kind in [(w.ExprAttr, "expr"), (w.PredAttr, "pred")]:
+        assert_raises(
+            ValueError,
+            f"failed to import wave.{kind} node",
+            lambda attr_type=attr_type: attr_type.get_from_node_ptr(
+                poison.node_ptr, context=w.Context.current
+            ),
+        )
+        assert_raises(
+            ValueError,
+            f"failed to deserialize wave.{kind} bytes",
+            lambda attr_type=attr_type: attr_type.get_from_bytes(
+                w.sym_ctx.serialize(poison), context=w.Context.current
+            ),
+        )
+
 
 # CHECK-LABEL: TEST: test_typed_bindings
 @run

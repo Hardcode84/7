@@ -260,9 +260,8 @@ mlir::FailureOr<ExprHandle> importExpr(Store &store, const ixs_node *foreign,
 mlir::FailureOr<PredHandle> importPred(Store &store, const ixs_node *foreign,
                                        std::string *diagnostic = nullptr);
 
-mlir::FailureOr<ExprHandle>
-composeExprBinary(Store &store, ExprHandle lhs, ExprBinaryOp op, ExprHandle rhs,
-                  std::string *diagnostic = nullptr);
+ExprHandle composeExprBinary(Store &store, ExprHandle lhs, ExprBinaryOp op,
+                             ExprHandle rhs);
 ExprHandle composeExprCeil(Store &store, ExprHandle value);
 /// Floor of `value`. Use to turn an exact-rational `Div` into Python
 /// `//` (floored integer division).
@@ -285,10 +284,8 @@ PredHandle composePredAnd(Store &store, PredHandle lhs, PredHandle rhs);
 PredHandle composePredOr(Store &store, PredHandle lhs, PredHandle rhs);
 PredHandle composePredNot(Store &store, PredHandle value);
 /// Simplify under no assumptions.
-mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
-                                         std::string *diagnostic = nullptr);
-mlir::FailureOr<PredHandle> simplifyPred(Store &store, PredHandle value,
-                                         std::string *diagnostic = nullptr);
+ExprHandle simplifyExpr(Store &store, ExprHandle value);
+PredHandle simplifyPred(Store &store, PredHandle value);
 /// Simultaneous substitution; replacements are not rewritten.
 ExprHandle substituteExpr(Store &store, ExprHandle value,
                           llvm::ArrayRef<ExprSubstitution> substitutions);
@@ -296,9 +293,8 @@ PredHandle substitutePred(Store &store, PredHandle value,
                           llvm::ArrayRef<ExprSubstitution> substitutions);
 
 /// Simplify `value` under `assumptions`.
-mlir::FailureOr<ExprHandle> simplifyExpr(Store &store, ExprHandle value,
-                                         llvm::ArrayRef<PredHandle> assumptions,
-                                         std::string *diagnostic = nullptr);
+ExprHandle simplifyExpr(Store &store, ExprHandle value,
+                        llvm::ArrayRef<PredHandle> assumptions);
 ExprHandle expandExpr(Store &store, ExprHandle value);
 
 /// Three-valued result of a predicate entailment query.
@@ -378,9 +374,7 @@ public:
   substituteFacts(llvm::ArrayRef<ExprSubstitution> substitutions,
                   std::string *diagnostic = nullptr);
 
-  mlir::FailureOr<ExprHandle> compose(ExprHandle lhs, ExprBinaryOp op,
-                                      ExprHandle rhs,
-                                      std::string *diagnostic = nullptr);
+  ExprHandle compose(ExprHandle lhs, ExprBinaryOp op, ExprHandle rhs);
   ExprHandle composeCeil(ExprHandle value);
   ExprHandle composeFloor(ExprHandle value);
   ExprHandle composeNeg(ExprHandle value);

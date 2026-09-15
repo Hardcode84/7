@@ -134,12 +134,7 @@ sym::PredHandle mustParsePred(sym::Store &store, llvm::StringRef text) {
 
 sym::ExprHandle mustCompose(sym::Store &store, sym::ExprHandle lhs,
                             sym::ExprBinaryOp op, sym::ExprHandle rhs) {
-  auto handle = sym::composeExprBinary(store, lhs, op, rhs);
-  if (failed(handle)) {
-    llvm::errs() << "failed to compose binary expression\n";
-    std::exit(1);
-  }
-  return *handle;
+  return sym::composeExprBinary(store, lhs, op, rhs);
 }
 
 std::unique_ptr<sym::Analysis>
@@ -183,13 +178,7 @@ sym::PredHandle mustBuildAnalysisPred(FailureOr<sym::PredHandle> handle) {
 }
 
 sym::ExprHandle mustSimplify(sym::Store &store, sym::ExprHandle value) {
-  std::string diagnostic;
-  auto handle = sym::simplifyExpr(store, value, &diagnostic);
-  if (failed(handle)) {
-    llvm::errs() << "failed to simplify: " << diagnostic << "\n";
-    std::exit(1);
-  }
-  return *handle;
+  return sym::simplifyExpr(store, value);
 }
 
 sym::ExprHandle mustExpand(sym::Store &store, sym::ExprHandle value) {
@@ -837,6 +826,35 @@ static void runSentinelPropagation(sym::Store &store, sym::ExprHandle x) {
   sym::ExprHandle partial = mustParseExpr(store, "Piecewise((0, x == 0))");
   sym::ExprHandle one = sym::composeExprInt(store, 1);
   sym::ExprHandle error = sym::substituteExpr(store, partial, {{x, one}});
+  sym::ExprHandle zero = sym::composeExprInt(store, 0);
+  sym::ExprHandle divided =
+      sym::composeExprBinary(store, one, sym::ExprBinaryOp::Div, zero);
+  sym::ExprHandle modulo =
+      sym::composeExprBinary(store, one, sym::ExprBinaryOp::Mod, zero);
+  auto piecewise =
+      sym::composeExprPiecewise(store, {{one, sym::composePredFalse(store)}});
+  auto parsed = sym::parseExpr(store, "1/0");
+  auto bytes = sym::serializeExpr(store, divided);
+  auto decoded = succeeded(bytes) ? sym::deserializeExpr(store, *bytes)
+                                  : FailureOr<sym::ExprHandle>(failure());
+  llvm::outs() << "sentinel-new-domain: "
+               << boolName(sym::ExprView(divided).getKind() ==
+                               sym::ExprKind::Error &&
+                           sym::ExprView(modulo).getKind() ==
+                               sym::ExprKind::Error &&
+                           succeeded(piecewise) && *piecewise == divided &&
+                           succeeded(parsed) && *parsed == divided)
+               << "\n";
+  llvm::outs() << "sentinel-codec-roundtrip: "
+               << boolName(succeeded(decoded) && *decoded == divided) << "\n";
+  sym::PredHandle invalidFacts = sym::composePredOr(
+      store, sym::composePredCmp(store, x, sym::PredCmpOp::Eq, zero),
+      sym::composePredCmp(store, x, sym::PredCmpOp::Eq, one));
+  sym::ExprHandle rejected = sym::simplifyExpr(store, x, {invalidFacts});
+  llvm::outs() << "sentinel-rejected-assumptions: "
+               << boolName(sym::ExprView(rejected).getKind() ==
+                           sym::ExprKind::Error)
+               << "\n";
   sym::ExprHandle negated = sym::composeExprNeg(store, error);
   sym::ExprHandle added =
       mustCompose(store, error, sym::ExprBinaryOp::Add, one);
@@ -846,6 +864,10 @@ static void runSentinelPropagation(sym::Store &store, sym::ExprHandle x) {
       sym::composePredCmp(store, error, sym::PredCmpOp::Eq, one);
   sym::PredHandle inverted = sym::composePredNot(store, predicate);
   std::unique_ptr<sym::Analysis> analysis = mustCreateAnalysis(store);
+  sym::ExprHandle analysisDivided =
+      analysis->compose(one, sym::ExprBinaryOp::Div, zero);
+  llvm::outs() << "sentinel-analysis-new-domain: "
+               << boolName(analysisDivided == divided) << "\n";
   sym::ExprHandle analysisAdded = mustBuildAnalysisExpr(
       analysis->compose(error, sym::ExprBinaryOp::Add, one));
   sym::ExprHandle analysisSimplified =

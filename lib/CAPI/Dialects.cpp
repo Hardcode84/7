@@ -311,7 +311,8 @@ MlirAttribute mlirWaveExprAttrGetFromText(MlirContext ctx, MlirStringRef text) {
         << "failed to parse wave.expr text: " << diagnostic;
     return MlirAttribute{nullptr};
   }
-  return wrap(wave::ExprAttr::get(context, *handle));
+  return wrap(wave::ExprAttr::getChecked(
+      [&] { return emitError(UnknownLoc::get(context)); }, context, *handle));
 }
 
 MlirAttribute mlirWaveExprAttrGetFromNodePtr(MlirContext ctx,
@@ -328,7 +329,8 @@ MlirAttribute mlirWaveExprAttrGetFromNodePtr(MlirContext ctx,
         << "failed to import wave.expr node: " << diagnostic;
     return MlirAttribute{nullptr};
   }
-  return wrap(wave::ExprAttr::get(context, *handle));
+  return wrap(wave::ExprAttr::getChecked(
+      [&] { return emitError(UnknownLoc::get(context)); }, context, *handle));
 }
 
 MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
@@ -352,7 +354,8 @@ MlirAttribute mlirWaveExprAttrGetFromBytes(MlirContext ctx,
         << "failed to materialize wave.expr from bytes: " << diagnostic;
     return MlirAttribute{nullptr};
   }
-  return wrap(wave::ExprAttr::get(context, *handle));
+  return wrap(wave::ExprAttr::getChecked(
+      [&] { return emitError(UnknownLoc::get(context)); }, context, *handle));
 }
 
 bool mlirWaveExprAttrWriteBytes(MlirAttribute attr, MlirStringCallback callback,
@@ -390,7 +393,8 @@ MlirAttribute mlirWavePredAttrGetFromText(MlirContext ctx, MlirStringRef text) {
         << "failed to parse wave.pred text: " << diagnostic;
     return MlirAttribute{nullptr};
   }
-  return wrap(wave::PredAttr::get(context, *handle));
+  return wrap(wave::PredAttr::getChecked(
+      [&] { return emitError(UnknownLoc::get(context)); }, context, *handle));
 }
 
 MlirAttribute mlirWavePredAttrGetFromNodePtr(MlirContext ctx,
@@ -407,7 +411,8 @@ MlirAttribute mlirWavePredAttrGetFromNodePtr(MlirContext ctx,
         << "failed to import wave.pred node: " << diagnostic;
     return MlirAttribute{nullptr};
   }
-  return wrap(wave::PredAttr::get(context, *handle));
+  return wrap(wave::PredAttr::getChecked(
+      [&] { return emitError(UnknownLoc::get(context)); }, context, *handle));
 }
 
 MlirAttribute mlirWavePredAttrGetFromBytes(MlirContext ctx,
@@ -431,7 +436,8 @@ MlirAttribute mlirWavePredAttrGetFromBytes(MlirContext ctx,
         << "failed to materialize wave.pred from bytes: " << diagnostic;
     return MlirAttribute{nullptr};
   }
-  return wrap(wave::PredAttr::get(context, *handle));
+  return wrap(wave::PredAttr::getChecked(
+      [&] { return emitError(UnknownLoc::get(context)); }, context, *handle));
 }
 
 bool mlirWavePredAttrWriteBytes(MlirAttribute attr, MlirStringCallback callback,
