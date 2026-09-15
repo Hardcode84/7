@@ -1,7 +1,7 @@
 // RUN: wave-opt %s --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=ENABLED
 // RUN: wave-opt %s --waveamd-machine-multi-wave-specialize | FileCheck %s --check-prefix=DISABLED
-// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize,waveamd-machine-schedule{apply-schedule=true require-selected-input=true})' | FileCheck %s --check-prefix=SCHEDULED
-// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize,waveamd-machine-schedule{apply-schedule=true require-selected-input=true})' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize,waveamd-expand-materialization-variants,func.func(waveamd-cleanup-materialization-variants),waveamd-machine-schedule{apply-schedule=true require-selected-input=true},waveamd-collapse-materialization-variants)' | FileCheck %s --check-prefix=SCHEDULED
+// RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-machine-multi-wave-specialize,waveamd-expand-materialization-variants,func.func(waveamd-cleanup-materialization-variants),waveamd-machine-schedule{apply-schedule=true require-selected-input=true},waveamd-collapse-materialization-variants)' 2>&1 >/dev/null | FileCheck %s --check-prefix=DIAG
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
@@ -71,6 +71,39 @@ func.func @specialize_two_slots(%cond: !waveamdmachine.reg<scc, 1>)
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
   }
   return
+}
+
+// SCHEDULED-LABEL: func.func @independent_cloned_choices(
+// SCHEDULED-NOT: waveamdmachine.materialization
+// SCHEDULED: waveamdmachine.uniform_if
+// SCHEDULED-COUNT-2: waveamdmachine.uniform_loop
+// SCHEDULED-NOT: waveamdmachine.materialization
+func.func @independent_cloned_choices(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %init: !waveamdmachine.reg<vgpr, 1>,
+    %step: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1>
+    attributes {gpu.known_block_size = array<i32: 512, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 512, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 2 : i64} {
+  %result = waveamdmachine.uniform_loop
+      carries(%init : !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%value: !waveamdmachine.reg<vgpr, 1>):
+    %advanced = waveamdmachine.v_add_u32 %value, %step
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %selected = waveamdmachine.materialization_variants %value, %advanced
+        : !waveamdmachine.reg<vgpr, 1>
+    %used = waveamdmachine.v_xor_b32 %selected, %step
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%used : !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 1>
+  return %result : !waveamdmachine.reg<vgpr, 1>
 }
 
 // ENABLED-LABEL: func.func @wave_workgroup_size_only(

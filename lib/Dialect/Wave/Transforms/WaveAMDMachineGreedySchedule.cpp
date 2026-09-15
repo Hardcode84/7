@@ -2508,33 +2508,6 @@ initializeMultiWaveState(waveamdmachine::MultiWaveExecutionState &state,
   }
 }
 
-static bool haveSameGraphShape(const GraphTables &lhs, const GraphTables &rhs) {
-  if (lhs.pendingPreds != rhs.pendingPreds ||
-      lhs.edges.size() != rhs.edges.size())
-    return false;
-  for (auto [left, right] : llvm::zip_equal(lhs.edges, rhs.edges))
-    if (left.src != right.src || left.dst != right.dst ||
-        left.kind != right.kind || left.recurrence != right.recurrence)
-      return false;
-  return true;
-}
-
-static bool haveSameRegionShape(const MultiWaveRegions &regions,
-                                const MultiWaveGraphs &graphs) {
-  if (regions[0].ops.empty() ||
-      regions[0].ops.size() != regions[1].ops.size() ||
-      regions[0].blockOrdinal != regions[1].blockOrdinal ||
-      regions[0].regionOrdinal != regions[1].regionOrdinal ||
-      !haveSameGraphShape(graphs[0], graphs[1]))
-    return false;
-  for (auto [left, right] : llvm::zip_equal(regions[0].ops, regions[1].ops))
-    if (left->getName() != right->getName() ||
-        left->getOperandTypes() != right->getOperandTypes() ||
-        left->getResultTypes() != right->getResultTypes())
-      return false;
-  return true;
-}
-
 static LogicalResult verifySameBarrier(Operation *left, Operation *right) {
   if (left->getName() != right->getName())
     return failure();
@@ -2868,7 +2841,11 @@ LogicalResult MultiWaveOrderReplay::commitBarrier() {
 }
 
 LogicalResult MultiWaveOrderReplay::run() {
-  size_t total = state.getWaveCount() * regions[0].ops.size() * iterations;
+  size_t total = 0;
+  for (unsigned wave : llvm::seq<unsigned>(state.getWaveCount())) {
+    unsigned classId = scheduleModel.getMultiWaveClass(state, wave);
+    total += regions[classId].ops.size() * iterations;
+  }
   for ([[maybe_unused]] size_t step : llvm::seq<size_t>(total)) {
     if (committed == total)
       return success();
@@ -3142,8 +3119,6 @@ static LogicalResult buildMultiWaveGraphs(waveamdmachine::UniformIfOp uniformIf,
       return failure();
     buildFillerMemoryKinds(regions[classId], origins, graphs[classId]);
   }
-  if (!haveSameRegionShape(regions, graphs))
-    return uniformIf.emitOpError("multi-wave branch graphs differ");
   return success();
 }
 
