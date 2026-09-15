@@ -820,7 +820,7 @@ def _kernel_attrs(
     attrs = _target_waves_attrs(target_waves)
     if cfg.enable_split_barriers:
         attrs[_ENABLE_SPLIT_BARRIERS_ATTR] = UnitAttr.get()
-    if cfg.enable_multi_wave_specialization:
+    if cfg.enable_multi_wave_specialization or cfg.coalesced_mfma_output:
         attrs[_ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR] = UnitAttr.get()
     return attrs
 
