@@ -369,7 +369,8 @@ public:
 
 private:
   void collectDependencies(Block &block) {
-    for (auto [index, op] : llvm::enumerate(operations)) {
+    for (unsigned index : llvm::seq<unsigned>(0, operations.size())) {
+      Operation *op = operations[index];
       llvm::SetVector<unsigned> producers;
       op->walk([&](Operation *nested) {
         for (Value operand : nested->getOperands()) {
