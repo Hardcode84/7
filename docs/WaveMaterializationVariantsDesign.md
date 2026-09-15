@@ -77,8 +77,7 @@ store. Removing an unselected memory operation must preserve required history
 and all effects used by the retained program.
 
 After expansion resolves choices, apply memory canonicalization before
-scheduling so scores exclude dead work. Expansion has no special effect-erasure
-rule.
+scheduling so scores exclude dead work.
 
 ## Search scopes
 
