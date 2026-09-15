@@ -30,6 +30,20 @@ func.func @lowering_drops_dead_condition(
   return %selected : !wave.mem.token
 }
 
+// CHECK-LABEL: func.func @lowering_arith_select_drops_dead_condition
+// CHECK-SAME: (%[[LHS:.*]]: i32, %[[RHS:.*]]: i32, %[[TRUE:.*]]: !wave.mem.token, %[[FALSE:.*]]: !wave.mem.token)
+// CHECK-NOT: arith.cmpi
+// CHECK-NOT: arith.select
+// CHECK: %[[JOINED:.*]] = wave.join %[[TRUE]], %[[FALSE]] : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+// CHECK: return %[[JOINED]] : !wave.mem.token
+func.func @lowering_arith_select_drops_dead_condition(
+    %lhs: i32, %rhs: i32, %true: !wave.mem.token,
+    %false: !wave.mem.token) -> !wave.mem.token {
+  %condition = arith.cmpi eq, %lhs, %rhs : i32
+  %selected = arith.select %condition, %true, %false : !wave.mem.token
+  return %selected : !wave.mem.token
+}
+
 // CHECK-LABEL: func.func @lowering_enables_join_cleanup
 // CHECK-SAME: (%[[PRED:.*]]: i1, %[[DEP:.*]]: !wave.mem.token)
 // CHECK-NOT: wave.token
