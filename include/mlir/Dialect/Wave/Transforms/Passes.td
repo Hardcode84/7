@@ -211,6 +211,19 @@ def WaveLowerTokenSelects : Pass<"wave-lower-token-selects"> {
   ];
 }
 
+def WaveConvertArithSelects : Pass<"wave-convert-arith-selects"> {
+  let summary = "Convert arithmetic selects of Wave values";
+  let description = [{
+    Converts `arith.select` operations whose result has a Wave dialect type to
+    `wave.select`. Arithmetic selects of builtin values remain unchanged. This
+    pass establishes Wave dialect ownership before Wave legalization.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "wave::WaveDialect"
+  ];
+}
+
 def WaveCleanupAllocs : Pass<"wave-cleanup-allocs"> {
   let summary = "Remove writes to unread Wave allocations";
   let description = [{

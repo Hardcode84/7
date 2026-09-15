@@ -50,6 +50,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   WaveCoalesceMemory.cpp
   WaveCoalesceWhere.cpp
   WaveCombinePointerOffsets.cpp
+  WaveConvertArithSelects.cpp
   WaveDelayLoopCarriedPacks.cpp
   WaveExpandIntegerDivRem.cpp
   WaveExtractLoopStrides.cpp

@@ -1,6 +1,8 @@
 // RUN: FileCheck %s --check-prefix=PIPELINE < %wave_pipelines
 
-// PIPELINE: transform.apply_registered_pass "wave-normalize-integer-div-rem"
+// PIPELINE: transform.apply_registered_pass "wave-convert-arith-selects"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-normalize-integer-div-rem"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE: transform.apply_registered_pass "wave-lower-redistribute"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
