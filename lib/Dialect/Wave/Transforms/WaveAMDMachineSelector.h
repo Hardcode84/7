@@ -458,6 +458,7 @@ public:
   LogicalResult selectWhere(WhereOp op);
   LogicalResult selectRegion(Region &region);
   LogicalResult selectSharedMemoryBase(SharedMemoryBaseOp op);
+  LogicalResult selectLDSAddress(LDSAddressOp op);
   LogicalResult selectBarrier(BarrierOp op);
   LogicalResult selectFragmentFill(waveamd::FragmentFillOp op);
   LogicalResult selectFragmentPack(waveamd::FragmentPackOp op);

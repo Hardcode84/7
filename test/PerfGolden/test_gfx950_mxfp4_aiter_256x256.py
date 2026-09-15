@@ -8,8 +8,10 @@
 # CHECK-NEXT: perf-golden: gfx950-mxfp4-aiter-256x256: asm matches golden
 # SOURCE: module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"}
 # SOURCE: func.func @wmma_f16_matmul_tiled
-# SOURCE-SAME: wave.dynamic_lds_size = 147456 : i64
 # SOURCE-SAME: wave.lds_size = 0 : i64
+# SOURCE-NOT: wave.dynamic_lds_size
+# SOURCE: wave.alloc() {align = 16 : i64, bytesize = 131072 : i64}
+# SOURCE-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 8192 : i64}
 
 from __future__ import annotations
 

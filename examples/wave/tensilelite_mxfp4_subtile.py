@@ -26,8 +26,6 @@ _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
 _ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR = (
     "waveamdmachine.enable_multi_wave_specialization"
 )
-_DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
-_STATIC_LDS_LIMIT = 64 * 1024
 _WAVE_SIZE = 64
 _MMA_K = 128
 _MX_BLOCK = 32
@@ -147,6 +145,14 @@ class Config:
         return (self.a_data_slots + self.b_data_slots) * self.dwords_per_data_slot * 4
 
     @property
+    def a_data_stage_lds_dwords(self) -> int:
+        return self.a_data_slots * self.dwords_per_data_slot
+
+    @property
+    def b_data_stage_lds_dwords(self) -> int:
+        return self.b_data_slots * self.dwords_per_data_slot
+
+    @property
     def data_stage_lds_dwords(self) -> int:
         return self.data_stage_lds_bytes // 4
 
@@ -175,18 +181,6 @@ class Config:
         return self.b_scale_groups_per_partition * _SCALE_GROUP_BYTES
 
     @property
-    def scale_lds_base(self) -> int:
-        return self.data_lds_bytes
-
-    @property
-    def scale_a_lds_base(self) -> int:
-        return self.scale_lds_base
-
-    @property
-    def scale_b_lds_base(self) -> int:
-        return self.scale_a_lds_base + self.bm * self.a_scale_partition_bytes
-
-    @property
     def scale_stage_lds_bytes(self) -> int:
         return (
             self.bm * self.a_scale_partition_bytes
@@ -205,13 +199,13 @@ class Config:
     def lds_bytes(self) -> int:
         return self.data_lds_bytes + self.scale_lds_bytes
 
-    @property
-    def dynamic_lds_bytes(self) -> int:
-        return self.lds_bytes if self.lds_bytes >= _STATIC_LDS_LIMIT else 0
 
-    @property
-    def fixed_lds_bytes(self) -> int:
-        return 0 if self.dynamic_lds_bytes else self.lds_bytes
+@dataclass(frozen=True)
+class LdsBuffers:
+    data_a: dsl.Value
+    data_b: dsl.Value
+    scale_a: dsl.Value
+    scale_b: dsl.Value
 
 
 @dataclass(frozen=True)
@@ -219,6 +213,7 @@ class Coords:
     wi: dsl.Value
     wg_m: dsl.Value
     wg_n: dsl.Value
+    lds: LdsBuffers
 
 
 @dataclass(frozen=True)
@@ -312,8 +307,6 @@ def _kernel_attrs(cfg: Config) -> dict[str, Attribute]:
         attrs[_TARGET_WAVES_ATTR] = dsl.i64_attr(cfg.target_waves)
     if cfg.enable_multi_wave_specialization:
         attrs[_ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR] = UnitAttr.get()
-    if cfg.dynamic_lds_bytes:
-        attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(cfg.dynamic_lds_bytes)
     return attrs
 
 
@@ -344,13 +337,26 @@ def _bounded_offset(
     return bld.assume_range(offset, 0, max(elements - 1, 0))
 
 
-def _emit_coords(bld: dsl.FunctionBuilder, cfg: Config) -> Coords:
+def _allocate_lds(bld: dsl.FunctionBuilder, cfg: Config) -> LdsBuffers:
+    return LdsBuffers(
+        data_a=bld.workgroup_alloc(2 * cfg.a_data_stage_lds_dwords * 4, 16, dsl.i32()),
+        data_b=bld.workgroup_alloc(2 * cfg.b_data_stage_lds_dwords * 4, 16, dsl.i32()),
+        scale_a=bld.workgroup_alloc(
+            2 * cfg.bm * cfg.a_scale_partition_bytes, 16, dsl.i8()
+        ),
+        scale_b=bld.workgroup_alloc(
+            2 * cfg.bn * cfg.b_scale_partition_bytes, 16, dsl.i8()
+        ),
+    )
+
+
+def _emit_coords(bld: dsl.FunctionBuilder, cfg: Config, lds: LdsBuffers) -> Coords:
     wi = bld.assume_range(
         bld.workitem_id(axis=0, width=_WAVE_SIZE), 0, cfg.threads_per_workgroup - 1
     )
     wg_m = bld.assume_range(bld.workgroup_id(axis=0), 0, cfg.m_blocks - 1)
     wg_n = bld.assume_range(bld.workgroup_id(axis=1), 0, cfg.n_blocks - 1)
-    return Coords(wi=wi, wg_m=wg_m, wg_n=wg_n)
+    return Coords(wi=wi, wg_m=wg_m, wg_n=wg_n, lds=lds)
 
 
 def _logical_col(row: int | dsl.Expr, physical_col: int | dsl.Expr) -> dsl.Expr:
@@ -395,17 +401,15 @@ def _data_ptrs(
     b_base: dsl.Value,
     step: dsl.Value,
 ) -> DataPtrs:
-    lds = bld.shared_memory_base(dsl.i32())
+    a_lds, b_lds = coords.lds.data_a, coords.lds.data_b
     wi = dsl.sym("wi")
     wi_first = dsl.sym("wi_first")
-    wg_m = dsl.sym("wg_m")
-    wg_n = dsl.sym("wg_n")
+    wg_m, wg_n = dsl.sym("wg_m"), dsl.sym("wg_n")
     step_sym = dsl.sym("step")
     bindings = {wi: coords.wi, wg_m: coords.wg_m, wg_n: coords.wg_n, step_sym: step}
     first_bindings = {wi_first: bld.read_first(coords.wi)}
     stage = dsl.mod(step_sym, 2)
-    wave = dsl.floor(wi / _WAVE_SIZE)
-    wave_first = dsl.floor(wi_first / _WAVE_SIZE)
+    wave, wave_first = dsl.floor(wi / _WAVE_SIZE), dsl.floor(wi_first / _WAVE_SIZE)
     lane = dsl.mod(wi, _WAVE_SIZE)
     lane_mod16 = dsl.mod(wi, 16)
     lane_k_group = dsl.floor(lane / 16)
@@ -414,13 +418,10 @@ def _data_ptrs(
     read_k_group = _logical_col(lane_mod16, lane_k_group)
     a_slots_per_wave = cfg.a_data_slots // cfg.waves_per_workgroup
     b_slots_per_wave = cfg.b_data_slots // cfg.waves_per_workgroup
-    data_stage_base = stage * cfg.data_stage_lds_dwords
-    b_data_base = cfg.a_data_slots * cfg.dwords_per_data_slot
 
-    def data_dest(slot_per_wave: int, base: int) -> dsl.Value:
+    def data_dest(lds: dsl.Value, stage_dwords: int, slot_per_wave: int) -> dsl.Value:
         off = bld.index_expr(
-            data_stage_base
-            + base
+            stage * stage_dwords
             + (slot_per_wave * cfg.waves_per_workgroup + wave_first)
             * cfg.dwords_per_data_slot,
             {**bindings, **first_bindings},
@@ -455,10 +456,9 @@ def _data_ptrs(
         off = _bounded_offset(bld, off, cfg.b_elements)
         return bld.ptr_add(b_base, off)
 
-    def data_read(slot: int | dsl.Expr, base: int) -> dsl.Value:
+    def data_read(lds: dsl.Value, stage_dwords: int, slot: int | dsl.Expr) -> dsl.Value:
         off = bld.index_expr(
-            data_stage_base
-            + base
+            stage * stage_dwords
             + slot * cfg.dwords_per_data_slot
             + lane_mod16 * cfg.storage_k_tile_dwords
             + read_k_group * cfg.storage_lane_k_dwords,
@@ -466,8 +466,7 @@ def _data_ptrs(
         )
         return bld.ptr_add(lds, off)
 
-    m_wave = dsl.floor(wave / cfg.bn)
-    n_wave = dsl.mod(wave, cfg.bn)
+    m_wave, n_wave = dsl.floor(wave / cfg.bn), dsl.mod(wave, cfg.bn)
     a_read_slots = _read_slots(
         cfg.wave_k_tiles, cfg.block_m_tiles, cfg.wave_m_tiles, m_wave
     )
@@ -477,11 +476,21 @@ def _data_ptrs(
     return DataPtrs(
         a_src=_tuple_from_count(a_slots_per_wave, a_src),
         b_src=_tuple_from_count(b_slots_per_wave, b_src),
-        a_dest=_tuple_from_count(a_slots_per_wave, lambda i: data_dest(i, 0)),
-        b_dest=_tuple_from_count(b_slots_per_wave, lambda i: data_dest(i, b_data_base)),
-        a_read=_tuple_from_slots(a_read_slots, lambda slot: data_read(slot, 0)),
+        a_dest=_tuple_from_count(
+            a_slots_per_wave,
+            lambda i: data_dest(a_lds, cfg.a_data_stage_lds_dwords, i),
+        ),
+        b_dest=_tuple_from_count(
+            b_slots_per_wave,
+            lambda i: data_dest(b_lds, cfg.b_data_stage_lds_dwords, i),
+        ),
+        a_read=_tuple_from_slots(
+            a_read_slots,
+            lambda slot: data_read(a_lds, cfg.a_data_stage_lds_dwords, slot),
+        ),
         b_read=_tuple_from_slots(
-            b_read_slots, lambda slot: data_read(slot, b_data_base)
+            b_read_slots,
+            lambda slot: data_read(b_lds, cfg.b_data_stage_lds_dwords, slot),
         ),
     )
 
@@ -541,8 +550,8 @@ def _stage_canonical_scales(
     b_scale: dsl.Value,
     step: dsl.Value,
 ) -> list[dsl.Value]:
-    lds_a = bld.shared_memory_base(dsl.i8(), offset=cfg.scale_a_lds_base)
-    lds_b = bld.shared_memory_base(dsl.i8(), offset=cfg.scale_b_lds_base)
+    lds_a = coords.lds.scale_a
+    lds_b = coords.lds.scale_b
     wi = dsl.sym("wi")
     wg_m = dsl.sym("wg_m")
     wg_n = dsl.sym("wg_n")
@@ -576,7 +585,7 @@ def _stage_canonical_scales(
                         bindings,
                     )
                     lds_off = bld.index_expr(
-                        stage * cfg.scale_stage_lds_bytes
+                        stage * (cfg.bm * cfg.a_scale_partition_bytes)
                         + m_wave * cfg.a_scale_partition_bytes
                         + group * _SCALE_GROUP_BYTES
                         + lane * 4
@@ -612,7 +621,7 @@ def _stage_canonical_scales(
                         bindings,
                     )
                     lds_off = bld.index_expr(
-                        stage * cfg.scale_stage_lds_bytes
+                        stage * (cfg.bn * cfg.b_scale_partition_bytes)
                         + n_wave * cfg.b_scale_partition_bytes
                         + group * _SCALE_GROUP_BYTES
                         + lane * 4
@@ -655,7 +664,12 @@ def _tensilelite_scale_dma_requests(
     b_scale: dsl.Value,
     step: dsl.Value,
 ) -> list[DmaRequest]:
-    lds = bld.shared_memory_base(dsl.i32(), offset=cfg.scale_lds_base)
+    lds_a = bld.ptr_cast(
+        coords.lds.scale_a, dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
+    )
+    lds_b = bld.ptr_cast(
+        coords.lds.scale_b, dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
+    )
     wi = dsl.sym("wi")
     wi_first = dsl.sym("wi_first")
     wg_m = dsl.sym("wg_m")
@@ -680,7 +694,8 @@ def _tensilelite_scale_dma_requests(
     ctas = cfg.m_blocks * cfg.n_blocks
     a_elements = ctas * a_cta_bytes
     b_elements = ctas * b_cta_bytes
-    b_stage_base = cfg.bm * (cfg.a_scale_partition_bytes // 4)
+    a_stage_dwords = cfg.bm * (cfg.a_scale_partition_bytes // 4)
+    b_stage_dwords = cfg.bn * (cfg.b_scale_partition_bytes // 4)
 
     group = 0
     while group < a_groups:
@@ -695,7 +710,7 @@ def _tensilelite_scale_dma_requests(
         )
         src = _bounded_offset(bld, src, a_elements)
         dest = bld.index_expr(
-            stage * cfg.scale_stage_lds_dwords
+            stage * a_stage_dwords
             + m_wave_first * (cfg.a_scale_partition_bytes // 4)
             + group * (_SCALE_GROUP_BYTES // 4),
             {**bindings, **first_bindings},
@@ -703,7 +718,7 @@ def _tensilelite_scale_dma_requests(
         requests.append(
             DmaRequest(
                 bld.ptr_add(a_scale, src),
-                bld.ptr_add(lds, dest),
+                bld.ptr_add(lds_a, dest),
                 chunk_groups * 4,
             )
         )
@@ -721,8 +736,7 @@ def _tensilelite_scale_dma_requests(
         )
         src = _bounded_offset(bld, src, b_elements)
         dest = bld.index_expr(
-            stage * cfg.scale_stage_lds_dwords
-            + b_stage_base
+            stage * b_stage_dwords
             + n_wave_first * (cfg.b_scale_partition_bytes // 4)
             + group * (_SCALE_GROUP_BYTES // 4),
             {**bindings, **first_bindings},
@@ -730,7 +744,7 @@ def _tensilelite_scale_dma_requests(
         requests.append(
             DmaRequest(
                 bld.ptr_add(b_scale, src),
-                bld.ptr_add(lds, dest),
+                bld.ptr_add(lds_b, dest),
                 chunk_groups * 4,
             )
         )
@@ -759,7 +773,12 @@ def _read_scale_groups(
     step: dsl.Value,
     ready: dsl.Value,
 ) -> tuple[list[dsl.Value], list[dsl.Value], list[dsl.Value]]:
-    lds = bld.shared_memory_base(dsl.i32(), offset=cfg.scale_lds_base)
+    lds_a = bld.ptr_cast(
+        coords.lds.scale_a, dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
+    )
+    lds_b = bld.ptr_cast(
+        coords.lds.scale_b, dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
+    )
     wi = dsl.sym("wi")
     step_sym = dsl.sym("step_scale_read")
     bindings = {wi: coords.wi, step_sym: step}
@@ -768,20 +787,21 @@ def _read_scale_groups(
     m_wave = dsl.floor(wave / cfg.bn)
     n_wave = dsl.mod(wave, cfg.bn)
     lane = dsl.mod(wi, _WAVE_SIZE)
-    b_stage_base = cfg.bm * (cfg.a_scale_partition_bytes // 4)
+    a_stage_dwords = cfg.bm * (cfg.a_scale_partition_bytes // 4)
+    b_stage_dwords = cfg.bn * (cfg.b_scale_partition_bytes // 4)
     a_scales: list[dsl.Value] = []
     b_scales: list[dsl.Value] = []
     tokens: list[dsl.Value] = []
     for group in range(cfg.a_scale_groups_per_partition):
         off = bld.index_expr(
-            stage * cfg.scale_stage_lds_dwords
+            stage * a_stage_dwords
             + m_wave * (cfg.a_scale_partition_bytes // 4)
             + group * (_SCALE_GROUP_BYTES // 4)
             + lane,
             bindings,
         )
         scale, token = bld.load(
-            bld.ptr_add(lds, off),
+            bld.ptr_add(lds_a, off),
             dsl.simd_type(dsl.i32(), width=_WAVE_SIZE),
             after=ready,
         )
@@ -789,15 +809,14 @@ def _read_scale_groups(
         tokens.append(token)
     for group in range(cfg.b_scale_groups_per_partition):
         off = bld.index_expr(
-            stage * cfg.scale_stage_lds_dwords
-            + b_stage_base
+            stage * b_stage_dwords
             + n_wave * (cfg.b_scale_partition_bytes // 4)
             + group * (_SCALE_GROUP_BYTES // 4)
             + lane,
             bindings,
         )
         scale, token = bld.load(
-            bld.ptr_add(lds, off),
+            bld.ptr_add(lds_b, off),
             dsl.simd_type(dsl.i32(), width=_WAVE_SIZE),
             after=ready,
         )
@@ -1570,6 +1589,7 @@ def _store_results(
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: Config) -> None:
     a_arg, b_arg, c_arg, a_scale_arg, b_scale_arg, trip_count = bld.args
+    lds = _allocate_lds(bld, cfg)
     a_base = _buffer(bld, a_arg, cfg.a_elements, dsl.i8())
     b_base = _buffer(bld, b_arg, cfg.b_elements, dsl.i8())
     if cfg.scale_input == "canonical":
@@ -1585,7 +1605,7 @@ def _emit_kernel(bld: dsl.FunctionBuilder, cfg: Config) -> None:
         )
     a_scale = _buffer(bld, a_scale_arg, a_scale_elements, dsl.i8())
     b_scale = _buffer(bld, b_scale_arg, b_scale_elements, dsl.i8())
-    coords = _emit_coords(bld, cfg)
+    coords = _emit_coords(bld, cfg, lds)
     acc_type = dsl.fragment_type(2, dsl.f32(), 16, 16, _WAVE_SIZE, _ACC_REGS)
     init = tuple(
         bld.fragment_fill(bld.constant(dsl.i32(), 0), acc_type)
@@ -1634,7 +1654,7 @@ def build_module(cfg: Config) -> Module:
         gmod.kernel(
             _KERNEL_NAME,
             _kernel_inputs(),
-            lds_size=cfg.fixed_lds_bytes,
+            lds_size=0,
             workgroup_size=[cfg.threads_per_workgroup, 1, 1],
             attrs=_kernel_attrs(cfg),
         ) as fb,

@@ -272,18 +272,18 @@ wmma_f16_matmul_tiled:
 		s_add_i32 s34, s34, s32
 		buffer_load_dwordx4 v21, s[20:23], s34 offen lds
 		v_add_u32_e32 v23, s34, v21
-		s_add_i32 m0, m0, 0x1000
+		s_add_i32 m0, m0, 0x2000
 		s_lshl_b32 s34, s13, 15
 		s_add_i32 s35, s31, s34
 		buffer_load_dwordx4 v2, s[24:27], s35 offen lds
 		v_add_u32_e32 v23, 0x400, v23
-		s_add_i32 m0, m0, 0x1000
+		s_add_i32 m0, m0, 0xfffff000
 		s_add_i32 s8, s8, 0x200
 		s_add_i32 s8, s8, s33
 		s_add_i32 s8, s8, s32
 		buffer_load_dwordx4 v21, s[20:23], s8 offen lds
 		s_add_i32 s8, s31, 0x200
-		s_add_i32 m0, m0, 0x1000
+		s_add_i32 m0, m0, 0x2000
 		s_add_i32 s8, s8, s34
 		s_lshl_b32 s31, s13, 19
 		s_add_i32 s32, s29, s31
@@ -479,7 +479,7 @@ wmma_f16_matmul_tiled:
 		ds_read2st64_b32 v[228:229], v143 offset0:4 offset1:5
 		ds_read2st64_b32 v[230:231], v143 offset0:6 offset1:7
 		v_add_u32_e32 v232, s8, v19
-		ds_read2st64_b32 v[234:235], v232 offset0:16 offset1:17
+		ds_read2st64_b32 v[234:235], v232 offset0:32 offset1:33
 		ds_read_b128 a[156:159], v142 offset:16384
 		ds_read_b128 a[160:163], v142 offset:17408
 		ds_read_b128 a[164:167], v142 offset:18432
@@ -498,12 +498,12 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 a[216:219], v142 offset:31744
 		s_waitcnt vmcnt(3) lgkmcnt(14)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[24:27], a[92:95], v[116:119], v[24:27], v224, v234 op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_add_i32 s32, s29, 0x2000
+		s_add_i32 s32, s29, 0x1000
 		s_add_i32 s33, s28, 0x10000
-		s_add_i32 s8, s8, 0x2000
+		s_add_i32 s8, s8, 0x1000
 		s_waitcnt vmcnt(2)
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[108:111], a[92:95], v[120:123], v[108:111], v224, v234 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
-		s_and_b32 s8, s8, 0x3fff
+		s_and_b32 s8, s8, 0x1fff
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[92:95], a[96:99], v[120:123], v[92:95], v224, v234 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 v[96:99], a[96:99], v[116:119], v[96:99], v224, v234 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		s_waitcnt vmcnt(1)
@@ -580,7 +580,7 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 a[92:95], v142 offset:32768
 		s_add_i32 m0, m0, 0x1000
 		s_and_b32 s28, s33, 0x1ffff
-		s_and_b32 s32, s32, 0x3fff
+		s_and_b32 s32, s32, 0x1fff
 		s_add_i32 s11, s11, 1
 		buffer_load_dwordx4 v5, s[16:19], s34 offen lds
 		ds_read_b128 a[96:99], v142 offset:33792
@@ -693,7 +693,7 @@ wmma_f16_matmul_tiled:
 		s_add_i32 m0, m0, 0x1000
 		s_nop 0
 		buffer_load_dwordx4 v11, s[16:19], s34 offen lds
-		ds_read2st64_b32 v[236:237], v232 offset0:18 offset1:19
+		ds_read2st64_b32 v[236:237], v232 offset0:34 offset1:35
 		ds_read_b128 a[156:159], v142 offset:49152
 		ds_read_b128 a[160:163], v142 offset:50176
 		ds_read_b128 a[164:167], v142 offset:51200
@@ -906,7 +906,7 @@ wmma_f16_matmul_tiled:
 		s_nop 0
 		buffer_load_dwordx4 v23, s[20:23], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0x1000
+		s_add_i32 m0, m0, 0x2000
 		s_add_u32 s20, s20, 0x200
 		s_addc_u32 s21, s21, 0
 		buffer_load_dwordx4 v2, s[24:27], 0 offen lds
@@ -936,7 +936,7 @@ wmma_f16_matmul_tiled:
 		ds_read2st64_b32 v[142:143], v22 offset0:2 offset1:3
 		ds_read2st64_b32 v[244:245], v22 offset0:4 offset1:5
 		ds_read2st64_b32 v[246:247], v22 offset0:6 offset1:7
-		ds_read2st64_b32 v[248:249], v19 offset0:16 offset1:17
+		ds_read2st64_b32 v[248:249], v19 offset0:32 offset1:33
 		ds_read_b128 a[124:127], v3 offset:16384
 		ds_read_b128 a[128:131], v3 offset:17408
 		ds_read_b128 a[132:135], v3 offset:18432
@@ -1120,7 +1120,7 @@ wmma_f16_matmul_tiled:
 		ds_read2st64_b32 v[6:7], v22 offset0:10 offset1:11
 		ds_read2st64_b32 v[8:9], v22 offset0:12 offset1:13
 		ds_read2st64_b32 v[10:11], v22 offset0:14 offset1:15
-		ds_read2st64_b32 v[12:13], v19 offset0:18 offset1:19
+		ds_read2st64_b32 v[12:13], v19 offset0:34 offset1:35
 		ds_read_b128 a[124:127], v3 offset:49152
 		ds_read_b128 a[128:131], v3 offset:50176
 		ds_read_b128 a[132:135], v3 offset:51200
@@ -1325,14 +1325,14 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 a[112:115], v0 offset:13312
 		ds_read_b128 a[116:119], v0 offset:14336
 		ds_read_b128 a[120:123], v0 offset:15360
-		ds_read_b32 v2, v22 offset:8192
-		ds_read_b32 v3, v22 offset:8448
-		ds_read_b32 v16, v22 offset:8704
-		ds_read_b32 v17, v22 offset:8960
-		ds_read_b32 v18, v22 offset:9216
-		ds_read_b32 v21, v22 offset:9472
-		ds_read_b32 v23, v22 offset:9728
-		ds_read_b32 v112, v22 offset:9984
+		ds_read_b32 v2, v22 offset:4096
+		ds_read_b32 v3, v22 offset:4352
+		ds_read_b32 v16, v22 offset:4608
+		ds_read_b32 v17, v22 offset:4864
+		ds_read_b32 v18, v22 offset:5120
+		ds_read_b32 v21, v22 offset:5376
+		ds_read_b32 v23, v22 offset:5632
+		ds_read_b32 v112, v22 offset:5888
 		ds_read_b32 v113, v19 offset:12288
 		ds_read_b32 v114, v19 offset:12544
 		ds_read_b128 a[124:127], v0 offset:16384
@@ -1512,14 +1512,14 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[64:67], a[180:183], v[252:255], a[64:67], v112, v113 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[80:83], a[184:187], v[252:255], a[80:83], v112, v113 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 		s_barrier
-		ds_read_b32 v1, v22 offset:10240
-		ds_read_b32 v2, v22 offset:10496
-		ds_read_b32 v3, v22 offset:10752
-		ds_read_b32 v4, v22 offset:11008
-		ds_read_b32 v5, v22 offset:11264
-		ds_read_b32 v6, v22 offset:11520
-		ds_read_b32 v7, v22 offset:11776
-		ds_read_b32 v8, v22 offset:12032
+		ds_read_b32 v1, v22 offset:6144
+		ds_read_b32 v2, v22 offset:6400
+		ds_read_b32 v3, v22 offset:6656
+		ds_read_b32 v4, v22 offset:6912
+		ds_read_b32 v5, v22 offset:7168
+		ds_read_b32 v6, v22 offset:7424
+		ds_read_b32 v7, v22 offset:7680
+		ds_read_b32 v8, v22 offset:7936
 		ds_read_b32 v9, v19 offset:12800
 		ds_read_b32 v10, v19 offset:13056
 		ds_read_b128 v[16:19], v0 offset:49152
@@ -2559,7 +2559,7 @@ wmma_f16_matmul_tiled:
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
 	.amdhsa_kernel wmma_f16_matmul_tiled
-		.amdhsa_group_segment_fixed_size 0
+		.amdhsa_group_segment_fixed_size 147456
 		.amdhsa_private_segment_fixed_size 0
 		.amdhsa_kernarg_size 48
 		.amdhsa_user_sgpr_count 13
@@ -2628,7 +2628,7 @@ amdhsa.kernels:
         .offset:         40
         .size:           4
         .value_kind:     by_value
-    .group_segment_fixed_size: 0
+    .group_segment_fixed_size: 147456
     .kernarg_segment_align: 8
     .kernarg_segment_size: 48
     .max_flat_workgroup_size: 256

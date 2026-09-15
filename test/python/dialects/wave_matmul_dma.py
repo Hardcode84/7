@@ -15,7 +15,8 @@ module = build_wmma_f16_matmul_module(
 print(module)
 
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
-# CHECK-SAME: wave.lds_size = 8192
+# CHECK-SAME: wave.lds_size = 0
+# CHECK-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 4096 : i64}
 # CHECK: wave.read_first
 # CHECK-COUNT-2: waveamd.dma_load_lds
 # CHECK: wave.barrier

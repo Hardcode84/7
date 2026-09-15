@@ -160,17 +160,7 @@ def _import_builder(build_dir: Path):
 
 
 def _dynamic_lds_bytes(args: argparse.Namespace) -> int:
-    sys.path.insert(0, str(args.build_dir / "python_packages/wave_mlir"))
-    from mlir.dialects.wave_flash_attention import Gfx950FlashAttentionConfig
-
-    return Gfx950FlashAttentionConfig(
-        batch=args.batch,
-        heads=args.heads,
-        sequence=args.sequence,
-        xcds=args.xcds,
-        waves=args.waves,
-        qk_max_abs=args.qk_max_abs,
-    ).dynamic_lds_bytes
+    return 0
 
 
 def _source(args: argparse.Namespace) -> str:

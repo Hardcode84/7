@@ -449,19 +449,51 @@ class _MatmulConfig:
 
     @property
     def data_lds_bytes(self) -> int:
+        return self.a_data_lds_bytes + self.b_data_lds_bytes
+
+    @property
+    def a_data_lds_bytes(self) -> int:
         if self.use_dma_lds:
             if self.coalesced_mfma_output or self.uses_aiter_mxfp4_layout:
-                return _dma_cta_buffer_dwords(self) * _dma_buffer_count(self) * 4
-            one_buffer = (
+                return (
+                    _dma_operand_buffer_dwords(self, "a") * _dma_buffer_count(self) * 4
+                )
+            return (
                 self.wave_k_tiles
-                * (self.BM * self.wave_m_tiles + self.BN * self.wave_n_tiles)
+                * self.BM
+                * self.wave_m_tiles
                 * self.mma.lds_dwords_per_frag
                 * 4
+                * _dma_buffer_count(self)
             )
-            return one_buffer * _dma_buffer_count(self)
         return (
             self.wave_k_tiles
-            * (self.wave_m_tiles + self.wave_n_tiles)
+            * self.wave_m_tiles
+            * self.waves_per_workgroup
+            * self.mma.lds_dwords_per_frag
+            * 4
+        )
+
+    @property
+    def b_data_lds_bytes(self) -> int:
+        if self.uses_aiter_mxfp4_layout:
+            return 0
+        if self.use_dma_lds:
+            if self.coalesced_mfma_output:
+                return (
+                    _dma_operand_buffer_dwords(self, "b") * _dma_buffer_count(self) * 4
+                )
+            return (
+                self.wave_k_tiles
+                * self.BN
+                * self.wave_n_tiles
+                * self.mma.lds_dwords_per_frag
+                * 4
+                * _dma_buffer_count(self)
+            )
+        return (
+            self.wave_k_tiles
+            * self.wave_n_tiles
             * self.waves_per_workgroup
             * self.mma.lds_dwords_per_frag
             * 4
@@ -469,13 +501,26 @@ class _MatmulConfig:
 
     @property
     def scale_lds_bytes(self) -> int:
+        return self.a_scale_lds_bytes + self.b_scale_lds_bytes
+
+    @property
+    def a_scale_lds_bytes(self) -> int:
         if not self.uses_packed_mxfp4:
             return 0
         if self.uses_aiter_mxfp4_layout:
-            return 2 * _aiter_mxfp4_scale_batch_dwords(self) * 4
-        scale_tiles = self.BM * _mxfp4_scale_tiles_per_wave(
-            self.wave_m_tiles
-        ) + self.BN * _mxfp4_scale_tiles_per_wave(self.wave_n_tiles)
+            return 2 * _aiter_mxfp4_scale_axis_batch_dwords(self, "m") * 4
+        scale_tiles = self.BM * _mxfp4_scale_tiles_per_wave(self.wave_m_tiles)
+        if self.use_dma_lds:
+            return 2 * self.wave_k_tiles * scale_tiles * 512
+        return scale_tiles * 512
+
+    @property
+    def b_scale_lds_bytes(self) -> int:
+        if not self.uses_packed_mxfp4:
+            return 0
+        if self.uses_aiter_mxfp4_layout:
+            return 2 * _aiter_mxfp4_scale_axis_batch_dwords(self, "n") * 4
+        scale_tiles = self.BN * _mxfp4_scale_tiles_per_wave(self.wave_n_tiles)
         if self.use_dma_lds:
             return 2 * self.wave_k_tiles * scale_tiles * 512
         return scale_tiles * 512
@@ -747,8 +792,6 @@ _ENABLE_SPLIT_BARRIERS_ATTR = "waveamdmachine.enable_split_barriers"
 _ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR = (
     "waveamdmachine.enable_multi_wave_specialization"
 )
-_DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
-_STATIC_LDS_LIMIT = 64 * 1024
 _MXFP4_SCALE_PACK = 4
 _Mxfp4ScaleAxis = Literal["m", "n"]
 
@@ -771,14 +814,6 @@ def _target_waves_attrs(target_waves: int | None) -> dict[str, dsl.Attribute]:
     return {_TARGET_WAVES_ATTR: dsl.i64_attr(target_waves)}
 
 
-def _dynamic_lds_bytes(cfg: _MatmulConfig) -> int:
-    return cfg.lds_bytes if cfg.lds_bytes >= _STATIC_LDS_LIMIT else 0
-
-
-def _fixed_lds_bytes(cfg: _MatmulConfig) -> int:
-    return 0 if _dynamic_lds_bytes(cfg) else cfg.lds_bytes
-
-
 def _kernel_attrs(
     cfg: _MatmulConfig, target_waves: int | None
 ) -> dict[str, dsl.Attribute]:
@@ -787,9 +822,6 @@ def _kernel_attrs(
         attrs[_ENABLE_SPLIT_BARRIERS_ATTR] = UnitAttr.get()
     if cfg.enable_multi_wave_specialization:
         attrs[_ENABLE_MULTI_WAVE_SPECIALIZATION_ATTR] = UnitAttr.get()
-    dynamic_lds = _dynamic_lds_bytes(cfg)
-    if dynamic_lds:
-        attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(dynamic_lds)
     return attrs
 
 
@@ -1113,6 +1145,46 @@ def compute_wmma_f16_matmul_reference_buffer(
 
 
 @dataclass(frozen=True)
+class _MatmulLds:
+    a_data: dsl.Value
+    b_data: dsl.Value | None
+    a_scale: dsl.Value | None
+    b_scale: dsl.Value | None
+    mailbox: dsl.Value | None
+
+
+def _allocate_matmul_lds(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, *, streamk: bool = False
+) -> _MatmulLds:
+    a_data = bld.workgroup_alloc(cfg.a_data_lds_bytes, 16, dsl.i8())
+    b_data = (
+        bld.workgroup_alloc(cfg.b_data_lds_bytes, 16, dsl.i8())
+        if cfg.b_data_lds_bytes
+        else None
+    )
+    a_scale = (
+        bld.workgroup_alloc(cfg.a_scale_lds_bytes, 16, dsl.i8())
+        if cfg.a_scale_lds_bytes
+        else None
+    )
+    b_scale = (
+        bld.workgroup_alloc(cfg.b_scale_lds_bytes, 16, dsl.i8())
+        if cfg.b_scale_lds_bytes
+        else None
+    )
+    mailbox = (
+        bld.workgroup_alloc(_STREAMK_MAILBOX_BYTES, 16, dsl.i32()) if streamk else None
+    )
+    return _MatmulLds(
+        a_data=a_data,
+        b_data=b_data,
+        a_scale=a_scale,
+        b_scale=b_scale,
+        mailbox=mailbox,
+    )
+
+
+@dataclass(frozen=True)
 class _TileCoords:
     """Per-wave coordinates derived from `workitem_id` / `workgroup_id`."""
 
@@ -1129,6 +1201,7 @@ class _TileCoords:
     a_scale_base: dsl.Value | None
     b_scale_base: dsl.Value | None
     c_ptr: dsl.Value
+    lds: _MatmulLds
     explicit_cta: bool = False
 
 
@@ -1139,6 +1212,7 @@ class _TileInputs:
     c: dsl.Value
     a_scale: dsl.Value | None
     b_scale: dsl.Value | None
+    lds: _MatmulLds
 
 
 def _wrap_in_buffer(
@@ -1277,14 +1351,12 @@ def _emit_tile_coords(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     *,
-    inputs: _TileInputs | None = None,
+    inputs: _TileInputs,
     wg_m_raw: dsl.Value | None = None,
     wg_n_raw: dsl.Value | None = None,
 ) -> _TileCoords:
     """Compute per-wave A/B/C pointer coordinates."""
     explicit_cta = wg_m_raw is not None
-    if inputs is None:
-        inputs = _emit_tile_inputs(bld, cfg)
     a_arg, b_arg, c_arg = inputs.a, inputs.b, inputs.c
     a_scale_arg, b_scale_arg = inputs.a_scale, inputs.b_scale
 
@@ -1361,11 +1433,14 @@ def _emit_tile_coords(
         a_scale_base=a_scale_arg,
         b_scale_base=b_scale_arg,
         c_ptr=c_ptr,
+        lds=inputs.lds,
         explicit_cta=explicit_cta,
     )
 
 
-def _emit_tile_inputs(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileInputs:
+def _emit_tile_inputs(
+    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, lds: _MatmulLds
+) -> _TileInputs:
     a_arg, b_arg, c_arg = bld.args[0], bld.args[1], bld.args[2]
     a_scale_arg = bld.args[3] if cfg.uses_packed_mxfp4 else None
     b_scale_arg = bld.args[4] if cfg.uses_packed_mxfp4 else None
@@ -1406,6 +1481,7 @@ def _emit_tile_inputs(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> _TileInpu
         c=c_arg,
         a_scale=a_scale_arg,
         b_scale=b_scale_arg,
+        lds=lds,
     )
 
 
@@ -1424,8 +1500,10 @@ class _LdsStaging:
     b_dma_src_ptrs: tuple[dsl.Value, ...] = ()
     a_dma_lds_byte_ptrs: tuple[dsl.Value, ...] = ()
     b_dma_lds_byte_ptrs: tuple[dsl.Value, ...] = ()
-    dma_lds_wave_byte_base: dsl.Value | None = None
-    dma_read_lds: dsl.Value | None = None
+    a_dma_lds_wave_byte_base: dsl.Value | None = None
+    b_dma_lds_wave_byte_base: dsl.Value | None = None
+    a_dma_read_lds: dsl.Value | None = None
+    b_dma_read_lds: dsl.Value | None = None
     a_dma_read_base_offset: dsl.Value | None = None
     b_dma_read_base_offset: dsl.Value | None = None
     a_dma_read_offsets: tuple[int, ...] = ()
@@ -1440,7 +1518,8 @@ class _DmaCtaStagingPtrs:
     b_lds: tuple[dsl.Value, ...]
     a_lds_bytes: tuple[dsl.Value, ...]
     b_lds_bytes: tuple[dsl.Value, ...]
-    lds_wave_byte_base: dsl.Value
+    a_lds_wave_byte_base: dsl.Value
+    b_lds_wave_byte_base: dsl.Value | None
     a_read: tuple[dsl.Value, ...]
     b_read: tuple[dsl.Value, ...]
     a_read_base_offset: dsl.Value
@@ -1458,7 +1537,6 @@ class _DmaCtaGeometry:
     a_slots_per_wave: int
     b_slots_per_wave: int
     dwords_per_slot: int
-    b_lds_base: int
 
 
 def _fragment_slot_indices(
@@ -1510,13 +1588,27 @@ def _dma_cta_geometry(cfg: _MatmulConfig) -> _DmaCtaGeometry:
         a_slots_per_wave=a_total_slots // cfg.waves_per_workgroup,
         b_slots_per_wave=b_total_slots // cfg.waves_per_workgroup,
         dwords_per_slot=dwords,
-        b_lds_base=a_total_slots * dwords,
     )
 
 
-def _dma_cta_buffer_dwords(cfg: _MatmulConfig) -> int:
+def _dma_operand_buffer_dwords(cfg: _MatmulConfig, axis: Literal["a", "b"]) -> int:
     geom = _dma_cta_geometry(cfg)
-    return (geom.a_total_slots + geom.b_total_slots) * geom.dwords_per_slot
+    slots = geom.a_total_slots if axis == "a" else geom.b_total_slots
+    return slots * geom.dwords_per_slot
+
+
+def _optional_lds_ptr_cast(
+    bld: dsl.FunctionBuilder, ptr: dsl.Value | None, element_type: dsl.Type
+) -> dsl.Value | None:
+    if ptr is None:
+        return None
+    return bld.ptr_cast(ptr, dsl.ptr_type(element_type, dsl.shared_address_space()))
+
+
+def _require_lds(ptr: dsl.Value | None, name: str) -> dsl.Value:
+    if ptr is None:
+        raise ValueError(f"{name} requires an LDS allocation")
+    return ptr
 
 
 def _uses_phased_dma_schedule(cfg: _MatmulConfig) -> bool:
@@ -1564,8 +1656,10 @@ class _DmaCtaStagingContext:
     bld: dsl.FunctionBuilder
     cfg: _MatmulConfig
     coords: _TileCoords
-    lds: dsl.Value
-    lds_bytes: dsl.Value
+    a_lds: dsl.Value
+    b_lds: dsl.Value | None
+    a_lds_bytes: dsl.Value
+    b_lds_bytes: dsl.Value | None
     geom: _DmaCtaGeometry
     first_bindings: dict[dsl.Expr, dsl.Value]
     bindings: dict[dsl.Expr, dsl.Value]
@@ -1580,7 +1674,8 @@ class _DmaCtaStagingContext:
     src_k_group: int | dsl.Expr
     read_k_group: int | dsl.Expr
     k_step: dsl.Expr | None
-    lds_wave_byte_base: dsl.Value
+    a_lds_wave_byte_base: dsl.Value
+    b_lds_wave_byte_base: dsl.Value | None
     chunks_per_row: int
 
 
@@ -1598,7 +1693,6 @@ def _make_dma_cta_staging_context(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
-    lds: dsl.Value,
     k_step: dsl.Value | None = None,
 ) -> _DmaCtaStagingContext:
     wi = dsl.sym("wi")
@@ -1621,7 +1715,13 @@ def _make_dma_cta_staging_context(
     if k_step_expr is not None:
         bindings[k_step_expr] = k_step
     geom = _dma_cta_geometry(cfg)
-    lds_bytes = bld.shared_memory_base(dsl.i8())
+    a_lds = bld.ptr_cast(
+        coords.lds.a_data, dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
+    )
+    b_lds = _optional_lds_ptr_cast(bld, coords.lds.b_data, dsl.i32())
+    byte_ptr = dsl.ptr_type(dsl.i8(), dsl.shared_address_space())
+    a_lds_bytes = bld.ptr_cast(coords.lds.a_data, byte_ptr)
+    b_lds_bytes = _optional_lds_ptr_cast(bld, coords.lds.b_data, dsl.i8())
     lds_wave_byte_offset = bld.index_expr(
         4 * wave_id_uniform * geom.dwords_per_slot,
         bindings=first_bindings,
@@ -1633,8 +1733,10 @@ def _make_dma_cta_staging_context(
         bld=bld,
         cfg=cfg,
         coords=coords,
-        lds=lds,
-        lds_bytes=lds_bytes,
+        a_lds=a_lds,
+        b_lds=b_lds,
+        a_lds_bytes=a_lds_bytes,
+        b_lds_bytes=b_lds_bytes,
         geom=geom,
         first_bindings=first_bindings,
         bindings=bindings,
@@ -1649,30 +1751,30 @@ def _make_dma_cta_staging_context(
         src_k_group=src_k_group,
         read_k_group=read_k_group,
         k_step=k_step_expr,
-        lds_wave_byte_base=lds_wave_byte_base,
+        a_lds_wave_byte_base=lds_wave_byte_base,
+        b_lds_wave_byte_base=lds_wave_byte_base if b_lds is not None else None,
         chunks_per_row=chunks_per_row,
     )
 
 
 def _dma_lds_ptr(
-    ctx: _DmaCtaStagingContext, slot_per_wave: int, base: int
+    ctx: _DmaCtaStagingContext, lds: dsl.Value, slot_per_wave: int
 ) -> dsl.Value:
     slot_off = ctx.bld.index_expr(
-        base
-        + _dma_slot_expr(ctx.cfg, slot_per_wave, ctx.wave_id_uniform)
+        _dma_slot_expr(ctx.cfg, slot_per_wave, ctx.wave_id_uniform)
         * ctx.geom.dwords_per_slot,
         bindings=ctx.first_bindings,
     )
-    return ctx.bld.ptr_add(ctx.lds, slot_off)
+    return ctx.bld.ptr_add(lds, slot_off)
 
 
 def _dma_lds_byte_ptr(
-    ctx: _DmaCtaStagingContext, slot_per_wave: int, base: int
+    ctx: _DmaCtaStagingContext, lds: dsl.Value, slot_per_wave: int
 ) -> dsl.Value:
-    byte_offset = 4 * (
-        base + slot_per_wave * ctx.cfg.waves_per_workgroup * ctx.geom.dwords_per_slot
+    byte_offset = (
+        4 * slot_per_wave * ctx.cfg.waves_per_workgroup * ctx.geom.dwords_per_slot
     )
-    return ctx.bld.ptr_add(ctx.lds_bytes, ctx.bld.constant(dsl.i32(), byte_offset))
+    return ctx.bld.ptr_add(lds, ctx.bld.constant(dsl.i32(), byte_offset))
 
 
 def _a_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
@@ -1781,26 +1883,24 @@ def _b_dma_src_ptr(ctx: _DmaCtaStagingContext, slot_per_wave: int) -> dsl.Value:
 
 
 def _dma_read_ptr(
-    ctx: _DmaCtaStagingContext, slot: int | dsl.Expr, base: int
+    ctx: _DmaCtaStagingContext, lds: dsl.Value, slot: int | dsl.Expr
 ) -> dsl.Value:
     slot_off = ctx.bld.index_expr(
-        base
-        + slot * ctx.geom.dwords_per_slot
+        slot * ctx.geom.dwords_per_slot
         + ctx.lane_mod16 * ctx.cfg.storage_k_tile_dwords
         + ctx.read_k_group * ctx.cfg.storage_lane_k_dwords,
         bindings=ctx.bindings,
     )
-    return ctx.bld.ptr_add(ctx.lds, slot_off)
+    return ctx.bld.ptr_add(lds, slot_off)
 
 
 def _dma_read_base_offset(
-    ctx: _DmaCtaStagingContext, slot: int | dsl.Expr, base: int
+    ctx: _DmaCtaStagingContext, slot: int | dsl.Expr
 ) -> dsl.Value:
     offset = ctx.bld.index_expr(
         4
         * (
-            base
-            + slot * ctx.geom.dwords_per_slot
+            slot * ctx.geom.dwords_per_slot
             + ctx.lane_mod16 * ctx.cfg.storage_k_tile_dwords
             + ctx.read_k_group * ctx.cfg.storage_lane_k_dwords
         ),
@@ -1844,34 +1944,32 @@ def _spatial_dma_read_offsets(
 
 def _coalesced_dma_read_ptr(
     ctx: _DmaCtaStagingContext,
+    lds: dsl.Value,
     tile: int,
     phase: int,
     group: dsl.Expr,
-    base: int,
 ) -> dsl.Value:
     cfg = ctx.cfg
     line = group * 16 + ctx.lane_mod16
     tile_stride = cfg.wave_k_tiles * cfg.storage_k_tile_dwords
     off = ctx.bld.index_expr(
-        base
-        + line * ctx.geom.dwords_per_slot
+        line * ctx.geom.dwords_per_slot
         + tile * tile_stride
         + phase * cfg.storage_k_tile_dwords
         + ctx.lane_k_group * cfg.storage_lane_k_dwords,
         bindings=ctx.bindings,
     )
-    return ctx.bld.ptr_add(ctx.lds, off)
+    return ctx.bld.ptr_add(lds, off)
 
 
 def _coalesced_dma_read_base_offset(
-    ctx: _DmaCtaStagingContext, group: dsl.Expr, base: int
+    ctx: _DmaCtaStagingContext, group: dsl.Expr
 ) -> dsl.Value:
     line = group * 16 + ctx.lane_mod16
     offset = ctx.bld.index_expr(
         4
         * (
-            base
-            + line * ctx.geom.dwords_per_slot
+            line * ctx.geom.dwords_per_slot
             + ctx.lane_k_group * ctx.cfg.storage_lane_k_dwords
         ),
         bindings=ctx.bindings,
@@ -1890,15 +1988,19 @@ def _emit_dma_cta_common_ptrs(
     return _DmaCtaCommonPtrs(
         a_src=tuple(_a_dma_src_ptr(ctx, i) for i in range(geom.a_slots_per_wave)),
         b_src=tuple(_b_dma_src_ptr(ctx, i) for i in range(geom.b_slots_per_wave)),
-        a_lds=tuple(_dma_lds_ptr(ctx, i, 0) for i in range(geom.a_slots_per_wave)),
+        a_lds=tuple(
+            _dma_lds_ptr(ctx, ctx.a_lds, i) for i in range(geom.a_slots_per_wave)
+        ),
         b_lds=tuple(
-            _dma_lds_ptr(ctx, i, geom.b_lds_base) for i in range(geom.b_slots_per_wave)
+            _dma_lds_ptr(ctx, _require_lds(ctx.b_lds, "B staging"), i)
+            for i in range(geom.b_slots_per_wave)
         ),
         a_lds_bytes=tuple(
-            _dma_lds_byte_ptr(ctx, i, 0) for i in range(geom.a_slots_per_wave)
+            _dma_lds_byte_ptr(ctx, ctx.a_lds_bytes, i)
+            for i in range(geom.a_slots_per_wave)
         ),
         b_lds_bytes=tuple(
-            _dma_lds_byte_ptr(ctx, i, geom.b_lds_base)
+            _dma_lds_byte_ptr(ctx, _require_lds(ctx.b_lds_bytes, "B staging"), i)
             for i in range(geom.b_slots_per_wave)
         ),
     )
@@ -1908,12 +2010,12 @@ def _emit_coalesced_dma_cta_staging_ptrs(
     ctx: _DmaCtaStagingContext,
 ) -> _DmaCtaStagingPtrs:
     cfg = ctx.cfg
-    geom = ctx.geom
     m_wave = dsl.floor(ctx.wave_id / cfg.BN)
     n_wave = dsl.mod(ctx.wave_id, cfg.BN)
     tile_stride = cfg.wave_k_tiles * cfg.storage_k_tile_dwords
-    a_read_base_offset = _coalesced_dma_read_base_offset(ctx, n_wave, 0)
-    b_read_base_offset = _coalesced_dma_read_base_offset(ctx, m_wave, geom.b_lds_base)
+    b_lds = _require_lds(ctx.b_lds, "coalesced staging")
+    a_read_base_offset = _coalesced_dma_read_base_offset(ctx, n_wave)
+    b_read_base_offset = _coalesced_dma_read_base_offset(ctx, m_wave)
     a_read_offsets = tuple(
         4 * (i * tile_stride + k * cfg.storage_k_tile_dwords)
         for k in range(cfg.wave_k_tiles)
@@ -1932,14 +2034,15 @@ def _emit_coalesced_dma_cta_staging_ptrs(
         b_lds=common.b_lds,
         a_lds_bytes=common.a_lds_bytes,
         b_lds_bytes=common.b_lds_bytes,
-        lds_wave_byte_base=ctx.lds_wave_byte_base,
+        a_lds_wave_byte_base=ctx.a_lds_wave_byte_base,
+        b_lds_wave_byte_base=ctx.b_lds_wave_byte_base,
         a_read=tuple(
-            _coalesced_dma_read_ptr(ctx, i, k, n_wave, 0)
+            _coalesced_dma_read_ptr(ctx, ctx.a_lds, i, k, n_wave)
             for k in range(cfg.wave_k_tiles)
             for i in range(cfg.wave_m_tiles)
         ),
         b_read=tuple(
-            _coalesced_dma_read_ptr(ctx, j, k, m_wave, geom.b_lds_base)
+            _coalesced_dma_read_ptr(ctx, b_lds, j, k, m_wave)
             for k in range(cfg.wave_k_tiles)
             for j in range(cfg.wave_n_tiles)
         ),
@@ -1962,10 +2065,8 @@ def _emit_regular_dma_cta_staging_ptrs(
     if _uses_dma_spatial_subpanel_pipeline(cfg):
         a_panel_tiles = cfg.wave_m_tiles // 2
         b_panel_tiles = cfg.wave_n_tiles // 2
-        a_read_base_offset = _dma_read_base_offset(ctx, a_wave * a_panel_tiles, 0)
-        b_read_base_offset = _dma_read_base_offset(
-            ctx, b_wave * b_panel_tiles, geom.b_lds_base
-        )
+        a_read_base_offset = _dma_read_base_offset(ctx, a_wave * a_panel_tiles)
+        b_read_base_offset = _dma_read_base_offset(ctx, b_wave * b_panel_tiles)
         a_read_offsets = _spatial_dma_read_offsets(
             cfg, geom, geom.block_m_tiles, cfg.wave_m_tiles
         )
@@ -1985,10 +2086,8 @@ def _emit_regular_dma_cta_staging_ptrs(
             for k in range(cfg.wave_k_tiles)
             for j in range(cfg.wave_n_tiles)
         )
-        a_read_base_offset = _dma_read_base_offset(ctx, a_wave * cfg.wave_m_tiles, 0)
-        b_read_base_offset = _dma_read_base_offset(
-            ctx, b_wave * cfg.wave_n_tiles, geom.b_lds_base
-        )
+        a_read_base_offset = _dma_read_base_offset(ctx, a_wave * cfg.wave_m_tiles)
+        b_read_base_offset = _dma_read_base_offset(ctx, b_wave * cfg.wave_n_tiles)
         a_read_offsets = _regular_dma_read_offsets(
             cfg, geom, geom.block_m_tiles, cfg.wave_m_tiles
         )
@@ -2005,9 +2104,10 @@ def _emit_regular_dma_cta_staging_ptrs(
         a_read = ()
         b_read = ()
     else:
-        a_read = tuple(_dma_read_ptr(ctx, slot, 0) for slot in a_read_slots)
+        a_read = tuple(_dma_read_ptr(ctx, ctx.a_lds, slot) for slot in a_read_slots)
         b_read = tuple(
-            _dma_read_ptr(ctx, slot, geom.b_lds_base) for slot in b_read_slots
+            _dma_read_ptr(ctx, _require_lds(ctx.b_lds, "B staging"), slot)
+            for slot in b_read_slots
         )
     return _DmaCtaStagingPtrs(
         a_src=common.a_src,
@@ -2016,7 +2116,8 @@ def _emit_regular_dma_cta_staging_ptrs(
         b_lds=common.b_lds,
         a_lds_bytes=common.a_lds_bytes,
         b_lds_bytes=common.b_lds_bytes,
-        lds_wave_byte_base=ctx.lds_wave_byte_base,
+        a_lds_wave_byte_base=ctx.a_lds_wave_byte_base,
+        b_lds_wave_byte_base=ctx.b_lds_wave_byte_base,
         a_read=a_read,
         b_read=b_read,
         a_read_base_offset=a_read_base_offset,
@@ -2030,13 +2131,22 @@ def _emit_dma_cta_staging_ptrs(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     coords: _TileCoords,
-    lds: dsl.Value,
     k_step: dsl.Value | None = None,
 ) -> _DmaCtaStagingPtrs:
-    ctx = _make_dma_cta_staging_context(bld, cfg, coords, lds, k_step)
+    ctx = _make_dma_cta_staging_context(bld, cfg, coords, k_step)
     if cfg.coalesced_mfma_output:
         return _emit_coalesced_dma_cta_staging_ptrs(ctx)
     return _emit_regular_dma_cta_staging_ptrs(ctx)
+
+
+def _b_fragment_slots(cfg: _MatmulConfig) -> tuple[int, ...]:
+    if cfg.uses_aiter_mxfp4_layout:
+        return ()
+    return tuple(
+        k * cfg.wave_n_tiles + j
+        for k in range(cfg.wave_k_tiles)
+        for j in range(cfg.wave_n_tiles)
+    )
 
 
 def _emit_lds_staging(
@@ -2050,16 +2160,22 @@ def _emit_lds_staging(
     reg_simd_type = dsl.simd_type(
         dsl.vector_type(cfg.mma.ab_registers, dsl.i32()), width=cfg.mma.wave_size
     )
-    lds = bld.shared_memory_base()
+    a_lds = bld.ptr_cast(
+        coords.lds.a_data, dsl.ptr_type(dsl.i32(), dsl.shared_address_space())
+    )
+    b_lds = _optional_lds_ptr_cast(bld, coords.lds.b_data, dsl.i32())
     wi = dsl.sym("wi")
     lane = dsl.mod(wi, cfg.mma.wave_size)
     wave_id = dsl.floor(wi / cfg.mma.wave_size)
     bindings = {wi: coords.wi}
-    a_slots = _fragment_slot_indices(cfg, 0, cfg.wave_m_tiles)
-    b_slots = _fragment_slot_indices(cfg, cfg.wave_m_tiles, cfg.wave_n_tiles)
+    a_slots = tuple(
+        k * cfg.wave_m_tiles + i
+        for k in range(cfg.wave_k_tiles)
+        for i in range(cfg.wave_m_tiles)
+    )
+    b_slots = _b_fragment_slots(cfg)
 
-    def slot_ptr(slot: int) -> dsl.Value:
-        slots_per_wave = cfg.wave_k_tiles * (cfg.wave_m_tiles + cfg.wave_n_tiles)
+    def slot_ptr(lds: dsl.Value, slots_per_wave: int, slot: int) -> dsl.Value:
         slot_off = bld.index_expr(
             wave_id * (slots_per_wave * cfg.mma.lds_dwords_per_frag)
             + slot * cfg.mma.lds_dwords_per_frag
@@ -2068,8 +2184,17 @@ def _emit_lds_staging(
         )
         return bld.ptr_add(lds, slot_off)
 
-    a_lds_ptrs = tuple(slot_ptr(slot) for slot in a_slots)
-    b_lds_ptrs = tuple(slot_ptr(slot) for slot in b_slots)
+    a_lds_ptrs = tuple(
+        slot_ptr(a_lds, cfg.wave_k_tiles * cfg.wave_m_tiles, slot) for slot in a_slots
+    )
+    b_lds_ptrs = tuple(
+        slot_ptr(
+            _require_lds(b_lds, "B staging"),
+            cfg.wave_k_tiles * cfg.wave_n_tiles,
+            slot,
+        )
+        for slot in b_slots
+    )
     if not cfg.use_dma_lds:
         return _LdsStaging(
             reg_simd_type=reg_simd_type,
@@ -2085,7 +2210,6 @@ def _emit_lds_staging(
         bld,
         cfg,
         coords,
-        lds,
         k_step,
     )
     return _LdsStaging(
@@ -2100,8 +2224,12 @@ def _emit_lds_staging(
         b_dma_src_ptrs=dma.b_src,
         a_dma_lds_byte_ptrs=dma.a_lds_bytes,
         b_dma_lds_byte_ptrs=dma.b_lds_bytes,
-        dma_lds_wave_byte_base=dma.lds_wave_byte_base,
-        dma_read_lds=bld.shared_memory_base(dsl.i8()),
+        a_dma_lds_wave_byte_base=dma.a_lds_wave_byte_base,
+        b_dma_lds_wave_byte_base=dma.b_lds_wave_byte_base,
+        a_dma_read_lds=bld.ptr_cast(
+            coords.lds.a_data, dsl.ptr_type(dsl.i8(), dsl.shared_address_space())
+        ),
+        b_dma_read_lds=_optional_lds_ptr_cast(bld, coords.lds.b_data, dsl.i8()),
         a_dma_read_base_offset=dma.a_read_base_offset,
         b_dma_read_base_offset=dma.b_read_base_offset,
         a_dma_read_offsets=dma.a_read_offsets,
@@ -2232,13 +2360,14 @@ def _dma_issue(
     staging: _LdsStaging,
     *,
     after: dsl.Value | None = None,
-    lds_offset: int | dsl.Value = 0,
+    lds_offset: _LdsOffsets | int | dsl.Value = 0,
     in_loop: bool,
     request_offset: int = 0,
 ) -> list[dsl.Value]:
     dep = after if after is not None else bld.token()
-    a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, lds_offset)
-    b_lds_ptrs = _offset_ptrs(bld, staging.b_dma_lds_ptrs, lds_offset)
+    offsets = _operand_lds_offsets(lds_offset)
+    a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, offsets.a)
+    b_lds_ptrs = _offset_ptrs(bld, staging.b_dma_lds_ptrs, offsets.b)
     requests = [
         *zip(a_ptrs, a_lds_ptrs, strict=True),
         *zip(b_ptrs, b_lds_ptrs, strict=True),
@@ -2314,14 +2443,15 @@ def _dma_issue_parts(
     staging: _LdsStaging,
     *,
     after: dsl.Value | None,
-    lds_offset: int | dsl.Value,
+    lds_offset: _LdsOffsets | int | dsl.Value,
     include_a: bool,
     b_indices: tuple[int, ...],
 ) -> list[dsl.Value]:
     dep = after if after is not None else bld.token()
     dma_tokens: list[dsl.Value] = []
+    offsets = _operand_lds_offsets(lds_offset)
     if include_a:
-        a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, lds_offset)
+        a_lds_ptrs = _offset_ptrs(bld, staging.a_dma_lds_ptrs, offsets.a)
         for ptr, lds_ptr in zip(a_ptrs, a_lds_ptrs, strict=True):
             dma_tokens.append(
                 bld.dma_load_lds(
@@ -2329,7 +2459,7 @@ def _dma_issue_parts(
                 )
             )
     b_lds_ptrs = _offset_ptrs(
-        bld, _select_values(staging.b_dma_lds_ptrs, b_indices), lds_offset
+        bld, _select_values(staging.b_dma_lds_ptrs, b_indices), offsets.b
     )
     for ptr, lds_ptr in zip(_select_values(b_ptrs, b_indices), b_lds_ptrs, strict=True):
         dma_tokens.append(
@@ -2345,7 +2475,7 @@ def _dma_drain(
     b_type: dsl.Type,
     staging: _LdsStaging,
     *,
-    lds_offset: int | dsl.Value = 0,
+    lds_offset: _LdsOffsets | int | dsl.Value = 0,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
     return _dma_read_ready(
         bld,
@@ -2364,13 +2494,14 @@ def _dma_read_ready(
     b_type: dsl.Type,
     staging: _LdsStaging,
     *,
-    lds_offset: int | dsl.Value = 0,
+    lds_offset: _LdsOffsets | int | dsl.Value = 0,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
     a_frags: list[dsl.Value] = []
     b_frags: list[dsl.Value] = []
     load_tokens: list[dsl.Value] = []
-    a_read_ptrs = _offset_ptrs(bld, staging.a_dma_read_ptrs, lds_offset)
-    b_read_ptrs = _offset_ptrs(bld, staging.b_dma_read_ptrs, lds_offset)
+    offsets = _operand_lds_offsets(lds_offset)
+    a_read_ptrs = _offset_ptrs(bld, staging.a_dma_read_ptrs, offsets.a)
+    b_read_ptrs = _offset_ptrs(bld, staging.b_dma_read_ptrs, offsets.b)
     for lds_ptr in a_read_ptrs:
         regs, tok = bld.load(lds_ptr, staging.reg_simd_type, after=ready_token)
         load_tokens.append(tok)
@@ -2472,12 +2603,14 @@ def _read_aiter_dma_ready(
     ready_token: dsl.Value,
     step: dsl.Value | int,
     *,
-    lds_offset: int | dsl.Value = 0,
+    lds_offset: _LdsOffsets | int | dsl.Value = 0,
     b_frags: tuple[dsl.Value, ...] | None = None,
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
     a_frags: list[dsl.Value] = []
     a_tokens: list[dsl.Value] = []
-    for ptr in _offset_ptrs(bld, staging.a_dma_read_ptrs, lds_offset):
+    for ptr in _offset_ptrs(
+        bld, staging.a_dma_read_ptrs, _operand_lds_offsets(lds_offset).a
+    ):
         regs, token = bld.load(ptr, staging.reg_simd_type, after=ready_token)
         a_frags.append(bld.fragment_pack(regs, types.a))
         a_tokens.append(token)
@@ -2592,7 +2725,7 @@ class _DmaSubpanelLoopState:
     current_access: dsl.Value
     current_read_bases: _DmaSubpanelReadBases
     current_lds_offset: dsl.Value
-    current_dma_lds_byte_base: dsl.Value
+    current_dma_lds_byte_bases: _DmaLdsByteBases
     ready: _DmaSubpanelTokens
 
 
@@ -2611,7 +2744,7 @@ class _DmaSubpanelReuseState:
 class _DmaSubpanelStepInputs:
     a_ptrs: tuple[dsl.Value, ...]
     b_ptrs: tuple[dsl.Value, ...]
-    next_dma_lds_byte_base: dsl.Value
+    next_dma_lds_byte_bases: _DmaLdsByteBases
 
 
 @dataclass(frozen=True)
@@ -2631,7 +2764,7 @@ class _DmaSpatialLoopState:
     b_left_read: dsl.Value
     current_read_bases: _DmaSubpanelReadBases
     current_lds_offset: dsl.Value
-    current_dma_lds_byte_base: dsl.Value
+    current_dma_lds_byte_bases: _DmaLdsByteBases
     current: _DmaSpatialTokens
     ready: _DmaSpatialTokens
 
@@ -2722,10 +2855,23 @@ def _offset_ptrs(
     return tuple(bld.ptr_add(ptr, offset_value) for ptr in ptrs)
 
 
+@dataclass(frozen=True)
+class _LdsOffsets:
+    a: int | dsl.Value
+    b: int | dsl.Value
+
+
+def _operand_lds_offsets(offsets: _LdsOffsets | int | dsl.Value) -> _LdsOffsets:
+    if isinstance(offsets, _LdsOffsets):
+        return offsets
+    return _LdsOffsets(offsets, offsets)
+
+
 def _dma_subpanel_read_bases(
     bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
     staging: _LdsStaging,
-    lds_offset: int | dsl.Value,
+    stage: int | dsl.Value,
 ) -> _DmaSubpanelReadBases:
     assert (
         staging.a_dma_read_base_offset is not None
@@ -2734,14 +2880,26 @@ def _dma_subpanel_read_bases(
     offsets = _DmaSubpanelReadBases(
         staging.a_dma_read_base_offset, staging.b_dma_read_base_offset
     )
-    if not (isinstance(lds_offset, int) and lds_offset == 0):
-        offset = (
-            bld.constant(dsl.i32(), 4 * lds_offset)
-            if isinstance(lds_offset, int)
-            else bld.muli(lds_offset, bld.constant(dsl.i32(), 4))
+    lds_offsets = _dma_buffer_offset(bld, cfg, stage)
+    if not (isinstance(stage, int) and stage == 0):
+        a_offset = (
+            bld.constant(dsl.i32(), 4 * lds_offsets.a)
+            if isinstance(lds_offsets.a, int)
+            else bld.muli(
+                bld.cast(lds_offsets.a, dsl.i32(), dsl.CastKind.IntConvert),
+                bld.constant(dsl.i32(), 4),
+            )
+        )
+        b_offset = (
+            bld.constant(dsl.i32(), 4 * lds_offsets.b)
+            if isinstance(lds_offsets.b, int)
+            else bld.muli(
+                bld.cast(lds_offsets.b, dsl.i32(), dsl.CastKind.IntConvert),
+                bld.constant(dsl.i32(), 4),
+            )
         )
         offsets = _DmaSubpanelReadBases(
-            bld.addi(offsets.a, offset), bld.addi(offsets.b, offset)
+            bld.addi(offsets.a, a_offset), bld.addi(offsets.b, b_offset)
         )
     return offsets
 
@@ -2750,62 +2908,90 @@ def _next_dma_subpanel_read_state(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     staging: _LdsStaging,
-    current_lds_offset: dsl.Value,
+    current_stage: dsl.Value,
 ) -> tuple[_DmaSubpanelReadBases, dsl.Value]:
     assert _dma_buffer_count(cfg) == 2
-    buffer_dwords = _dma_cta_buffer_dwords(cfg)
-    next_lds_offset = bld.subi(
-        bld.constant(dsl.i32(), buffer_dwords), current_lds_offset
-    )
-    return _dma_subpanel_read_bases(bld, staging, next_lds_offset), next_lds_offset
+    next_stage = bld.subi(bld.constant(dsl.i32(), 1), current_stage)
+    return _dma_subpanel_read_bases(bld, cfg, staging, next_stage), next_stage
 
 
-def _dma_subpanel_lds_byte_base(
+@dataclass(frozen=True)
+class _DmaLdsByteBases:
+    a: dsl.Value
+    b: dsl.Value | None
+
+
+def _dma_subpanel_lds_byte_bases(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     staging: _LdsStaging,
     step: int | dsl.Value,
-) -> dsl.Value:
-    assert staging.dma_lds_wave_byte_base is not None
-    buffer_bytes = 4 * _dma_cta_buffer_dwords(cfg)
+) -> _DmaLdsByteBases:
+    assert staging.a_dma_lds_wave_byte_base is not None
     if isinstance(step, int):
-        byte_offset = (step % _dma_buffer_count(cfg)) * buffer_bytes
-        if byte_offset == 0:
-            result = staging.dma_lds_wave_byte_base
-        else:
-            offset = bld.constant(dsl.i32(), byte_offset)
-            result = bld.addi(staging.dma_lds_wave_byte_base, offset)
+        stage = step % _dma_buffer_count(cfg)
+        a_offset: int | dsl.Value = stage * 4 * _dma_operand_buffer_dwords(cfg, "a")
+        b_offset: int | dsl.Value = stage * 4 * _dma_operand_buffer_dwords(cfg, "b")
     else:
         i = dsl.sym("i")
-        offset = bld.index_expr(
-            dsl.mod(i, _dma_buffer_count(cfg)) * buffer_bytes,
+        stage = dsl.mod(i, _dma_buffer_count(cfg))
+        a_offset = bld.index_expr(
+            stage * 4 * _dma_operand_buffer_dwords(cfg, "a"),
             bindings={i: step},
         )
-        offset = bld.cast(offset, dsl.i32(), dsl.CastKind.IntConvert)
-        result = bld.addi(staging.dma_lds_wave_byte_base, offset)
-    return result
+        b_offset = bld.index_expr(
+            stage * 4 * _dma_operand_buffer_dwords(cfg, "b"),
+            bindings={i: step},
+        )
+
+    def add(base: dsl.Value | None, offset: int | dsl.Value) -> dsl.Value | None:
+        if base is None:
+            return None
+        if isinstance(offset, int):
+            return (
+                base if offset == 0 else bld.addi(base, bld.constant(dsl.i32(), offset))
+            )
+        return bld.addi(base, bld.cast(offset, dsl.i32(), dsl.CastKind.IntConvert))
+
+    a = add(staging.a_dma_lds_wave_byte_base, a_offset)
+    assert a is not None
+    return _DmaLdsByteBases(a, add(staging.b_dma_lds_wave_byte_base, b_offset))
 
 
 def _dma_subpanel_read_ptrs(
     bld: dsl.FunctionBuilder,
     staging: _LdsStaging,
+    axis: Literal["a", "b"],
     base_offset: dsl.Value,
     offsets: tuple[int, ...],
 ) -> tuple[dsl.Value, ...]:
-    assert staging.dma_read_lds is not None
-    base = bld.ptr_add(staging.dma_read_lds, base_offset)
+    lds = staging.a_dma_read_lds if axis == "a" else staging.b_dma_read_lds
+    if lds is None:
+        raise ValueError(f"{axis.upper()} DMA read requires an LDS allocation")
+    base = bld.ptr_add(lds, base_offset)
     return tuple(_ptr_add_const(bld, base, offset) for offset in offsets)
 
 
 def _dma_buffer_offset(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, step: dsl.Value | int
-) -> dsl.Value | int:
-    buffer_dwords = _dma_cta_buffer_dwords(cfg)
+) -> _LdsOffsets:
     buffer_count = _dma_buffer_count(cfg)
     if isinstance(step, int):
-        return (step % buffer_count) * buffer_dwords
+        stage = step % buffer_count
+        return _LdsOffsets(
+            stage * _dma_operand_buffer_dwords(cfg, "a"),
+            stage * _dma_operand_buffer_dwords(cfg, "b"),
+        )
     i = dsl.sym("i")
-    return bld.index_expr(dsl.mod(i, buffer_count) * buffer_dwords, bindings={i: step})
+    stage = dsl.mod(i, buffer_count)
+    return _LdsOffsets(
+        bld.index_expr(
+            stage * _dma_operand_buffer_dwords(cfg, "a"), bindings={i: step}
+        ),
+        bld.index_expr(
+            stage * _dma_operand_buffer_dwords(cfg, "b"), bindings={i: step}
+        ),
+    )
 
 
 def _load_ptrs_for_step(
@@ -2827,6 +3013,7 @@ def _load_ptrs_for_step(
 
 @dataclass(frozen=True)
 class _Mxfp4ScaleLayout:
+    coords: _TileCoords
     bindings: dict[dsl.Expr, dsl.Value]
     execution_item: dsl.Value
     wg_m: dsl.Expr
@@ -2884,8 +3071,9 @@ class _Mxfp4ScaleDmaPlan:
     m_wave: dsl.Expr
     n_wave: dsl.Expr
     scale_k: int | dsl.Expr
-    lds: dsl.Value
-    lds_offset: dsl.Value | int
+    a_lds: dsl.Value
+    b_lds: dsl.Value
+    lds_offset: _LdsOffsets | dsl.Value | int
     dep: dsl.Value | None
 
 
@@ -2913,6 +3101,7 @@ def _mxfp4_scale_layout(
     lane_scale_group = dsl.floor(lane / 16)
     scale_k = step_expr * (cfg.mma.k_tile // 32) + lane_scale_group
     return _Mxfp4ScaleLayout(
+        coords=coords,
         bindings=bindings,
         execution_item=coords.wi,
         wg_m=wg_m,
@@ -2951,13 +3140,8 @@ def _mxfp4_scale_staging_axis(
     if global_base is None:
         raise ValueError("MXFP4 scale buffers are required")
     tiles_per_wave = _mxfp4_scale_tiles_per_wave(tile_count)
-    if axis == "m":
-        packed_scale_base = wave * tiles_per_wave
-        unpacked_scale_base = wave * tile_count
-    else:
-        scale_base = cfg.BM * _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-        packed_scale_base = scale_base + wave * tiles_per_wave
-        unpacked_scale_base = scale_base + wave * tile_count
+    packed_scale_base = wave * tiles_per_wave
+    unpacked_scale_base = wave * tile_count
     return _Mxfp4ScaleStagingAxis(
         global_base=global_base,
         packed_scale_base=packed_scale_base,
@@ -2969,41 +3153,56 @@ def _mxfp4_scale_staging_axis(
     )
 
 
-def _scale_shared_memory_base(
-    bld: dsl.FunctionBuilder, cfg: _MatmulConfig, lds_offset: dsl.Value | int
+def _scale_lds_ptr(
+    bld: dsl.FunctionBuilder,
+    coords: _TileCoords,
+    axis: _Mxfp4ScaleAxis,
+    lds_offset: _LdsOffsets | dsl.Value | int,
 ) -> dsl.Value:
-    lds = bld.shared_memory_base(dsl.i8(), offset=cfg.data_lds_bytes)
-    if isinstance(lds_offset, int):
-        if lds_offset == 0:
+    lds = coords.lds.a_scale if axis == "m" else coords.lds.b_scale
+    if lds is None:
+        raise ValueError(f"MXFP4 {axis} scale LDS allocation is required")
+    offsets = _operand_lds_offsets(lds_offset)
+    value = offsets.a if axis == "m" else offsets.b
+    if isinstance(value, int):
+        if value == 0:
             return lds
-        return _ptr_add_const(bld, lds, lds_offset * 4)
+        return _ptr_add_const(bld, lds, value * 4)
     offset = dsl.sym("scale_lds_offset")
-    byte_offset = bld.index_expr(offset * 4, bindings={offset: lds_offset})
+    byte_offset = bld.index_expr(offset * 4, bindings={offset: value})
     return bld.ptr_add(lds, byte_offset)
 
 
-def _scale_lds_batch_stride_dwords(cfg: _MatmulConfig) -> int:
-    return cfg.wave_k_tiles * _mxfp4_scale_lds_stride_dwords(cfg)
+def _scale_lds_batch_stride_dwords(cfg: _MatmulConfig, axis: _Mxfp4ScaleAxis) -> int:
+    return cfg.wave_k_tiles * _mxfp4_scale_lds_stride_dwords(cfg, axis)
 
 
 def _scale_buffer_offset(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, step: dsl.Value | int
-) -> dsl.Value | int:
-    buffer_dwords = (
-        _aiter_mxfp4_scale_batch_dwords(cfg)
+) -> _LdsOffsets:
+    a_dwords = (
+        _aiter_mxfp4_scale_axis_batch_dwords(cfg, "m")
         if cfg.uses_aiter_mxfp4_layout
-        else _scale_lds_batch_stride_dwords(cfg)
+        else _scale_lds_batch_stride_dwords(cfg, "m")
+    )
+    b_dwords = (
+        _aiter_mxfp4_scale_axis_batch_dwords(cfg, "n")
+        if cfg.uses_aiter_mxfp4_layout
+        else _scale_lds_batch_stride_dwords(cfg, "n")
     )
     if isinstance(step, int):
-        return (step & 1) * buffer_dwords
+        return _LdsOffsets((step & 1) * a_dwords, (step & 1) * b_dwords)
     i = dsl.sym("i")
-    return bld.index_expr(dsl.mod(i, 2) * buffer_dwords, bindings={i: step})
+    return _LdsOffsets(
+        bld.index_expr(dsl.mod(i, 2) * a_dwords, bindings={i: step}),
+        bld.index_expr(dsl.mod(i, 2) * b_dwords, bindings={i: step}),
+    )
 
 
-def _mxfp4_scale_lds_stride_dwords(cfg: _MatmulConfig) -> int:
-    a_tiles = cfg.BM * _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-    b_tiles = cfg.BN * _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
-    return (a_tiles + b_tiles) * 128
+def _mxfp4_scale_lds_stride_dwords(cfg: _MatmulConfig, axis: _Mxfp4ScaleAxis) -> int:
+    waves = cfg.BM if axis == "m" else cfg.BN
+    tiles = cfg.wave_m_tiles if axis == "m" else cfg.wave_n_tiles
+    return waves * _mxfp4_scale_tiles_per_wave(tiles) * 128
 
 
 def _add_lds_dword_offset(
@@ -3015,6 +3214,23 @@ def _add_lds_dword_offset(
         return base + offset
     base_sym = dsl.sym("scale_lds_base")
     return bld.index_expr(base_sym + offset, bindings={base_sym: base})
+
+
+def _add_scale_phase_offset(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    base: _LdsOffsets | dsl.Value | int,
+    phase: int,
+) -> _LdsOffsets:
+    offsets = _operand_lds_offsets(base)
+    return _LdsOffsets(
+        _add_lds_dword_offset(
+            bld, offsets.a, phase * _mxfp4_scale_lds_stride_dwords(cfg, "m")
+        ),
+        _add_lds_dword_offset(
+            bld, offsets.b, phase * _mxfp4_scale_lds_stride_dwords(cfg, "n")
+        ),
+    )
 
 
 def _use_mxfp4_scale_dma(cfg: _MatmulConfig) -> bool:
@@ -3061,7 +3277,6 @@ def _stage_mxfp4_scale_tiles_wave_regs_after_dep(
     load_type = dsl.simd_type(
         dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
     )
-    lds = _scale_shared_memory_base(bld, cfg, lds_offset)
     lane_mask = 0 if packed_dword else (12 if row_sliced else 15)
     lane_mod16 = bld.binary(
         dsl.BinaryKind.AndI,
@@ -3080,7 +3295,7 @@ def _stage_mxfp4_scale_tiles_wave_regs_after_dep(
             layout,
             "m",
             load_type,
-            lds,
+            _scale_lds_ptr(bld, layout.coords, "m", lds_offset),
             dep,
             tokens,
             row_sliced,
@@ -3093,7 +3308,7 @@ def _stage_mxfp4_scale_tiles_wave_regs_after_dep(
             layout,
             "n",
             load_type,
-            lds,
+            _scale_lds_ptr(bld, layout.coords, "n", lds_offset),
             dep,
             tokens,
             row_sliced,
@@ -3129,11 +3344,11 @@ def _append_mxfp4_scale_reg_load(
     loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]],
     global_base: dsl.Value,
     global_off: dsl.Value,
-    shared_memory_base: dsl.Value,
+    lds: dsl.Value,
     lds_off: dsl.Value,
 ) -> None:
     raw, load_token = bld.load(bld.ptr_add(global_base, global_off), load_type)
-    loaded.append((raw, bld.ptr_add(shared_memory_base, lds_off), load_token))
+    loaded.append((raw, bld.ptr_add(lds, lds_off), load_token))
 
 
 def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
@@ -3152,7 +3367,6 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
     load_type = dsl.simd_type(
         dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
     )
-    lds = _scale_shared_memory_base(bld, cfg, lds_offset)
     with bld.where(
         _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m"),
         [dsl.mem_token_type()],
@@ -3165,7 +3379,7 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
             layout,
             "m",
             load_type,
-            lds,
+            _scale_lds_ptr(bld, coords, "m", lds_offset),
             dep,
             a_tokens,
             row_sliced,
@@ -3186,7 +3400,7 @@ def _stage_mxfp4_scale_tiles_regs_cta_after_dep(
             layout,
             "n",
             load_type,
-            lds,
+            _scale_lds_ptr(bld, coords, "n", lds_offset),
             dep,
             b_tokens,
             row_sliced,
@@ -3317,16 +3531,16 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
     if not _use_batched_mxfp4_scale_regs_cta(cfg):
         raise ValueError("deferred scale-reg batch requires packed CTA regs staging")
     load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
-    stride = _mxfp4_scale_lds_stride_dwords(cfg)
     staged: list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]] = []
     for k in range(cfg.wave_k_tiles):
         raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
-        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        offset = _add_scale_phase_offset(bld, cfg, scale_lds_offset, k)
         staged.append((_mxfp4_scale_layout(cfg, coords, raw_step), offset))
 
     a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
     lds_simd_type = dsl.simd_type(
-        _scale_shared_memory_base(bld, cfg, scale_lds_offset).type, cfg.mma.wave_size
+        _scale_lds_ptr(bld, coords, "m", scale_lds_offset).type,
+        cfg.mma.wave_size,
     )
     load_entry_types = (
         load_type,
@@ -3341,7 +3555,7 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
     a_mask = _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m")
     with bld.where(a_mask, a_result_types) as active_a:
         a_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
-        for layout, offset in staged:
+        for layout, stage_offset in staged:
             _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
@@ -3349,7 +3563,7 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
                 layout,
                 "m",
                 load_type,
-                _scale_shared_memory_base(bld, cfg, offset),
+                _scale_lds_ptr(bld, coords, "m", stage_offset),
                 dep,
                 [],
                 row_sliced=True,
@@ -3367,7 +3581,7 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
     b_mask = _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "n")
     with bld.where(b_mask, b_result_types) as active_b:
         b_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
-        for layout, offset in staged:
+        for layout, stage_offset in staged:
             _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
@@ -3375,7 +3589,7 @@ def _defer_mxfp4_scale_batch_regs_cta_after_dep(
                 layout,
                 "n",
                 load_type,
-                _scale_shared_memory_base(bld, cfg, offset),
+                _scale_lds_ptr(bld, coords, "n", stage_offset),
                 dep,
                 [],
                 row_sliced=True,
@@ -3429,11 +3643,10 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
     load_type = dsl.simd_type(
         dsl.vector_type(load_width, dsl.i8()), width=cfg.mma.wave_size
     )
-    stride = _mxfp4_scale_lds_stride_dwords(cfg)
     staged: list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]] = []
     for k in range(cfg.wave_k_tiles):
         raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
-        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        offset = _add_scale_phase_offset(bld, cfg, scale_lds_offset, k)
         staged.append((_mxfp4_scale_layout(cfg, coords, raw_step), offset))
     with bld.where(
         _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m"),
@@ -3441,7 +3654,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
     ) as active_a:
         a_tokens: list[dsl.Value] = []
         a_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
-        for layout, offset in staged:
+        for layout, stage_offset in staged:
             _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
@@ -3449,7 +3662,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
                 layout,
                 "m",
                 load_type,
-                _scale_shared_memory_base(bld, cfg, offset),
+                _scale_lds_ptr(bld, coords, "m", stage_offset),
                 dep,
                 a_tokens,
                 row_sliced,
@@ -3466,7 +3679,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
     ) as active_b:
         b_tokens: list[dsl.Value] = []
         b_loaded: list[tuple[dsl.Value, dsl.Value, dsl.Value]] = []
-        for layout, offset in staged:
+        for layout, stage_offset in staged:
             _stage_mxfp4_scale_regs(
                 bld,
                 cfg,
@@ -3474,7 +3687,7 @@ def _stage_mxfp4_scale_batch_regs_cta_after_dep(
                 layout,
                 "n",
                 load_type,
-                _scale_shared_memory_base(bld, cfg, offset),
+                _scale_lds_ptr(bld, coords, "n", stage_offset),
                 dep,
                 b_tokens,
                 row_sliced,
@@ -3507,9 +3720,7 @@ def _stage_mxfp4_b_scale_reg_load_deferred(
     load_type: dsl.Type,
     lds: dsl.Value,
 ) -> tuple[dsl.Value, dsl.Value, dsl.Value]:
-    a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
-    b_scale_base = cfg.BM * a_tiles_per_wave
-    scale_tile = b_scale_base + layout.n_wave
+    scale_tile = layout.n_wave
     n_tile = (
         layout.wg_n * (cfg.BN * cfg.wave_n_tiles) + layout.n_wave * cfg.wave_n_tiles
     )
@@ -3630,14 +3841,22 @@ def _mxfp4_scale_dma_plan(
         step_sym = dsl.sym("dma_scale_step")
         bindings[step_sym] = step
         scale_k = step_sym * (cfg.mma.k_tile // 32) + dma_scale_group
-    lds = bld.shared_memory_base(dsl.i32(), offset=cfg.data_lds_bytes)
+    a_lds = bld.ptr_cast(
+        _scale_lds_ptr(bld, coords, "m", 0),
+        dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
+    )
+    b_lds = bld.ptr_cast(
+        _scale_lds_ptr(bld, coords, "n", 0),
+        dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
+    )
     return _Mxfp4ScaleDmaPlan(
         bindings=bindings,
         first_bindings=first_bindings,
         m_wave=m_wave,
         n_wave=n_wave,
         scale_k=scale_k,
-        lds=lds,
+        a_lds=a_lds,
+        b_lds=b_lds,
         lds_offset=lds_offset,
         dep=dep,
     )
@@ -3707,29 +3926,33 @@ def _mxfp4_scale_dma_lane_mask(
 
 
 def _mxfp4_scale_dma_dest(
-    bld: dsl.FunctionBuilder, plan: _Mxfp4ScaleDmaPlan, base_dwords: dsl.Value | int
+    bld: dsl.FunctionBuilder,
+    plan: _Mxfp4ScaleDmaPlan,
+    axis: _Mxfp4ScaleAxis,
+    base_dwords: dsl.Value | int,
 ) -> dsl.Value:
-    if isinstance(plan.lds_offset, int):
+    lds_offsets = _operand_lds_offsets(plan.lds_offset)
+    lds_offset = lds_offsets.a if axis == "m" else lds_offsets.b
+    if isinstance(lds_offset, int):
         offset = base_dwords
-        if plan.lds_offset != 0:
+        if lds_offset != 0:
             if isinstance(base_dwords, int):
-                offset = base_dwords + plan.lds_offset
+                offset = base_dwords + lds_offset
             else:
                 base = dsl.sym("scale_dma_dest")
-                offset = bld.index_expr(
-                    base + plan.lds_offset, bindings={base: base_dwords}
-                )
+                offset = bld.index_expr(base + lds_offset, bindings={base: base_dwords})
     elif isinstance(base_dwords, int):
-        offset = _add_lds_dword_offset(bld, plan.lds_offset, base_dwords)
+        offset = _add_lds_dword_offset(bld, lds_offset, base_dwords)
     else:
         base = dsl.sym("scale_dma_dest")
         dyn = dsl.sym("scale_dma_buffer")
         offset = bld.index_expr(
-            base + dyn, bindings={base: base_dwords, dyn: plan.lds_offset}
+            base + dyn, bindings={base: base_dwords, dyn: lds_offset}
         )
+    lds = plan.a_lds if axis == "m" else plan.b_lds
     if isinstance(offset, int):
-        return _ptr_add_const(bld, plan.lds, offset)
-    return bld.ptr_add(plan.lds, offset)
+        return _ptr_add_const(bld, lds, offset)
+    return bld.ptr_add(lds, offset)
 
 
 def _append_mxfp4_scale_dma(
@@ -3785,7 +4008,7 @@ def _stage_mxfp4_scale_dma(
             tokens,
             global_base,
             global_off,
-            _mxfp4_scale_dma_dest(bld, plan, lds_off),
+            _mxfp4_scale_dma_dest(bld, plan, axis, lds_off),
         )
 
 
@@ -3809,12 +4032,13 @@ def _read_mxfp4_scale_tile(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     layout: _Mxfp4ScaleLayout,
+    axis: _Mxfp4ScaleAxis,
     tile: int | dsl.Expr,
     ready_token: dsl.Value,
     *,
     lds_offset: dsl.Value | int = 0,
 ) -> tuple[dsl.Value, dsl.Value]:
-    lds = _scale_shared_memory_base(bld, cfg, lds_offset)
+    lds = _scale_lds_ptr(bld, layout.coords, axis, lds_offset)
     load_type = dsl.simd_type(dsl.vector_type(8, dsl.i8()), width=cfg.mma.wave_size)
     item = dsl.sym("item")
     slot = dsl.sym("slot")
@@ -3841,6 +4065,7 @@ def _read_mxfp4_scale_set(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
     layout: _Mxfp4ScaleLayout,
+    axis: _Mxfp4ScaleAxis,
     base_tile: int | dsl.Expr,
     tile_count: int,
     ready_token: dsl.Value,
@@ -3852,7 +4077,13 @@ def _read_mxfp4_scale_set(
     tokens: list[dsl.Value] = []
     for i in range(packed_count):
         scale, token = _read_mxfp4_scale_tile(
-            bld, cfg, layout, base_tile + i, ready_token, lds_offset=lds_offset
+            bld,
+            cfg,
+            layout,
+            axis,
+            base_tile + i,
+            ready_token,
+            lds_offset=lds_offset,
         )
         packed_scales.append(scale)
         tokens.append(token)
@@ -3888,6 +4119,7 @@ def _read_mxfp4_b_scale_set_slice(
             bld,
             cfg,
             layout,
+            "n",
             base_tile + packed_idx,
             ready_token,
             lds_offset=lds_offset,
@@ -3941,6 +4173,7 @@ def _read_mxfp4_scales_from_layout_slice(
         bld,
         cfg,
         layout,
+        "m",
         layout.m_wave * a_tiles_per_wave,
         cfg.wave_m_tiles,
         scale_token,
@@ -3950,7 +4183,7 @@ def _read_mxfp4_scales_from_layout_slice(
         bld,
         cfg,
         layout,
-        cfg.BM * a_tiles_per_wave + layout.n_wave * b_tiles_per_wave,
+        layout.n_wave * b_tiles_per_wave,
         n_begin,
         n_end,
         scale_token,
@@ -3978,6 +4211,7 @@ def _read_mxfp4_scales_from_layout(
         bld,
         cfg,
         layout,
+        "m",
         layout.m_wave * a_tiles_per_wave,
         cfg.wave_m_tiles,
         scale_token,
@@ -3987,7 +4221,8 @@ def _read_mxfp4_scales_from_layout(
         bld,
         cfg,
         layout,
-        cfg.BM * a_tiles_per_wave + layout.n_wave * b_tiles_per_wave,
+        "n",
+        layout.n_wave * b_tiles_per_wave,
         cfg.wave_n_tiles,
         scale_token,
         scale_lds_offset,
@@ -4028,12 +4263,11 @@ def _stage_mxfp4_scale_batch(
             dep=dep,
             barrier_after=barrier_after,
         )
-    stride = _mxfp4_scale_lds_stride_dwords(cfg)
     staged: list[tuple[_Mxfp4ScaleLayout, dsl.Value | int]] = []
     tokens: list[dsl.Value] = []
     for k in range(cfg.wave_k_tiles):
         raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
-        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        offset = _add_scale_phase_offset(bld, cfg, scale_lds_offset, k)
         layout, token = _stage_mxfp4_scale_tiles_after_dep(
             bld, cfg, coords, raw_step, lds_offset=offset, dep=dep
         )
@@ -4058,7 +4292,8 @@ def _stage_mxfp4_scale_batch_delayed_b_lw(
     dep = bld.barrier(scale_after) if barrier_before else scale_after
     raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, 0)
     layout = _mxfp4_scale_layout(cfg, coords, raw_step)
-    lds = _scale_shared_memory_base(bld, cfg, scale_lds_offset)
+    a_lds = _scale_lds_ptr(bld, coords, "m", scale_lds_offset)
+    b_lds = _scale_lds_ptr(bld, coords, "n", scale_lds_offset)
     load_type = dsl.simd_type(dsl.vector_type(4, dsl.i8()), width=cfg.mma.wave_size)
     with bld.where(
         _mxfp4_scale_regs_cta_mask(bld, cfg, coords, "m"),
@@ -4072,7 +4307,7 @@ def _stage_mxfp4_scale_batch_delayed_b_lw(
             layout,
             "m",
             load_type,
-            lds,
+            a_lds,
             dep,
             a_tokens,
             row_sliced=True,
@@ -4082,7 +4317,7 @@ def _stage_mxfp4_scale_batch_delayed_b_lw(
         with active_a.otherwise():
             bld.yield_([dep])
     raw, dest, load_token = _stage_mxfp4_b_scale_reg_load_deferred(
-        bld, cfg, coords, layout, load_type, lds
+        bld, cfg, coords, layout, load_type, b_lds
     )
     return active_a.results[0], _DeferredScaleStore(
         raw=raw,
@@ -4101,12 +4336,11 @@ def _read_mxfp4_scale_batch(
     ready_token: dsl.Value,
 ) -> tuple[list[tuple[int, _Mxfp4ScaleSet]], dsl.Value]:
     ready_token = bld.barrier(ready_token)
-    stride = _mxfp4_scale_lds_stride_dwords(cfg)
     scales: list[tuple[int, _Mxfp4ScaleSet]] = []
     tokens: list[dsl.Value] = []
     for k in range(cfg.wave_k_tiles):
         raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
-        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        offset = _add_scale_phase_offset(bld, cfg, scale_lds_offset, k)
         layout = _mxfp4_scale_layout(cfg, coords, raw_step)
         scale_set = _read_mxfp4_scales_from_layout(
             bld, cfg, layout, offset, ready_token
@@ -4132,12 +4366,11 @@ def _read_mxfp4_scale_batch_region(
 ) -> tuple[list[tuple[int, _Mxfp4ScaleSet]], dsl.Value]:
     if barrier_before_read:
         ready_token = bld.barrier(ready_token)
-    stride = _mxfp4_scale_lds_stride_dwords(cfg)
     scale_sets: list[tuple[int, _Mxfp4ScaleSet]] = []
     tokens: list[dsl.Value] = []
     for k in range(cfg.wave_k_tiles):
         raw_step = _mxfp4_raw_k_step(bld, cfg, scale_step, k)
-        offset = _add_lds_dword_offset(bld, scale_lds_offset, k * stride)
+        offset = _add_scale_phase_offset(bld, cfg, scale_lds_offset, k)
         layout = _mxfp4_scale_layout(cfg, coords, raw_step)
         if include_a:
             scale_set = _read_mxfp4_scales_from_layout_slice(
@@ -4147,13 +4380,12 @@ def _read_mxfp4_scale_batch_region(
             if a_scale_sets is None:
                 raise ValueError("right MXFP4 scale region needs A scales")
             a_scale_set = a_scale_sets[k][1]
-            a_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_m_tiles)
             b_tiles_per_wave = _mxfp4_scale_tiles_per_wave(cfg.wave_n_tiles)
             b_scales, b_scale_idxs, b_tokens = _read_mxfp4_b_scale_set_slice(
                 bld,
                 cfg,
                 layout,
-                cfg.BM * a_tiles_per_wave + layout.n_wave * b_tiles_per_wave,
+                layout.n_wave * b_tiles_per_wave,
                 n_begin,
                 n_end,
                 ready_token,
@@ -4477,12 +4709,6 @@ def _aiter_mxfp4_scale_axis_dma_groups(
     return (_aiter_mxfp4_scale_axis_blocks(cfg, axis) + 3) // 4
 
 
-def _aiter_mxfp4_scale_dma_groups_per_wave(cfg: _MatmulConfig) -> int:
-    return _aiter_mxfp4_scale_axis_dma_groups(
-        cfg, "m"
-    ) + _aiter_mxfp4_scale_axis_dma_groups(cfg, "n")
-
-
 def _aiter_mxfp4_scale_owner(
     cfg: _MatmulConfig, axis: _Mxfp4ScaleAxis, wave_id: dsl.Expr
 ) -> tuple[dsl.Expr, dsl.Expr]:
@@ -4508,17 +4734,14 @@ _AITER_MXFP4_SCALE_LDS_BLOCK_DWORDS = 64
 _AITER_MXFP4_SCALE_LDS_DMA_DWORDS = 256
 
 
-def _aiter_mxfp4_scale_batch_dwords(cfg: _MatmulConfig) -> int:
-    if _uses_cta_shared_aiter_mxfp4_scales(cfg):
-        return (
-            cfg.BM * _aiter_mxfp4_scale_axis_dma_groups(cfg, "m")
-            + cfg.BN * _aiter_mxfp4_scale_axis_dma_groups(cfg, "n")
-        ) * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
-    return (
-        cfg.waves_per_workgroup
-        * _aiter_mxfp4_scale_dma_groups_per_wave(cfg)
-        * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
-    )
+def _aiter_mxfp4_scale_axis_batch_dwords(
+    cfg: _MatmulConfig, axis: _Mxfp4ScaleAxis
+) -> int:
+    groups = _aiter_mxfp4_scale_axis_dma_groups(cfg, axis)
+    waves = cfg.BM if axis == "m" else cfg.BN
+    if not _uses_cta_shared_aiter_mxfp4_scales(cfg):
+        waves = cfg.waves_per_workgroup
+    return waves * groups * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS
 
 
 def _aiter_mxfp4_scale_lds_group(
@@ -4527,20 +4750,14 @@ def _aiter_mxfp4_scale_lds_group(
     wave_id: dsl.Expr,
     axis_group: int | dsl.Expr,
 ) -> int | dsl.Expr:
-    a_groups = _aiter_mxfp4_scale_axis_dma_groups(cfg, "m")
+    groups = _aiter_mxfp4_scale_axis_dma_groups(cfg, axis)
     if not _uses_cta_shared_aiter_mxfp4_scales(cfg):
-        axis_base = 0 if axis == "m" else a_groups
-        return (
-            wave_id * _aiter_mxfp4_scale_dma_groups_per_wave(cfg)
-            + axis_base
-            + axis_group
-        )
+        return wave_id * groups + axis_group
     if axis == "m":
         spatial_wave = dsl.floor(wave_id / cfg.BN)
-        return spatial_wave * a_groups + axis_group
-    b_groups = _aiter_mxfp4_scale_axis_dma_groups(cfg, "n")
+        return spatial_wave * groups + axis_group
     spatial_wave = dsl.mod(wave_id, cfg.BN)
-    return cfg.BM * a_groups + spatial_wave * b_groups + axis_group
+    return spatial_wave * groups + axis_group
 
 
 def _stage_aiter_mxfp4_scale_axis(
@@ -4570,11 +4787,10 @@ def _stage_aiter_mxfp4_scale_axis(
     lane_group = dsl.floor(lane / 16)
     source_lane = dsl.mod(lane, 16)
     k_pairs = cfg.wave_k_tiles // 2
-    dma_groups = _aiter_mxfp4_scale_dma_groups_per_wave(cfg)
     group_blocks = cfg.aiter_scale_groups // 8
     shared = _uses_cta_shared_aiter_mxfp4_scales(cfg)
     lds = bld.ptr_cast(
-        _scale_shared_memory_base(bld, cfg, lds_offset),
+        _scale_lds_ptr(bld, coords, axis, lds_offset),
         dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
     )
     wg_value, wave, waves, tiles, global_base = _aiter_mxfp4_scale_axis_params(
@@ -4592,7 +4808,6 @@ def _stage_aiter_mxfp4_scale_axis(
         group_indices = tuple(range(axis_groups))
 
     tokens: list[dsl.Value] = []
-    axis_group_base = 0 if axis == "m" else _aiter_mxfp4_scale_axis_dma_groups(cfg, "m")
     for group in group_indices:
         group_blocks_valid = min(4, blocks - 4 * group) if isinstance(group, int) else 4
         block = 4 * group + dsl.mod(lane_group, group_blocks_valid)
@@ -4611,7 +4826,7 @@ def _stage_aiter_mxfp4_scale_axis(
                 cfg, axis, wave_id_uniform, uniform_group
             )
         else:
-            dest_group = wave_id_uniform * dma_groups + axis_group_base + group
+            dest_group = wave_id_uniform * axis_groups + group
         dest_offset = bld.index_expr(
             dest_group * _AITER_MXFP4_SCALE_LDS_DMA_DWORDS,
             bindings=first_bindings,
@@ -4656,8 +4871,12 @@ def _read_aiter_mxfp4_scale_batch(
     lds_offset: dsl.Value | int,
     ready_token: dsl.Value,
 ) -> tuple[list[tuple[int, _Mxfp4ScaleSet]], dsl.Value]:
-    lds = bld.ptr_cast(
-        _scale_shared_memory_base(bld, cfg, lds_offset),
+    a_lds = bld.ptr_cast(
+        _scale_lds_ptr(bld, coords, "m", lds_offset),
+        dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
+    )
+    b_lds = bld.ptr_cast(
+        _scale_lds_ptr(bld, coords, "n", lds_offset),
         dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
     )
     wi = dsl.sym("__wave_dsl_aiter_read_wi")
@@ -4683,7 +4902,7 @@ def _read_aiter_mxfp4_scale_batch(
                 bindings=bindings,
             )
             scale, token = bld.load(
-                bld.ptr_add(lds, offset), load_type, after=ready_token
+                bld.ptr_add(a_lds, offset), load_type, after=ready_token
             )
             a_scales.extend((scale, scale))
             a_tokens.append(token)
@@ -4699,7 +4918,7 @@ def _read_aiter_mxfp4_scale_batch(
                 bindings=bindings,
             )
             scale, token = bld.load(
-                bld.ptr_add(lds, offset), load_type, after=ready_token
+                bld.ptr_add(b_lds, offset), load_type, after=ready_token
             )
             b_scales.extend((scale, scale))
             b_tokens.append(token)
@@ -4733,8 +4952,12 @@ def _read_aiter_mxfp4_scale_pair(
     ready_token: dsl.Value,
     pair: int,
 ) -> tuple[tuple[_Mxfp4ScaleSet, _Mxfp4ScaleSet], dsl.Value]:
-    lds = bld.ptr_cast(
-        _scale_shared_memory_base(bld, cfg, lds_offset),
+    a_lds = bld.ptr_cast(
+        _scale_lds_ptr(bld, coords, "m", lds_offset),
+        dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
+    )
+    b_lds = bld.ptr_cast(
+        _scale_lds_ptr(bld, coords, "n", lds_offset),
         dsl.ptr_type(dsl.i32(), dsl.shared_address_space()),
     )
     wi = dsl.sym("__wave_dsl_aiter_pair_wi")
@@ -4756,7 +4979,9 @@ def _read_aiter_mxfp4_scale_pair(
             + lane,
             bindings=bindings,
         )
-        scale, token = bld.load(bld.ptr_add(lds, offset), load_type, after=ready_token)
+        scale, token = bld.load(
+            bld.ptr_add(a_lds, offset), load_type, after=ready_token
+        )
         a_scales.extend((scale, scale))
         tokens.append(token)
     for tile_pair in range(b_pairs):
@@ -4768,7 +4993,9 @@ def _read_aiter_mxfp4_scale_pair(
             + lane,
             bindings=bindings,
         )
-        scale, token = bld.load(bld.ptr_add(lds, offset), load_type, after=ready_token)
+        scale, token = bld.load(
+            bld.ptr_add(b_lds, offset), load_type, after=ready_token
+        )
         b_scales.extend((scale, scale))
         tokens.append(token)
     token = _join_tokens(bld, tokens)
@@ -5283,9 +5510,9 @@ def _emit_pipelined_step(
     a_ptrs: tuple[dsl.Value, ...],
     b_ptrs: tuple[dsl.Value, ...],
     scale_step: dsl.Value | int,
-    current_lds_offset: int | dsl.Value = 0,
-    ready_lds_offset: int | dsl.Value = 0,
-    next_lds_offset: int | dsl.Value = 0,
+    current_lds_offset: _LdsOffsets | int | dsl.Value = 0,
+    ready_lds_offset: _LdsOffsets | int | dsl.Value = 0,
+    next_lds_offset: _LdsOffsets | int | dsl.Value = 0,
 ) -> list[dsl.Value]:
     scale_tokens: list[dsl.Value] = []
     new_scale_token: dsl.Value | None = None
@@ -5389,9 +5616,9 @@ def _emit_dma_step(
     a_ptrs: tuple[dsl.Value, ...],
     b_ptrs: tuple[dsl.Value, ...],
     scale_step: dsl.Value | int,
-    current_lds_offset: int | dsl.Value,
-    ready_lds_offset: int | dsl.Value,
-    next_lds_offset: int | dsl.Value,
+    current_lds_offset: _LdsOffsets | int | dsl.Value,
+    ready_lds_offset: _LdsOffsets | int | dsl.Value,
+    next_lds_offset: _LdsOffsets | int | dsl.Value,
 ) -> tuple[
     tuple[dsl.Value, ...],
     dsl.Value,
@@ -5515,7 +5742,11 @@ def _emit_dma_step(
         if _use_early_data_dma_issue(cfg):
             issue_next_dma()
         next_b_ptrs = _aiter_b_fragment_ptrs(bld, cfg, coords, next_scale_step)
-        ready_a_ptrs = _offset_ptrs(bld, staging.a_dma_read_ptrs, ready_lds_offset)
+        ready_a_ptrs = _offset_ptrs(
+            bld,
+            staging.a_dma_read_ptrs,
+            _operand_lds_offsets(ready_lds_offset).a,
+        )
         ready_a_frags: list[dsl.Value | None] = [None] * len(ready_a_ptrs)
         ready_b_frags: list[dsl.Value | None] = [None] * len(next_b_ptrs)
         ready_a_tokens: list[dsl.Value] = []
@@ -6398,7 +6629,7 @@ def _store_acc_tiles_lds_coalesced(
     after: dsl.Value | None = None,
 ) -> None:
     cache = _output_store_cache(cfg)
-    lds = bld.shared_memory_base(dsl.f16())
+    lds = bld.workgroup_alloc(_mxfp4_output_lds_bytes(cfg), 16, dsl.f16())
     wi = dsl.sym("__wave_dsl_epilogue_wi")
     bindings = {wi: coords.wi}
     lane = dsl.mod(wi, cfg.mma.wave_size)
@@ -6742,16 +6973,12 @@ def _emit_matmul_launch(
             _emit_i8_ptr(bld, buffers.b_scale),
             trip_count,
         ]
-    dynamic_lds = _dynamic_lds_bytes(cfg)
     bld.launch(
         _GPU_MODULE_NAME,
         _KERNEL_NAME,
         grid=grid,
         block=block,
         operands=operands,
-        dynamic_shared_memory_size=(
-            bld.constant(dsl.i32(), dynamic_lds) if dynamic_lds else None
-        ),
     )
 
 
@@ -6788,6 +7015,14 @@ def _flatten_dma_subpanel_tokens(tokens: _DmaSubpanelTokens) -> tuple[dsl.Value,
     return (*tokens.a, *tokens.b)
 
 
+def _flatten_dma_lds_byte_bases(
+    bases: _DmaLdsByteBases,
+) -> tuple[dsl.Value, dsl.Value]:
+    if bases.b is None:
+        raise ValueError("B DMA requires an LDS allocation")
+    return bases.a, bases.b
+
+
 def _split_dma_subpanel_tokens(
     values: tuple[dsl.Value, ...], cfg: _MatmulConfig
 ) -> _DmaSubpanelTokens:
@@ -6801,7 +7036,7 @@ def _split_dma_subpanel_loop_state(
     acc_end = cfg.tiles_per_wave
     a_end = acc_end + cfg.wave_m_tiles
     b_end = a_end + cfg.wave_n_tiles
-    ready_begin = b_end + 7
+    ready_begin = b_end + 8
     token_count = 2 * cfg.wave_k_tiles
     return _DmaSubpanelLoopState(
         accs=values[:acc_end],
@@ -6812,7 +7047,9 @@ def _split_dma_subpanel_loop_state(
         current_access=values[b_end + 2],
         current_read_bases=_DmaSubpanelReadBases(values[b_end + 3], values[b_end + 4]),
         current_lds_offset=values[b_end + 5],
-        current_dma_lds_byte_base=values[b_end + 6],
+        current_dma_lds_byte_bases=_DmaLdsByteBases(
+            values[b_end + 6], values[b_end + 7]
+        ),
         ready=_split_dma_subpanel_tokens(
             values[ready_begin : ready_begin + token_count], cfg
         ),
@@ -6832,7 +7069,7 @@ def _flatten_dma_subpanel_loop_state(
         state.current_read_bases.a,
         state.current_read_bases.b,
         state.current_lds_offset,
-        state.current_dma_lds_byte_base,
+        *_flatten_dma_lds_byte_bases(state.current_dma_lds_byte_bases),
         *_flatten_dma_subpanel_tokens(state.ready),
     )
 
@@ -6946,7 +7183,7 @@ def _issue_dma_subpanels(
     staging: _LdsStaging,
     after: _DmaSubpanelTokens,
     *,
-    lds_byte_base: dsl.Value,
+    lds_byte_bases: _DmaLdsByteBases,
     in_loop: bool,
     request_offset: int = 0,
 ) -> _DmaSubpanelTokens:
@@ -6956,17 +7193,19 @@ def _issue_dma_subpanels(
         a_ptrs,
         staging.a_dma_lds_byte_ptrs,
         after.a,
-        lds_byte_base=lds_byte_base,
+        lds_byte_base=lds_byte_bases.a,
         in_loop=in_loop,
         request_offset=request_offset,
     )
+    if b_ptrs and lds_byte_bases.b is None:
+        raise ValueError("B DMA requires an LDS allocation")
     b = _issue_dma_operand_subpanels(
         bld,
         cfg,
         b_ptrs,
         staging.b_dma_lds_byte_ptrs,
         after.b,
-        lds_byte_base=lds_byte_base,
+        lds_byte_base=lds_byte_bases.b,
         in_loop=in_loop,
         request_offset=request_offset + len(a_ptrs),
     )
@@ -6982,8 +7221,9 @@ def _read_dma_subpanel(
     ready: dsl.Value,
     frag_type: dsl.Type,
     staging: _LdsStaging,
+    axis: Literal["a", "b"],
 ) -> tuple[tuple[dsl.Value, ...], dsl.Value]:
-    read_ptrs = _dma_subpanel_read_ptrs(bld, staging, base, offsets)
+    read_ptrs = _dma_subpanel_read_ptrs(bld, staging, axis, base, offsets)
     fragments: list[dsl.Value] = []
     tokens: list[dsl.Value] = []
     for ptr in _dma_phase_slice(read_ptrs, phase, cfg.wave_k_tiles):
@@ -7116,14 +7356,14 @@ def _emit_dma_subpanel_phase1_with_reads(
 ]:
     ready_a_ptrs = _dma_phase_slice(
         _dma_subpanel_read_ptrs(
-            bld, staging, ready_read_bases.a, staging.a_dma_read_offsets
+            bld, staging, "a", ready_read_bases.a, staging.a_dma_read_offsets
         ),
         0,
         cfg.wave_k_tiles,
     )
     ready_b_ptrs = _dma_phase_slice(
         _dma_subpanel_read_ptrs(
-            bld, staging, ready_read_bases.b, staging.b_dma_read_offsets
+            bld, staging, "b", ready_read_bases.b, staging.b_dma_read_offsets
         ),
         0,
         cfg.wave_k_tiles,
@@ -7189,7 +7429,7 @@ def _emit_dma_subpanel_phase0_with_a1_reads(
 ) -> tuple[tuple[dsl.Value, ...], tuple[dsl.Value, ...], dsl.Value]:
     a1_ptrs = _dma_phase_slice(
         _dma_subpanel_read_ptrs(
-            bld, staging, current_read_base, staging.a_dma_read_offsets
+            bld, staging, "a", current_read_base, staging.a_dma_read_offsets
         ),
         1,
         cfg.wave_k_tiles,
@@ -7293,6 +7533,7 @@ def _emit_coalesced_dma_subpanel_reuse(
         _dma_subpanel_read_ptrs(
             bld,
             staging,
+            "a",
             state.current_read_bases.a,
             staging.a_dma_read_offsets,
         ),
@@ -7323,7 +7564,7 @@ def _emit_coalesced_dma_subpanel_reuse(
         staging.a_dma_lds_byte_ptrs,
         0,
         a_reuse_access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.a,
         in_loop=True,
         request_offset=0,
     )
@@ -7338,7 +7579,7 @@ def _emit_coalesced_dma_subpanel_reuse(
         0,
         a1_early_width,
         a_reuse_access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.a,
         in_loop=True,
         request_offset=0,
     )
@@ -7347,6 +7588,7 @@ def _emit_coalesced_dma_subpanel_reuse(
         _dma_subpanel_read_ptrs(
             bld,
             staging,
+            "b",
             state.current_read_bases.b,
             staging.b_dma_read_offsets,
         ),
@@ -7394,7 +7636,7 @@ def _emit_dma_subpanel_reuse(
             bld, cfg, types, staging, state, a_ptrs
         )
     current_b_ptrs = _dma_subpanel_read_ptrs(
-        bld, staging, state.current_read_bases.b, staging.b_dma_read_offsets
+        bld, staging, "b", state.current_read_bases.b, staging.b_dma_read_offsets
     )
     b1_ptrs = _dma_phase_slice(current_b_ptrs, 1, cfg.wave_k_tiles)
     reuse_rows = max(1, (cfg.wave_m_tiles + 2) // 3)
@@ -7421,7 +7663,7 @@ def _emit_dma_subpanel_reuse(
             staging.a_dma_lds_byte_ptrs,
             0,
             a_reuse_access,
-            lds_byte_base=state.current_dma_lds_byte_base,
+            lds_byte_base=state.current_dma_lds_byte_bases.b,
             in_loop=True,
             request_offset=0,
         )
@@ -7469,7 +7711,7 @@ def _issue_next_dma_subpanel_a(
             staging.a_dma_lds_byte_ptrs,
             1,
             reuse.reuse_access,
-            lds_byte_base=state.current_dma_lds_byte_base,
+            lds_byte_base=state.current_dma_lds_byte_bases.b,
             in_loop=True,
             request_offset=0,
         )
@@ -7486,7 +7728,7 @@ def _issue_next_dma_subpanel_a(
         a1_early_width,
         a_phase_width,
         reuse.reuse_access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.a,
         in_loop=True,
         request_offset=0,
     )
@@ -7510,7 +7752,7 @@ def _issue_next_dma_subpanel_b_prefix(
         staging.b_dma_lds_byte_ptrs,
         0,
         reuse.reuse_access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.b,
         in_loop=True,
         request_offset=request_offset,
     )
@@ -7525,7 +7767,7 @@ def _issue_next_dma_subpanel_b_prefix(
         0,
         early_width,
         reuse.reuse_access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.b,
         in_loop=True,
         request_offset=request_offset,
     )
@@ -7541,7 +7783,7 @@ def _finish_dma_subpanel_step(
     reuse: _DmaSubpanelReuseState,
     a_ptrs: tuple[dsl.Value, ...],
     b_ptrs: tuple[dsl.Value, ...],
-    next_dma_lds_byte_base: dsl.Value,
+    next_dma_lds_byte_bases: _DmaLdsByteBases,
     *,
     on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
@@ -7589,7 +7831,7 @@ def _finish_dma_subpanel_step(
         b1_early_width,
         b_phase_width,
         late_access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.b,
         in_loop=True,
         request_offset=len(a_ptrs),
     )
@@ -7622,7 +7864,7 @@ def _finish_dma_subpanel_step(
         ready_read_bases.a,
         ready_read_bases.b,
         ready_lds_offset,
-        next_dma_lds_byte_base,
+        *_flatten_dma_lds_byte_bases(next_dma_lds_byte_bases),
         *_flatten_dma_subpanel_tokens(
             _DmaSubpanelTokens(
                 (next_a0, next_a1),
@@ -7650,7 +7892,7 @@ def _emit_dma_subpanel_step(
         state,
         a_ptrs,
     )
-    next_dma_lds_byte_base = _dma_subpanel_lds_byte_base(
+    next_dma_lds_byte_bases = _dma_subpanel_lds_byte_bases(
         bld, cfg, staging, bld.addi(loop_iv, bld.constant(dsl.i32(), 1))
     )
     return _finish_dma_subpanel_step(
@@ -7662,7 +7904,7 @@ def _emit_dma_subpanel_step(
         reuse,
         a_ptrs,
         b_ptrs,
-        next_dma_lds_byte_base,
+        next_dma_lds_byte_bases,
     )
 
 
@@ -7694,7 +7936,7 @@ def _emit_dma_subpanel_cross_tile_step(
             reuse,
             inputs.a_ptrs,
             inputs.b_ptrs,
-            inputs.next_dma_lds_byte_base,
+            inputs.next_dma_lds_byte_bases,
             on_final_column=on_final_column,
         ),
         cfg,
@@ -7722,6 +7964,7 @@ def _drain_dma_subpanel_tile(
         access,
         types.a,
         staging,
+        "a",
     )
     b0, _ = _read_dma_subpanel(
         bld,
@@ -7732,9 +7975,10 @@ def _drain_dma_subpanel_tile(
         access,
         types.b,
         staging,
+        "b",
     )
     b_ptrs = _dma_subpanel_read_ptrs(
-        bld, staging, read_bases.b, staging.b_dma_read_offsets
+        bld, staging, "b", read_bases.b, staging.b_dma_read_offsets
     )
     b1_ptrs = _dma_phase_slice(b_ptrs, 1, cfg.wave_k_tiles)
     accs, b1, _ = _emit_dma_subpanel_phase0(
@@ -7749,6 +7993,7 @@ def _drain_dma_subpanel_tile(
         access,
         types.a,
         staging,
+        "a",
     )
     return _emit_dma_subpanel_mmas(
         bld,
@@ -7770,7 +8015,7 @@ def _emit_dma_subpanel_tail(
     on_final_column: Callable[[tuple[dsl.Value, ...], int], None] | None = None,
 ) -> tuple[dsl.Value, ...]:
     current_b_ptrs = _dma_subpanel_read_ptrs(
-        bld, staging, state.current_read_bases.b, staging.b_dma_read_offsets
+        bld, staging, "b", state.current_read_bases.b, staging.b_dma_read_offsets
     )
     b1_ptrs = _dma_phase_slice(current_b_ptrs, 1, cfg.wave_k_tiles)
     accs, b1, _ = _emit_dma_subpanel_phase0(
@@ -7793,6 +8038,7 @@ def _emit_dma_subpanel_tail(
         state.current_access,
         types.a,
         staging,
+        "a",
     )
     accs = _emit_dma_subpanel_mmas(bld, cfg, a1, b1, accs)
     ready_read_bases, _ = _next_dma_subpanel_read_state(
@@ -7821,7 +8067,7 @@ def _init_dma_subpanel_kernel(
     root = _dep_or_token(bld, after)
     roots = tuple(root for _ in range(cfg.wave_k_tiles))
     empty = _DmaSubpanelTokens(roots, roots)
-    first_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 0)
+    first_dma_lds_byte_bases = _dma_subpanel_lds_byte_bases(bld, cfg, staging, 0)
     first_ready = _issue_dma_subpanels(
         bld,
         cfg,
@@ -7829,7 +8075,7 @@ def _init_dma_subpanel_kernel(
         staging.b_dma_src_ptrs,
         staging,
         empty,
-        lds_byte_base=first_dma_lds_byte_base,
+        lds_byte_bases=first_dma_lds_byte_bases,
         in_loop=False,
     )
     init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
@@ -7847,12 +8093,12 @@ def _init_dma_subpanel_loop(
     init_accs: tuple[dsl.Value, ...],
     virtual_k_stride: dsl.Value,
 ) -> tuple[dsl.Value, ...]:
-    current_read_bases = _dma_subpanel_read_bases(bld, staging, 0)
+    current_read_bases = _dma_subpanel_read_bases(bld, cfg, staging, 0)
     current_lds_offset = bld.constant(dsl.i32(), 0)
-    current_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 0)
+    current_dma_lds_byte_bases = _dma_subpanel_lds_byte_bases(bld, cfg, staging, 0)
     second_a_ptrs = _advance_ptrs(bld, staging.a_dma_src_ptrs, virtual_k_stride)
     second_b_ptrs = _advance_ptrs(bld, staging.b_dma_src_ptrs, virtual_k_stride)
-    second_dma_lds_byte_base = _dma_subpanel_lds_byte_base(bld, cfg, staging, 1)
+    second_dma_lds_byte_bases = _dma_subpanel_lds_byte_bases(bld, cfg, staging, 1)
     second_ready = _issue_dma_subpanels(
         bld,
         cfg,
@@ -7860,7 +8106,7 @@ def _init_dma_subpanel_loop(
         second_b_ptrs,
         staging,
         empty,
-        lds_byte_base=second_dma_lds_byte_base,
+        lds_byte_bases=second_dma_lds_byte_bases,
         in_loop=False,
         request_offset=len(second_a_ptrs) + len(second_b_ptrs),
     )
@@ -7874,6 +8120,7 @@ def _init_dma_subpanel_loop(
         first_access,
         types.a,
         staging,
+        "a",
     )
     first_b, first_b_read = _read_dma_subpanel(
         bld,
@@ -7884,6 +8131,7 @@ def _init_dma_subpanel_loop(
         first_access,
         types.b,
         staging,
+        "b",
     )
     return (
         *init_accs,
@@ -7895,7 +8143,7 @@ def _init_dma_subpanel_loop(
         current_read_bases.a,
         current_read_bases.b,
         current_lds_offset,
-        current_dma_lds_byte_base,
+        *_flatten_dma_lds_byte_bases(current_dma_lds_byte_bases),
         *_flatten_dma_subpanel_tokens(second_ready),
     )
 
@@ -8002,7 +8250,7 @@ def _compute_dma_subpanel_tile(
                     staging,
                     first_ready,
                     init_accs,
-                    _dma_subpanel_read_bases(bld, staging, 0),
+                    _dma_subpanel_read_bases(bld, cfg, staging, 0),
                 )
             )
             with dynamic.otherwise():
@@ -8041,7 +8289,7 @@ def _compute_dma_subpanel_tile(
             staging,
             first_ready,
             init_accs,
-            _dma_subpanel_read_bases(bld, staging, 0),
+            _dma_subpanel_read_bases(bld, cfg, staging, 0),
             on_column=on_final_column,
         )
     init_args = _init_dma_subpanel_loop(
@@ -8098,7 +8346,7 @@ def _flatten_dma_spatial_state(state: _DmaSpatialLoopState) -> tuple[dsl.Value, 
         state.current_read_bases.a,
         state.current_read_bases.b,
         state.current_lds_offset,
-        state.current_dma_lds_byte_base,
+        *_flatten_dma_lds_byte_bases(state.current_dma_lds_byte_bases),
         *_flatten_dma_spatial_tokens(state.current),
         *_flatten_dma_spatial_tokens(state.ready),
     )
@@ -8110,7 +8358,7 @@ def _split_dma_spatial_state(
     acc_end = cfg.tiles_per_wave
     a_end = acc_end + cfg.wave_m_tiles
     b_end = a_end + cfg.wave_n_tiles
-    token_begin = b_end + 6
+    token_begin = b_end + 7
     return _DmaSpatialLoopState(
         accs=values[:acc_end],
         a_top=values[acc_end:a_end],
@@ -8119,7 +8367,9 @@ def _split_dma_spatial_state(
         b_left_read=values[b_end + 1],
         current_read_bases=_DmaSubpanelReadBases(values[b_end + 2], values[b_end + 3]),
         current_lds_offset=values[b_end + 4],
-        current_dma_lds_byte_base=values[b_end + 5],
+        current_dma_lds_byte_bases=_DmaLdsByteBases(
+            values[b_end + 5], values[b_end + 6]
+        ),
         current=_split_dma_spatial_tokens(values[token_begin : token_begin + 4]),
         ready=_split_dma_spatial_tokens(values[token_begin + 4 : token_begin + 8]),
     )
@@ -8167,10 +8417,12 @@ def _issue_dma_spatial_tile(
     staging: _LdsStaging,
     after: _DmaSpatialTokens,
     *,
-    lds_byte_base: dsl.Value,
+    lds_byte_bases: _DmaLdsByteBases,
     in_loop: bool,
     request_offset: int = 0,
 ) -> _DmaSpatialTokens:
+    if b_ptrs and lds_byte_bases.b is None:
+        raise ValueError("B DMA requires an LDS allocation")
     b_left = _issue_dma_spatial_operand_panel(
         bld,
         cfg,
@@ -8178,7 +8430,7 @@ def _issue_dma_spatial_tile(
         staging.b_dma_lds_byte_ptrs,
         0,
         after.b_left,
-        lds_byte_base=lds_byte_base,
+        lds_byte_base=lds_byte_bases.b,
         in_loop=in_loop,
         request_offset=request_offset + len(a_ptrs),
     )
@@ -8189,7 +8441,7 @@ def _issue_dma_spatial_tile(
         staging.a_dma_lds_byte_ptrs,
         0,
         after.a_top,
-        lds_byte_base=lds_byte_base,
+        lds_byte_base=lds_byte_bases.a,
         in_loop=in_loop,
         request_offset=request_offset,
     )
@@ -8200,7 +8452,7 @@ def _issue_dma_spatial_tile(
         staging.a_dma_lds_byte_ptrs,
         1,
         after.a_bottom,
-        lds_byte_base=lds_byte_base,
+        lds_byte_base=lds_byte_bases.a,
         in_loop=in_loop,
         request_offset=request_offset,
     )
@@ -8211,7 +8463,7 @@ def _issue_dma_spatial_tile(
         staging.b_dma_lds_byte_ptrs,
         1,
         after.b_right,
-        lds_byte_base=lds_byte_base,
+        lds_byte_base=lds_byte_bases.b,
         in_loop=in_loop,
         request_offset=request_offset + len(a_ptrs),
     )
@@ -8221,6 +8473,7 @@ def _issue_dma_spatial_tile(
 def _read_dma_spatial_panel(
     bld: dsl.FunctionBuilder,
     staging: _LdsStaging,
+    axis: Literal["a", "b"],
     base: dsl.Value,
     offsets: tuple[int, ...],
     panel: int,
@@ -8229,7 +8482,7 @@ def _read_dma_spatial_panel(
 ) -> tuple[tuple[dsl.Value, ...], dsl.Value]:
     panel_width = len(offsets) // 2
     panel_offsets = offsets[panel * panel_width : (panel + 1) * panel_width]
-    ptrs = _dma_subpanel_read_ptrs(bld, staging, base, panel_offsets)
+    ptrs = _dma_subpanel_read_ptrs(bld, staging, axis, base, panel_offsets)
     fragments: list[dsl.Value] = []
     tokens: list[dsl.Value] = []
     for ptr in ptrs:
@@ -8337,13 +8590,14 @@ def _emit_dma_spatial_step_left(
         staging.b_dma_lds_byte_ptrs,
         0,
         access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.b,
         in_loop=True,
         request_offset=len(a_ptrs),
     )
     a_bottom, a_bottom_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         state.current_read_bases.a,
         staging.a_dma_read_offsets,
         1,
@@ -8363,13 +8617,14 @@ def _emit_dma_spatial_step_left(
         staging.a_dma_lds_byte_ptrs,
         0,
         access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.a,
         in_loop=True,
         request_offset=0,
     )
     b_right, b_right_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         state.current_read_bases.b,
         staging.b_dma_read_offsets,
         1,
@@ -8392,7 +8647,7 @@ def _emit_dma_spatial_step_right(
     progress: _DmaSpatialStepProgress,
     ready_read_bases: _DmaSubpanelReadBases,
     ready_lds_offset: dsl.Value,
-    next_dma_lds_byte_base: dsl.Value,
+    next_dma_lds_byte_bases: _DmaLdsByteBases,
 ) -> _DmaSpatialLoopState:
     compute_ready = _dma_spatial_compute_boundary(
         bld, state.ready.b_left, progress.b_right_read
@@ -8409,13 +8664,14 @@ def _emit_dma_spatial_step_right(
         staging.a_dma_lds_byte_ptrs,
         1,
         access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.a,
         in_loop=True,
         request_offset=0,
     )
     ready_b_left, ready_b_left_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         ready_read_bases.b,
         staging.b_dma_read_offsets,
         0,
@@ -8437,13 +8693,14 @@ def _emit_dma_spatial_step_right(
         staging.b_dma_lds_byte_ptrs,
         1,
         access,
-        lds_byte_base=state.current_dma_lds_byte_base,
+        lds_byte_base=state.current_dma_lds_byte_bases.b,
         in_loop=True,
         request_offset=len(a_ptrs),
     )
     ready_a_top, ready_a_top_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         ready_read_bases.a,
         staging.a_dma_read_offsets,
         0,
@@ -8464,7 +8721,7 @@ def _emit_dma_spatial_step_right(
         ready_b_left_read,
         ready_read_bases,
         ready_lds_offset,
-        next_dma_lds_byte_base,
+        next_dma_lds_byte_bases,
         state.ready,
         future,
     )
@@ -8478,7 +8735,7 @@ def _emit_dma_spatial_step(
     state: _DmaSpatialLoopState,
     a_ptrs: tuple[dsl.Value, ...],
     b_ptrs: tuple[dsl.Value, ...],
-    next_dma_lds_byte_base: dsl.Value,
+    next_dma_lds_byte_bases: _DmaLdsByteBases,
 ) -> _DmaSpatialLoopState:
     ready_read_bases, ready_lds_offset = _next_dma_subpanel_read_state(
         bld, cfg, staging, state.current_lds_offset
@@ -8497,7 +8754,7 @@ def _emit_dma_spatial_step(
         progress,
         ready_read_bases,
         ready_lds_offset,
-        next_dma_lds_byte_base,
+        next_dma_lds_byte_bases,
     )
 
 
@@ -8514,6 +8771,7 @@ def _drain_dma_spatial_single(
     b_left, b_left_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         read_bases.b,
         staging.b_dma_read_offsets,
         0,
@@ -8523,6 +8781,7 @@ def _drain_dma_spatial_single(
     a_top, a_top_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         read_bases.a,
         staging.a_dma_read_offsets,
         0,
@@ -8534,6 +8793,7 @@ def _drain_dma_spatial_single(
     a_bottom, _ = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         read_bases.a,
         staging.a_dma_read_offsets,
         1,
@@ -8546,6 +8806,7 @@ def _drain_dma_spatial_single(
     b_right, _ = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         read_bases.b,
         staging.b_dma_read_offsets,
         1,
@@ -8574,6 +8835,7 @@ def _drain_dma_spatial_tail(
     a_bottom, a_bottom_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         state.current_read_bases.a,
         staging.a_dma_read_offsets,
         1,
@@ -8586,6 +8848,7 @@ def _drain_dma_spatial_tail(
     b_right, b_right_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         state.current_read_bases.b,
         staging.b_dma_read_offsets,
         1,
@@ -8598,6 +8861,7 @@ def _drain_dma_spatial_tail(
     ready_b_left, ready_b_left_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         ready_read_bases.b,
         staging.b_dma_read_offsets,
         0,
@@ -8610,6 +8874,7 @@ def _drain_dma_spatial_tail(
     ready_a_top, ready_a_top_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         ready_read_bases.a,
         staging.a_dma_read_offsets,
         0,
@@ -8623,6 +8888,7 @@ def _drain_dma_spatial_tail(
     ready_a_bottom, _ = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         ready_read_bases.a,
         staging.a_dma_read_offsets,
         1,
@@ -8637,6 +8903,7 @@ def _drain_dma_spatial_tail(
     ready_b_right, _ = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         ready_read_bases.b,
         staging.b_dma_read_offsets,
         1,
@@ -8748,7 +9015,7 @@ def _emit_dma_spatial_steady_loop(
                 virtual_k_stride,
                 step_base=2 + unroll_index,
             )
-            next_dma_lds_byte_base = _dma_subpanel_lds_byte_base(
+            next_dma_lds_byte_bases = _dma_subpanel_lds_byte_bases(
                 bld,
                 cfg,
                 staging,
@@ -8765,12 +9032,29 @@ def _emit_dma_spatial_steady_loop(
                 loop_state,
                 a_ptrs,
                 b_ptrs,
-                next_dma_lds_byte_base,
+                next_dma_lds_byte_bases,
             )
         bld.yield_(_flatten_dma_spatial_state(loop_state))
     result = _split_dma_spatial_state(tuple(forop.results), cfg)
     _end_dma_spatial_phase_shift(bld, low_group)
     return result
+
+
+def _store_dma_spatial_accs(
+    bld: dsl.FunctionBuilder,
+    cfg: _MatmulConfig,
+    coords: _TileCoords,
+    accs: tuple[dsl.Value, ...],
+) -> dsl.Value:
+    return _store_acc_tiles(
+        bld,
+        cfg,
+        accs,
+        _dma_spatial_c_ptrs(bld, cfg, coords),
+        0,
+        cfg.wave_n_tiles,
+        coords.wi,
+    )
 
 
 def _emit_dma_spatial_kernel(
@@ -8790,27 +9074,17 @@ def _emit_dma_spatial_kernel(
         staging.b_dma_src_ptrs,
         staging,
         empty,
-        lds_byte_base=_dma_subpanel_lds_byte_base(bld, cfg, staging, 0),
+        lds_byte_bases=_dma_subpanel_lds_byte_bases(bld, cfg, staging, 0),
         in_loop=False,
     )
     init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), types.acc)
     init_accs = tuple(init_acc for _ in range(cfg.tiles_per_wave))
-    first_read_bases = _dma_subpanel_read_bases(bld, staging, 0)
+    first_read_bases = _dma_subpanel_read_bases(bld, cfg, staging, 0)
     if cfg.virtual_k_steps == 1:
         final_accs = _drain_dma_spatial_single(
             bld, cfg, types, staging, first, init_accs, first_read_bases
         )
-        bld.observe(
-            _store_acc_tiles(
-                bld,
-                cfg,
-                final_accs,
-                _dma_spatial_c_ptrs(bld, cfg, coords),
-                0,
-                cfg.wave_n_tiles,
-                coords.wi,
-            )
-        )
+        bld.observe(_store_dma_spatial_accs(bld, cfg, coords, final_accs))
         return
 
     second_a = _advance_ptrs(bld, staging.a_dma_src_ptrs, virtual_k_stride)
@@ -8822,7 +9096,7 @@ def _emit_dma_spatial_kernel(
         second_b,
         staging,
         empty,
-        lds_byte_base=_dma_subpanel_lds_byte_base(bld, cfg, staging, 1),
+        lds_byte_bases=_dma_subpanel_lds_byte_bases(bld, cfg, staging, 1),
         in_loop=False,
         request_offset=len(second_a) + len(second_b),
     )
@@ -8830,6 +9104,7 @@ def _emit_dma_spatial_kernel(
     b_left, b_left_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "b",
         first_read_bases.b,
         staging.b_dma_read_offsets,
         0,
@@ -8839,6 +9114,7 @@ def _emit_dma_spatial_kernel(
     a_top, a_top_read = _read_dma_spatial_panel(
         bld,
         staging,
+        "a",
         first_read_bases.a,
         staging.a_dma_read_offsets,
         0,
@@ -8853,7 +9129,7 @@ def _emit_dma_spatial_kernel(
         b_left_read,
         first_read_bases,
         bld.constant(dsl.i32(), 0),
-        _dma_subpanel_lds_byte_base(bld, cfg, staging, 0),
+        _dma_subpanel_lds_byte_bases(bld, cfg, staging, 0),
         first,
         second,
     )
@@ -8861,22 +9137,16 @@ def _emit_dma_spatial_kernel(
         bld, cfg, types, staging, coords, virtual_k_stride, state
     )
     final_accs = _drain_dma_spatial_tail(bld, cfg, types, staging, state)
-    bld.observe(
-        _store_acc_tiles(
-            bld,
-            cfg,
-            final_accs,
-            _dma_spatial_c_ptrs(bld, cfg, coords),
-            0,
-            cfg.wave_n_tiles,
-            coords.wi,
-        )
-    )
+    bld.observe(_store_dma_spatial_accs(bld, cfg, coords, final_accs))
 
 
 def _dma_loop_offsets(
     bld: dsl.FunctionBuilder, cfg: _MatmulConfig, loop_iv: dsl.Value
-) -> tuple[int | dsl.Value, int | dsl.Value, int | dsl.Value]:
+) -> tuple[
+    _LdsOffsets | int,
+    _LdsOffsets | int,
+    _LdsOffsets | int,
+]:
     if not cfg.use_dma_lds:
         return 0, 0, 0
     current = _dma_buffer_offset(bld, cfg, loop_iv)
@@ -9824,10 +10094,9 @@ def _publish_streamk_partial(
         bld.read_first(old),
         bld.constant(dsl.i32(), 1),
     )
-    mailbox = bld.shared_memory_base(
-        dsl.i32(),
-        offset=cfg.lds_bytes,
-    )
+    if coords.lds.mailbox is None:
+        raise ValueError("Stream-K mailbox allocation is required")
+    mailbox = coords.lds.mailbox
     with bld.where(global_zero, [dsl.mem_token_type()]) as active:
         mailbox_store = bld.store(
             bld.splat(count, width=cfg.mma.wave_size),
@@ -10074,6 +10343,7 @@ def _emit_streamk_tile(
 def _emit_aligned_streamk_kernel(
     bld: dsl.FunctionBuilder,
     cfg: _MatmulConfig,
+    lds: _MatmulLds,
     *,
     workers: int,
 ) -> None:
@@ -10081,7 +10351,7 @@ def _emit_aligned_streamk_kernel(
     tiles_per_worker = tile_count // workers
     index = dsl.i32()
     worker = bld.assume_range(bld.workgroup_id(axis=0), 0, workers - 1)
-    inputs = _emit_tile_inputs(bld, cfg)
+    inputs = _emit_tile_inputs(bld, cfg, lds)
     if (
         _uses_dma_subpanel_pipeline(cfg)
         and tiles_per_worker > 1
@@ -10188,7 +10458,7 @@ def _emit_pipelined_subpanel_transition(
         _DmaSubpanelStepInputs(
             next_staging.a_dma_src_ptrs,
             next_staging.b_dma_src_ptrs,
-            _dma_subpanel_lds_byte_base(
+            _dma_subpanel_lds_byte_bases(
                 bld,
                 cfg,
                 staging,
@@ -10228,7 +10498,7 @@ def _emit_pipelined_subpanel_transition(
                 next_staging.b_dma_src_ptrs,
                 pipeline.virtual_k_stride,
             ),
-            _dma_subpanel_lds_byte_base(
+            _dma_subpanel_lds_byte_bases(
                 bld,
                 cfg,
                 staging,
@@ -10384,9 +10654,10 @@ def _emit_streamk_kernel(
     *,
     workers: int,
 ) -> None:
+    lds = _allocate_matmul_lds(bld, cfg, streamk=True)
     tile_count = cfg.M_blocks * cfg.N_blocks
     if tile_count % workers == 0:
-        _emit_aligned_streamk_kernel(bld, cfg, workers=workers)
+        _emit_aligned_streamk_kernel(bld, cfg, lds, workers=workers)
         return
 
     total_iterations = tile_count * cfg.virtual_k_steps
@@ -10401,9 +10672,9 @@ def _emit_streamk_kernel(
     k_width = bld.constant(index, cfg.virtual_k_steps)
     tile_end = bld.addi(partition.last_tile, one)
     scratch = _streamk_scratch_base(bld, workers)
-    full_inputs = _emit_tile_inputs(bld, cfg)
+    full_inputs = _emit_tile_inputs(bld, cfg, lds)
     partial_cfg = replace(cfg, use_buffer=False)
-    partial_inputs = _emit_tile_inputs(bld, partial_cfg)
+    partial_inputs = _emit_tile_inputs(bld, partial_cfg, lds)
     with bld.for_loop(
         partition.first_tile,
         tile_end,
@@ -10460,7 +10731,9 @@ def _issue_aiter_a_dma_phase(
     width = len(a_ptrs) // cfg.wave_k_tiles
     begin = phase * width
     end = begin + width
-    destinations = _offset_ptrs(bld, staging.a_dma_lds_ptrs, lds_offset)
+    destinations = _offset_ptrs(
+        bld, staging.a_dma_lds_ptrs, _operand_lds_offsets(lds_offset).a
+    )
     requests = list(zip(a_ptrs[begin:end], destinations[begin:end], strict=True))
     return _join_tokens(
         bld,
@@ -10480,7 +10753,7 @@ def _issue_aiter_a_dma_phases(
     cfg: _MatmulConfig,
     staging: _LdsStaging,
     a_ptrs: tuple[dsl.Value, ...],
-    lds_offset: dsl.Value | int,
+    lds_offset: _LdsOffsets | dsl.Value | int,
     *,
     in_loop: bool,
 ) -> tuple[dsl.Value, ...]:
@@ -10507,9 +10780,11 @@ def _read_aiter_a_phase(
     staging: _LdsStaging,
     phase: int,
     access: dsl.Value,
-    lds_offset: dsl.Value | int,
+    lds_offset: _LdsOffsets | dsl.Value | int,
 ) -> tuple[tuple[dsl.Value, ...], dsl.Value]:
-    read_ptrs = _offset_ptrs(bld, staging.a_dma_read_ptrs, lds_offset)
+    read_ptrs = _offset_ptrs(
+        bld, staging.a_dma_read_ptrs, _operand_lds_offsets(lds_offset).a
+    )
     phase_ptrs = _dma_phase_slice(read_ptrs, phase, cfg.wave_k_tiles)
     fragments: list[dsl.Value] = []
     tokens: list[dsl.Value] = []
@@ -10887,7 +11162,8 @@ def _kernel_loop_trip_count(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> dsl
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _MatmulConfig) -> None:
     """Populate tiled matmul kernel body."""
-    coords = _emit_tile_coords(bld, cfg)
+    lds = _allocate_matmul_lds(bld, cfg)
+    coords = _emit_tile_coords(bld, cfg, inputs=_emit_tile_inputs(bld, cfg, lds))
     types = _kernel_types(cfg)
     staging = _emit_lds_staging(bld, cfg, coords)
     virtual_k_stride = bld.constant(dsl.i32(), cfg.storage_k_tile * cfg.wave_k_tiles)
@@ -11224,7 +11500,7 @@ def build_wmma_f16_matmul_module(
             gmod.kernel(
                 _KERNEL_NAME,
                 _kernel_input_types(cfg),
-                lds_size=_fixed_lds_bytes(cfg),
+                lds_size=0,
                 workgroup_size=[cfg.threads_per_workgroup, 1, 1],
                 attrs=_kernel_attrs(cfg, target_waves),
             ) as fb,
@@ -11275,21 +11551,9 @@ def build_gfx950_f16_streamk_matmul_module(
                 f"Stream-K {name} buffer needs {byte_count} bytes; "
                 f"32-bit buffer range holds at most {_MAX_BUFFER_BYTES}"
             )
-    lds_bytes = (
-        (cfg.lds_bytes + 4 + _STREAMK_MAILBOX_BYTES - 1)
-        // _STREAMK_MAILBOX_BYTES
-        * _STREAMK_MAILBOX_BYTES
-    )
-    fixed_lds = lds_bytes
-    dynamic_lds = lds_bytes >= _STATIC_LDS_LIMIT
-    if dynamic_lds:
-        fixed_lds = 0
-
     bld = dsl.ModuleBuilder()
     with bld:
         attrs = _kernel_attrs(cfg, target_waves=1)
-        if dynamic_lds:
-            attrs[_DYNAMIC_LDS_ATTR] = dsl.i64_attr(lds_bytes)
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gpu_module,
             gpu_module.kernel(
@@ -11302,7 +11566,7 @@ def build_gfx950_f16_streamk_matmul_module(
                     dsl.ptr_type(dsl.i32()),
                     dsl.i32(),
                 ],
-                lds_size=fixed_lds,
+                lds_size=0,
                 workgroup_size=[cfg.threads_per_workgroup, 1, 1],
                 attrs=attrs,
             ) as kernel,

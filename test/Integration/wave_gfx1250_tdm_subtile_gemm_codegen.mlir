@@ -17,9 +17,11 @@
 // RUN:   | FileCheck %s --check-prefix=DIS
 
 // IR-LABEL: func.func @gfx1250_tdm_f16_gemm(
-// IR-SAME: wave.lds_size = 98304
+// IR-SAME: wave.lds_size = 0
 // IR-SAME: wave.workgroup_size = array<i32: 128, 1, 1>
+// IR-COUNT-3: wave.alloc()
 // IR: wave.read_first
+// IR: wave.lds_address
 // IR: waveamd.tdm_prefetch regular
 // IR: waveamd.tdm_prefetch regular
 // IR: [[A_LOADED:%.*]] = waveamd.tdm_load

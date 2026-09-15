@@ -80,7 +80,8 @@
 // ASMBUF: buffer_store_dwordx4
 
 // PROFILE256-LABEL: func.func @wmma_f16_matmul_tiled
-// PROFILE256-SAME: wave.dynamic_lds_size = 65536
+// PROFILE256-SAME: wave.lds_size = 0
+// PROFILE256-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 32768 : i64}
 // PROFILE256: waveamd.make_buffer
 // PROFILE256: waveamd.dma_load_lds
 // PROFILE256: waveamd.mma "mfma.f32.16x16x32.f16"
@@ -95,21 +96,23 @@
 // F16-PERF-ASM: ds_read_b128
 
 // PROFILEMXFP4-4W-LABEL: func.func @wmma_f16_matmul_tiled
-// PROFILEMXFP4-4W-SAME: wave.dynamic_lds_size = 81920
+// PROFILEMXFP4-4W-SAME: wave.lds_size = 0
 // PROFILEMXFP4-4W-SAME: waveamdmachine.target_waves = 1
+// PROFILEMXFP4-4W-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 32768 : i64}
+// PROFILEMXFP4-4W-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 8192 : i64}
 // PROFILEMXFP4-4W: waveamd.make_buffer
 // PROFILEMXFP4-4W: waveamd.dma_load_lds
 // PROFILEMXFP4-4W: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 
 // MXFP4-4W-SCALE-ASM-LABEL: wmma_f16_matmul_tiled:
 // MXFP4-4W-SCALE-ASM: [[MXFP4_4W_LOOP:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
+// MXFP4-4W-SCALE-ASM: buffer_load_dwordx4 {{.*}} lds
+// MXFP4-4W-SCALE-ASM: ds_read_b128
+// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 [[MXFP4_4W_LOOP]]
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:2560
 // MXFP4-4W-SCALE-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
 // MXFP4-4W-SCALE-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
-// MXFP4-4W-SCALE-ASM: buffer_load_dwordx4 {{.*}} lds
-// MXFP4-4W-SCALE-ASM: ds_read_b128
-// MXFP4-4W-SCALE-ASM: s_cbranch_scc1 [[MXFP4_4W_LOOP]]
 
 // PROFILEMXFP4-DMA-OVERLAP-LABEL: func.func @wmma_f16_matmul_tiled
 // PROFILEMXFP4-DMA-OVERLAP-SAME: wave.workgroup_size = array<i32: 512, 1, 1>
@@ -148,15 +151,14 @@
 // MXFP4-PERF-ASM: [[MXFP4_LOOP:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // MXFP4-PERF-ASM: s_barrier
 // MXFP4-PERF-ASM: ds_read_b64_tr_b8
-// MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:4096
-// MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:6656
 // MXFP4-PERF-ASM: ds_add_rtn_u32
 // MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 // MXFP4-PERF-ASM: [[MXFP4_WAIT:.Lwmma_f16_matmul_tiled.loop_head_[0-9]+]]:
 // MXFP4-PERF-ASM: ds_read_b32
 // MXFP4-PERF-ASM: s_cbranch_scc1 [[MXFP4_WAIT]]
 // MXFP4-PERF-ASM: s_barrier
-// MXFP4-PERF-ASM: ds_read_b64_tr_b8
+// MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:4096
+// MXFP4-PERF-ASM: ds_read_b64_tr_b8 {{.*}} offset:6144
 // MXFP4-PERF-ASM: v_mfma_scale_f32_16x16x128_f8f6f4
 
 // ASMPIPE-LABEL: wmma_f16_matmul_tiled:
@@ -168,7 +170,7 @@
 // ASMBF16: v_mfma_f32_16x16x32_bf16
 
 // ASMDYN-LABEL: wmma_f16_matmul_tiled:
-// ASMDYN: .amdhsa_group_segment_fixed_size 0
+// ASMDYN: .amdhsa_group_segment_fixed_size 65536
 
 // ASMMXFP4: .amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 // ASMMXFP4-LABEL: wmma_f16_matmul_tiled:
@@ -201,9 +203,9 @@
 // ASMMXFP4-DMA: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
-// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
-// ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
+// ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
+// ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
 // ASMMXFP4-DMA: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
 // ASMMXFP4-DMA: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA: .amdhsa_group_segment_fixed_size 6144
@@ -211,9 +213,9 @@
 // ASMMXFP4-DMA-K2-LABEL: wmma_f16_matmul_tiled:
 // ASMMXFP4-DMA-K2-COUNT-8: buffer_load_dwordx4 {{.*}} lds
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4096
+// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:6144
 // ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:4608
-// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5120
-// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:5632
+// ASMMXFP4-DMA-K2: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:6656
 // ASMMXFP4-DMA-K2: s_waitcnt lgkmcnt(2)
 // ASMMXFP4-DMA-K2-NEXT: v_mfma_scale_f32_16x16x128_f8f6f4
 // ASMMXFP4-DMA-K2: s_waitcnt lgkmcnt(0)

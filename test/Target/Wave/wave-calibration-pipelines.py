@@ -24,7 +24,7 @@
 # CHECK: matmul_mxfp4_4wave_profile: ok
 # CHECK: matmul_mxfp4_aiter_profiles: ok
 # CHECK: matmul_runtime_count_validation: ok
-# CHECK: matmul_dynamic_lds_forwarding: ok
+# CHECK: matmul_zero_dynamic_lds_forwarding: ok
 # CHECK: matmul_f16_dma_buffer_count: ok
 # CHECK: matmul_dma_sim_trip_count: ok
 # CHECK: matmul_v9_perf_golden_profile: ok
@@ -936,7 +936,7 @@ def check_streamk_profile_metadata(matmul, args, label: str) -> None:
     require(
         label,
         (args.output_layout, matmul.compute_dynamic_lds_bytes(args))
-        == ("column-major", 133152),
+        == ("column-major", 0),
         "bad output layout or LDS size",
     )
     require(
@@ -1294,8 +1294,8 @@ def check_matmul_mxfp4_profile_kernel_only_target_waves(matmul) -> None:
     )
     require(
         "matmul_mxfp4_profile_kernel_only_target_waves",
-        matmul.compute_dynamic_lds_bytes(args) == 81920,
-        "bad MXFP4 DMA LDS byte accounting",
+        matmul.compute_dynamic_lds_bytes(args) == 0,
+        "generated MXFP4 kernel must use fixed LDS",
     )
     example_cmd = matmul.build_example_args(args, "gfx950")
     require(
@@ -1371,8 +1371,8 @@ def check_matmul_f16_8wave_profile(matmul) -> None:
     require(
         "matmul_f16_8wave_profile",
         matmul.dma_buffer_count(args) == 2
-        and matmul.compute_dynamic_lds_bytes(args) == 131072,
-        "bad phased DMA LDS byte accounting",
+        and matmul.compute_dynamic_lds_bytes(args) == 0,
+        "generated phased DMA kernel must use fixed LDS",
     )
     cmd = matmul.build_matmul_example_args(args, "gfx950")
     forbidden = (
@@ -1423,8 +1423,8 @@ def check_matmul_f16_spatial_profile(matmul) -> None:
         "matmul_f16_spatial_profile",
         args.output_layout == "column-major"
         and matmul.dma_buffer_count(args) == 2
-        and matmul.compute_dynamic_lds_bytes(args) == 131072,
-        "bad spatial output layout or LDS accounting",
+        and matmul.compute_dynamic_lds_bytes(args) == 0,
+        "generated spatial kernel must use fixed LDS",
     )
     command = matmul.build_matmul_example_args(args, "gfx950")
     require(
@@ -1571,13 +1571,13 @@ def check_matmul_mxfp4_aiter_profiles(matmul, matmul_example) -> None:
             (1, 4, 8, 4, 4, 8, 4),
             24576,
             90112,
-            90112,
+            0,
         ),
         "gfx950-mxfp4-aiter-256x256": (
             (1, 4, 16, 4, 4, 1, 4),
             16384,
             147456,
-            147456,
+            0,
         ),
     }
     for profile, (shape, scale_lds, total_lds, dynamic_lds) in expected.items():
@@ -1704,7 +1704,7 @@ def check_matmul_f16_4wave_profile(matmul) -> None:
     print("matmul_f16_4wave_profile: ok")
 
 
-def check_matmul_dynamic_lds_forwarding(matmul) -> None:
+def check_matmul_zero_dynamic_lds_forwarding(matmul) -> None:
     args = argparse.Namespace(
         m=64,
         n=64,
@@ -1728,14 +1728,14 @@ def check_matmul_dynamic_lds_forwarding(matmul) -> None:
         no_check=True,
     )
     require(
-        "matmul_dynamic_lds_forwarding",
+        "matmul_zero_dynamic_lds_forwarding",
         matmul.compute_lds_bytes(args) == 65536,
         "bad dynamic LDS fixture",
     )
     require(
-        "matmul_dynamic_lds_forwarding",
-        matmul.compute_dynamic_lds_bytes(args) == 65536,
-        "dynamic LDS threshold not applied",
+        "matmul_zero_dynamic_lds_forwarding",
+        matmul.compute_dynamic_lds_bytes(args) == 0,
+        "generated kernel must use fixed LDS",
     )
     captured: list[list[str]] = []
     old_run = matmul.run
@@ -1749,19 +1749,19 @@ def check_matmul_dynamic_lds_forwarding(matmul) -> None:
         matmul.run_hw(Path("runner"), Path("kernel.hsaco"), args, "/tmp")
     finally:
         matmul.run = old_run
-    require("matmul_dynamic_lds_forwarding", bool(captured), "runner not called")
+    require("matmul_zero_dynamic_lds_forwarding", bool(captured), "runner not called")
     cmd = captured[0]
     require(
-        "matmul_dynamic_lds_forwarding",
+        "matmul_zero_dynamic_lds_forwarding",
         "--dynamic-lds" in cmd,
         "runner command missing --dynamic-lds",
     )
     require(
-        "matmul_dynamic_lds_forwarding",
-        cmd[cmd.index("--dynamic-lds") + 1] == "65536",
-        "runner should receive dynamic LDS bytes",
+        "matmul_zero_dynamic_lds_forwarding",
+        cmd[cmd.index("--dynamic-lds") + 1] == "0",
+        "runner should receive zero dynamic LDS bytes",
     )
-    print("matmul_dynamic_lds_forwarding: ok")
+    print("matmul_zero_dynamic_lds_forwarding: ok")
 
 
 def check_matmul_f16_dma_buffer_count(matmul) -> None:
@@ -1794,8 +1794,8 @@ def check_matmul_f16_dma_buffer_count(matmul) -> None:
     )
     require(
         "matmul_f16_dma_buffer_count",
-        matmul.compute_dynamic_lds_bytes(args) == 131072,
-        "bad f16 DMA LDS byte accounting",
+        matmul.compute_dynamic_lds_bytes(args) == 0,
+        "generated f16 DMA kernel must use fixed LDS",
     )
     print("matmul_f16_dma_buffer_count: ok")
 
@@ -2949,7 +2949,7 @@ def main() -> int:
     check_matmul_mxfp4_aiter_profiles(matmul, matmul_example)
     check_matmul_runtime_count_validation(matmul)
     check_matmul_f16_4wave_profile(matmul)
-    check_matmul_dynamic_lds_forwarding(matmul)
+    check_matmul_zero_dynamic_lds_forwarding(matmul)
     check_matmul_f16_dma_buffer_count(matmul)
     check_matmul_dma_sim_trip_count(matmul)
     check_matmul_v9_perf_golden_profile(matmul)

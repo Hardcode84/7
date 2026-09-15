@@ -51,6 +51,30 @@ with w.module() as m:
         d2_done = f.tdm_load(d2, after=f.token())
         f.observe(f.tdm_load(d4, after=d2_done))
 
+    with m.function(
+        "gfx1250_allocated_tdm_descriptor",
+        [w.i64()],
+        kernel=True,
+        lds_size=256,
+        workgroup_size=[4 * wave_size, 1, 1],
+    ) as f:
+        (base,) = f.args
+        storage = f.workgroup_alloc(4096, 16, w.i32())
+        first = f.read_first(f.workitem_id(0, width=wave_size))
+        item_sym = w.sym("item")
+        wave_offset = f.index_expr(
+            w.floor(item_sym / wave_size) * 128, {item_sym: first}
+        )
+        descriptor = f.gfx1250_tdm_descriptor(
+            base,
+            [16, 32],
+            [32, 1],
+            [16, 32],
+            element_bit_width=16,
+            lds_address=f.ptr_add(storage, wave_offset),
+        )
+        f.observe(f.tdm_load(descriptor, after=f.token()))
+
     print(m.module)
 
 
@@ -71,3 +95,14 @@ with w.module() as m:
 # ASM-NEXT: s_add_co_ci_u32
 # ASM: tensor_load_to_lds
 # ASM: tensor_load_to_lds
+
+# IR-LABEL: func.func @gfx1250_allocated_tdm_descriptor
+# IR-SAME: wave.lds_size = 4352
+# IR: waveamdmachine.tdm_load
+
+# ASM-LABEL: gfx1250_allocated_tdm_descriptor:
+# ASM: s_lshr_b32 [[WAVE:s[0-9]+]], {{s[0-9]+}}, 5
+# ASM: s_lshl_b32 [[OFFSET:s[0-9]+]], [[WAVE]], 9
+# ASM: s_add_co_i32 {{s[0-9]+}}, [[OFFSET]], 0x100
+# ASM: tensor_load_to_lds
+# ASM: .amdhsa_group_segment_fixed_size 4352

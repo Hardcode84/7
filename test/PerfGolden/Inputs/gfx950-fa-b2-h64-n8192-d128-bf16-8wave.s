@@ -2730,7 +2730,7 @@ flash_attention_bf16_gfx950:
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
 	.amdhsa_kernel flash_attention_bf16_gfx950
-		.amdhsa_group_segment_fixed_size 0
+		.amdhsa_group_segment_fixed_size 136192
 		.amdhsa_private_segment_fixed_size 0
 		.amdhsa_kernarg_size 32
 		.amdhsa_user_sgpr_count 10
@@ -2790,7 +2790,7 @@ amdhsa.kernels:
         .offset:         24
         .size:           8
         .value_kind:     global_buffer
-    .group_segment_fixed_size: 0
+    .group_segment_fixed_size: 136192
     .kernarg_segment_align: 8
     .kernarg_segment_size: 32
     .max_flat_workgroup_size: 512

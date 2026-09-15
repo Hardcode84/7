@@ -690,6 +690,14 @@ def Wave_SharedMemoryBaseOp : Wave_Op<"shared_memory_base", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Wave_LDSAddressOp : Wave_Op<"lds_address", [Pure]> {
+  let summary = "materialize a shared pointer as an LDS byte address";
+  let arguments = (ins Wave_Ptr:$ptr);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$ptr attr-dict `:` qualified(type($ptr))";
+  let hasVerifier = 1;
+}
+
 def Wave_AllocOp : Wave_Op<"alloc"> {
   let summary = "allocate workgroup-local memory";
   let description = [{

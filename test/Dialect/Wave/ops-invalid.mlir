@@ -905,6 +905,14 @@ func.func @lds_base_wrong_address_space() {
 
 // -----
 
+func.func @lds_address_wrong_address_space(%p: !wave.ptr<#wave.global, i32>) {
+  // expected-error @+1 {{pointer must live in the shared address space}}
+  %address = wave.lds_address %p : !wave.ptr<#wave.global, i32>
+  return
+}
+
+// -----
+
 func.func @alloc_wrong_address_space() {
   // expected-error @+1 {{result pointer must live in the shared address space}}
   %p = wave.alloc() {align = 4 : i64, bytesize = 16 : i64} : !wave.ptr<#wave.global, i32>

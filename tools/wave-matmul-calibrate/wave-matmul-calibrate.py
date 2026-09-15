@@ -30,7 +30,6 @@ A4W4_MXFP_K16K_GOLDEN_NAME = "a4w4_mxfp_k16k"
 TLX_MXFP_GOLDEN_KERNEL_NAME = "_a4w4_kernel"
 V9_GOLDEN_INPUT_DIR = REPO_ROOT / "test/PerfGolden/Inputs"
 V9_GOLDEN_SOURCE = V9_GOLDEN_INPUT_DIR / f"{V9_GOLDEN_NAME}.mlir"
-STATIC_LDS_LIMIT = 64 * 1024
 DEFAULT_SIM_TRIP_COUNT = 32
 _INT32_MAX = (1 << 31) - 1
 _UINT32_MAX = (1 << 32) - 1
@@ -900,10 +899,7 @@ def compute_lds_bytes(args: argparse.Namespace) -> int:
 
 
 def compute_dynamic_lds_bytes(args: argparse.Namespace) -> int:
-    if is_checked_in_perf_golden(args):
-        return 0
-    lds_bytes = compute_lds_bytes(args)
-    return lds_bytes if lds_bytes >= STATIC_LDS_LIMIT else 0
+    return 0
 
 
 def run_sim_report(

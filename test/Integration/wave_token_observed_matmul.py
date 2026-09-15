@@ -98,14 +98,12 @@ def add_host(mod, kernel_name="wmma_f16_matmul_tiled"):
                 )
             threads = host.constant(w.index_type(), 1024)
             trip_count = host.constant(w.i32(), 7)
-            shared = host.constant(w.i32(), 131072)
             host.launch(
                 "kernels",
                 kernel_name,
                 (one, one, one),
                 (threads, one, one),
                 [*pointers[:3], trip_count, pointers[3]],
-                dynamic_shared_memory_size=shared,
             )
             for buffer in buffers[2:]:
                 host.call("printMemrefF16", [host.cast_unranked(buffer)])

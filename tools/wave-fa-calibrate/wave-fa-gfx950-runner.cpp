@@ -133,7 +133,7 @@ static void parsePositional(const char *arg, int &positional, Args &args) {
 
 static bool hasInvalidCounts(const Args &args) {
   return args.batch <= 0 || args.heads <= 0 || args.sequence <= 0 ||
-         args.dynamicLDS <= 0 || args.iters <= 0 || args.warmup < 0 ||
+         args.dynamicLDS < 0 || args.iters <= 0 || args.warmup < 0 ||
          args.inputScale <= 0;
 }
 

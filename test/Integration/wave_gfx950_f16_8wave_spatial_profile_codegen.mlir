@@ -15,8 +15,9 @@
 //
 // IR-LABEL: func.func @wmma_f16_matmul_tiled
 // IR-SAME: gpu.known_block_size = array<i32: 512, 1, 1>
-// IR-SAME: wave.dynamic_lds_size = 131072 : i64
+// IR-SAME: wave.lds_size = 0 : i64
 // IR-SAME: waveamdmachine.target_waves = 2 : i64
+// IR-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 65536 : i64}
 // IR: scf.if
 // IR: scf.for
 // IR: scf.if

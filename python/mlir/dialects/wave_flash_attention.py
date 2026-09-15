@@ -17,7 +17,6 @@ _KERNEL_NAME = "flash_attention_bf16_gfx950"
 _GPU_MODULE_NAME = "kernels"
 _TARGET_WAVES_ATTR = "waveamdmachine.target_waves"
 _MULTI_WAVE_SPECIALIZATION_ATTR = "waveamdmachine.enable_multi_wave_specialization"
-_DYNAMIC_LDS_ATTR = "wave.dynamic_lds_size"
 
 _WAVE_SIZE = 64
 _DEFAULT_WAVES = 8
@@ -120,10 +119,6 @@ class Gfx950FlashAttentionConfig:
     @property
     def query_groups(self) -> int:
         return _BLOCK_M // (self.waves * _MFMA_TILE)
-
-    @property
-    def dynamic_lds_bytes(self) -> int:
-        return self.data_lds_bytes
 
     @property
     def data_lds_bytes(self) -> int:
@@ -286,11 +281,8 @@ def _lds_buffers(
     bld: dsl.FunctionBuilder,
     cfg: Gfx950FlashAttentionConfig,
 ) -> tuple[_LdsBuffer, ...]:
-    k_base = bld.shared_memory_base(dsl.bf16())
-    v_base = bld.shared_memory_base(
-        dsl.bf16(),
-        offset=cfg.k_lds_stages * _K_TILE_BYTES,
-    )
+    k_base = bld.workgroup_alloc(cfg.k_lds_stages * _K_TILE_BYTES, 16, dsl.bf16())
+    v_base = bld.workgroup_alloc(cfg.v_lds_stages * _V_TILE_BYTES, 16, dsl.bf16())
     return tuple(
         _LdsBuffer(
             bld.ptr_add(
@@ -1724,7 +1716,6 @@ def build_gfx950_flash_attention_module(
         attrs: dict[str, dsl.Attribute] = {
             _TARGET_WAVES_ATTR: dsl.i64_attr(cfg.waves // 4),
             _MULTI_WAVE_SPECIALIZATION_ATTR: UnitAttr.get(),
-            _DYNAMIC_LDS_ATTR: dsl.i64_attr(cfg.dynamic_lds_bytes),
         }
         with (
             bld.gpu_module(_GPU_MODULE_NAME) as gpu_module,

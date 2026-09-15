@@ -13,7 +13,10 @@
 // RUN:   -filetype=obj %t.s -o /dev/null
 
 // IR-LABEL: func.func @gfx1250_tdm_f16_gemm(
+// IR-SAME: wave.lds_size = 0
 // IR-SAME: waveamdmachine.enable_split_barriers
+// IR-COUNT-3: wave.alloc()
+// IR: wave.lds_address
 
 // CHECK-LABEL: gfx1250_tdm_f16_gemm:
 // CHECK: tensor_load_to_lds

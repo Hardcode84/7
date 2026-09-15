@@ -3875,6 +3875,13 @@ LogicalResult SharedMemoryBaseOp::verify() {
   return success();
 }
 
+LogicalResult LDSAddressOp::verify() {
+  PtrType ptrType = cast<PtrType>(getPtr().getType());
+  if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))
+    return emitOpError("pointer must live in the shared address space");
+  return success();
+}
+
 LogicalResult AllocOp::verify() {
   auto ptrType = cast<PtrType>(getResult().getType());
   if (!isa<SharedAddressSpaceAttr>(ptrType.getAddressSpace()))

@@ -83,20 +83,20 @@ class _KernelConfig:
         return self.wave_tile_m * self.wave_tile_n * 4
 
     @property
-    def a_lds_offset(self) -> int:
-        return 0
-
-    @property
-    def b_lds_offset(self) -> int:
+    def a_lds_bytes(self) -> int:
         return self.wave_count * self.a_wave_bytes
 
     @property
-    def c_lds_offset(self) -> int:
-        return self.b_lds_offset + self.wave_count * self.b_wave_bytes
+    def b_lds_bytes(self) -> int:
+        return self.wave_count * self.b_wave_bytes
+
+    @property
+    def c_lds_bytes(self) -> int:
+        return self.wave_count * self.c_wave_bytes
 
     @property
     def lds_bytes(self) -> int:
-        return self.c_lds_offset + self.wave_count * self.c_wave_bytes
+        return self.a_lds_bytes + self.b_lds_bytes + self.c_lds_bytes
 
 
 def _validate_shape(config: _KernelConfig, M: int, N: int, K: int) -> None:
@@ -112,8 +112,24 @@ def _validate_shape(config: _KernelConfig, M: int, N: int, K: int) -> None:
         raise ValueError(f"K must be a positive multiple of {config.tile_k}; got {K}")
 
 
+def _allocate_lds(
+    builder: FunctionBuilder, config: _KernelConfig
+) -> tuple[Value, Value, Value]:
+    from mlir.dialects import wave_dsl as w
+
+    return (
+        builder.workgroup_alloc(config.a_lds_bytes, 16, w.i32()),
+        builder.workgroup_alloc(config.b_lds_bytes, 16, w.i32()),
+        builder.workgroup_alloc(config.c_lds_bytes, 16, w.i32()),
+    )
+
+
 def _emit_input_lds_pointers(
-    builder: FunctionBuilder, config: _KernelConfig, lane: Value
+    builder: FunctionBuilder,
+    config: _KernelConfig,
+    lane: Value,
+    a_base: Value,
+    b_base: Value,
 ) -> tuple[Value, Value, Expr]:
     from mlir.dialects import wave_dsl as w
 
@@ -123,14 +139,8 @@ def _emit_input_lds_pointers(
         + config.operand_dwords * w.floor(lane_sym / config.tile_m),
         {lane_sym: lane},
     )
-    a_lds = builder.ptr_add(
-        builder.shared_memory_base(w.i32(), offset=config.a_lds_offset),
-        input_lds_index,
-    )
-    b_lds = builder.ptr_add(
-        builder.shared_memory_base(w.i32(), offset=config.b_lds_offset),
-        input_lds_index,
-    )
+    a_lds = builder.ptr_add(a_base, input_lds_index)
+    b_lds = builder.ptr_add(b_base, input_lds_index)
     return a_lds, b_lds, lane_sym
 
 
@@ -201,7 +211,8 @@ def _emit_subtile_input_lds_pointers(
     builder: FunctionBuilder,
     config: _KernelConfig,
     lane: Value,
-    wave_id: Value,
+    a_base: Value,
+    b_base: Value,
 ) -> tuple[list[Value], list[Value], Expr]:
     from mlir.dialects import wave_dsl as w
 
@@ -210,22 +221,6 @@ def _emit_subtile_input_lds_pointers(
         lane_sym, config.tile_m
     ) + config.operand_dwords * w.floor(lane_sym / config.tile_m)
     fragment_dwords = config.tile_m * config.tile_k * 2 // 4
-    a_wave_offset = builder.muli(
-        wave_id,
-        builder.constant(w.i32(), config.a_wave_bytes // 4),
-    )
-    b_wave_offset = builder.muli(
-        wave_id,
-        builder.constant(w.i32(), config.b_wave_bytes // 4),
-    )
-    a_base = builder.ptr_add(
-        builder.shared_memory_base(w.i32(), offset=config.a_lds_offset),
-        a_wave_offset,
-    )
-    b_base = builder.ptr_add(
-        builder.shared_memory_base(w.i32(), offset=config.b_lds_offset),
-        b_wave_offset,
-    )
     a_pointers = [
         builder.ptr_add(
             a_base,
@@ -403,22 +398,14 @@ def _emit_subtile_output(
     c_base: Value,
     c_row_wide: Value,
     c_column_wide: Value,
-    wave_id: Value,
     lane: Value,
     lane_sym: Expr,
     accumulators: list[Value],
     reusable: Value,
+    c_lds_base: Value,
 ) -> None:
     from mlir.dialects import wave_dsl as w
 
-    c_wave_offset = builder.muli(
-        wave_id,
-        builder.constant(w.i32(), config.c_wave_bytes // 4),
-    )
-    c_lds_base = builder.ptr_add(
-        builder.shared_memory_base(w.i32(), offset=config.c_lds_offset),
-        c_wave_offset,
-    )
     output_stores = []
     for m_subtile in range(config.subtiles_m):
         for n_subtile in range(config.subtiles_n):
@@ -452,13 +439,6 @@ def _emit_subtile_output(
         ),
         builder.constant(w.i64(), 4),
     )
-    c_lds_address = builder.addi(
-        builder.constant(w.i32(), config.c_lds_offset),
-        builder.muli(
-            wave_id,
-            builder.constant(w.i32(), config.c_wave_bytes),
-        ),
-    )
     c_descriptor = builder.gfx1250_tdm_descriptor(
         c_base,
         [config.wave_tile_m, config.wave_tile_n],
@@ -466,7 +446,7 @@ def _emit_subtile_output(
         [config.wave_tile_m, config.wave_tile_n],
         element_bit_width=32,
         global_byte_offset=c_offset,
-        lds_address=c_lds_address,
+        lds_address=c_lds_base,
         is_store=True,
     )
     stored = builder.tdm_store(c_descriptor, after=output_ready)
@@ -479,6 +459,7 @@ def _emit_subtile_kernel(
     from mlir.dialects import wave_dsl as w
 
     a_base, b_base, c_base = builder.args
+    a_lds_alloc, b_lds_alloc, c_lds_alloc = _allocate_lds(builder, config)
     wg_m = builder.assume_range(
         builder.workgroup_id(0),
         0,
@@ -515,22 +496,27 @@ def _emit_subtile_kernel(
             builder.constant(w.i64(), config.wave_tile_n),
         ),
     )
-    a_lds_address = builder.muli(
+    a_wave_offset = builder.muli(
         wave_id,
-        builder.constant(w.i32(), config.a_wave_bytes),
+        builder.constant(w.i32(), config.a_wave_bytes // 4),
     )
-    b_lds_address = builder.addi(
-        builder.constant(w.i32(), config.b_lds_offset),
-        builder.muli(
-            wave_id,
-            builder.constant(w.i32(), config.b_wave_bytes),
-        ),
+    b_wave_offset = builder.muli(
+        wave_id,
+        builder.constant(w.i32(), config.b_wave_bytes // 4),
     )
+    c_wave_offset = builder.muli(
+        wave_id,
+        builder.constant(w.i32(), config.c_wave_bytes // 4),
+    )
+    a_lds_base = builder.ptr_add(a_lds_alloc, a_wave_offset)
+    b_lds_base = builder.ptr_add(b_lds_alloc, b_wave_offset)
+    c_lds_base = builder.ptr_add(c_lds_alloc, c_wave_offset)
     a_lds, b_lds, lane_sym = _emit_subtile_input_lds_pointers(
         builder,
         config,
         lane,
-        wave_id,
+        a_lds_base,
+        b_lds_base,
     )
     prefetch_byte_offset = builder.muli(
         lane,
@@ -547,8 +533,8 @@ def _emit_subtile_kernel(
         b_base,
         a_row_wide,
         b_row_wide,
-        a_lds_address,
-        b_lds_address,
+        a_lds_base,
+        b_lds_base,
         a_lds,
         b_lds,
         prefetch_byte_offset,
@@ -560,11 +546,11 @@ def _emit_subtile_kernel(
         c_base,
         a_row_wide,
         b_row_wide,
-        wave_id,
         lane,
         lane_sym,
         accumulators,
         reusable,
+        c_lds_base,
     )
 
 
@@ -576,6 +562,8 @@ def _emit_k_loop(
     b_base: Value,
     wg_m_wide: Value,
     wg_n_wide: Value,
+    a_lds_base: Value,
+    b_lds_base: Value,
     a_lds: Value,
     b_lds: Value,
 ) -> tuple[Value, Value]:
@@ -621,7 +609,7 @@ def _emit_k_loop(
             [K, 1],
             [config.tile_m, config.tile_k],
             element_bit_width=16,
-            lds_address=config.a_lds_offset,
+            lds_address=a_lds_base,
         )
         b_descriptor = builder.gfx1250_tdm_descriptor(
             b_address,
@@ -629,7 +617,7 @@ def _emit_k_loop(
             [K, 1],
             [config.tile_n, config.tile_k],
             element_bit_width=16,
-            lds_address=config.b_lds_offset,
+            lds_address=b_lds_base,
         )
         a_loaded = builder.tdm_load(a_descriptor, after=reusable)
         b_loaded = builder.tdm_load(b_descriptor, after=reusable)
@@ -658,6 +646,7 @@ def _emit_output(
     lane_sym: Expr,
     accumulator: Value,
     reusable: Value,
+    c_lds_base: Value,
 ) -> None:
     from mlir.dialects import wave_dsl as w
 
@@ -672,10 +661,7 @@ def _emit_output(
             + w.mod(lane_sym, config.tile_n),
             {lane_sym: lane},
         )
-        output_ptr = builder.ptr_add(
-            builder.shared_memory_base(w.i32(), offset=config.c_lds_offset),
-            output_index,
-        )
+        output_ptr = builder.ptr_add(c_lds_base, output_index)
         value = builder.extract(
             unpacked,
             register,
@@ -697,7 +683,7 @@ def _emit_output(
         [N, 1],
         [config.tile_m, config.tile_n],
         element_bit_width=32,
-        lds_address=config.c_lds_offset,
+        lds_address=c_lds_base,
         is_store=True,
     )
     stored = builder.tdm_store(c_descriptor, after=output_ready)
@@ -710,12 +696,15 @@ def _emit_kernel(
     from mlir.dialects import wave_dsl as w
 
     a_base, b_base, c_base = builder.args
+    a_lds_base, b_lds_base, c_lds_base = _allocate_lds(builder, config)
     wg_m = builder.assume_range(builder.workgroup_id(0), 0, M // config.tile_m - 1)
     wg_n = builder.assume_range(builder.workgroup_id(1), 0, N // config.tile_n - 1)
     lane = builder.workitem_id(0, width=config.wave_size)
     wg_m_wide = builder.intconvert(wg_m, w.i64(), extension=w.CastExtension.Zero)
     wg_n_wide = builder.intconvert(wg_n, w.i64(), extension=w.CastExtension.Zero)
-    a_lds, b_lds, lane_sym = _emit_input_lds_pointers(builder, config, lane)
+    a_lds, b_lds, lane_sym = _emit_input_lds_pointers(
+        builder, config, lane, a_lds_base, b_lds_base
+    )
     accumulator, reusable = _emit_k_loop(
         builder,
         config,
@@ -724,6 +713,8 @@ def _emit_kernel(
         b_base,
         wg_m_wide,
         wg_n_wide,
+        a_lds_base,
+        b_lds_base,
         a_lds,
         b_lds,
     )
@@ -738,6 +729,7 @@ def _emit_kernel(
         lane_sym,
         accumulator,
         reusable,
+        c_lds_base,
     )
 
 
@@ -868,7 +860,7 @@ def build_gfx1250_tdm_f16_gemm_module(
             gpu_module.kernel(
                 _KERNEL_NAME,
                 [w.i64(), w.i64(), w.i64()],
-                lds_size=config.lds_bytes,
+                lds_size=0,
                 workgroup_size=[config.workgroup_threads, 1, 1],
                 attrs={_ENABLE_SPLIT_BARRIERS_ATTR: UnitAttr.get()},
             ) as kernel,

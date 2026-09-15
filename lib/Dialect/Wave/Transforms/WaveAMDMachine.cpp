@@ -3139,6 +3139,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<LoadOp>([&](auto o) { return selectLoad(*this, o); })
       .Case<SharedMemoryBaseOp>(
           [&](auto o) { return selectSharedMemoryBase(o); })
+      .Case<LDSAddressOp>([&](auto o) { return selectLDSAddress(o); })
       .Case<BarrierOp>([&](auto o) { return selectBarrier(o); })
       .Case<waveamd::FragmentFillOp>(
           [&](auto o) { return selectFragmentFill(o); })
@@ -8155,6 +8156,23 @@ lookupLdsPointer(WaveAMDMachineSelector &S, Value ptr, Operation *op) {
   if (baseIt == S.pointerBases.end() || offsetIt == S.pointerIndexOffsets.end())
     return op->emitError("WaveAMDMachine backend expects selected LDS pointer");
   return std::make_pair(baseIt->second, offsetIt->second);
+}
+
+LogicalResult WaveAMDMachineSelector::selectLDSAddress(LDSAddressOp op) {
+  FailureOr<std::pair<Value, PointerOffset>> ptr =
+      lookupLdsPointer(*this, op.getPtr(), op);
+  if (failed(ptr))
+    return failure();
+  if (classifyPointerOffset(*this, ptr->second) == TermKind::Lane)
+    return op.emitError("LDS descriptor address must be wave-uniform");
+  FailureOr<Value> offset =
+      materializePointerOffsetValue(*this, op, ptr->second);
+  if (failed(offset))
+    return failure();
+  values[op.getResult()] = ensureSGPR1(
+      op.getLoc(), addByteOffsets(op.getLoc(), ptr->first, *offset));
+  eraseIfTopLevel(op);
+  return success();
 }
 
 enum class DsReadTrKind { B4, B6, B8, B16 };

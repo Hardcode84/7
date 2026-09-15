@@ -462,6 +462,8 @@ def _materialize_tdm_lds_address(
     if dynamic_address is None:
         return builder.constant(i32(), static_address)
     address_type = dynamic_address.type
+    if PtrType.isinstance(address_type):
+        return builder.lds_address(dynamic_address)
     if isinstance(address_type, IndexType):
         return builder.cast(dynamic_address, i32(), CastKind.IntConvert)
     if isinstance(address_type, IntegerType) and address_type.width == 32:
@@ -1981,6 +1983,10 @@ class FunctionBuilder:
         """Emit ``wave.alloc``."""
         ty = ptr_type(element_type or i32(), shared_address_space())
         return wave.AllocOp(ty, bytesize=bytesize, align=align).result
+
+    def lds_address(self, ptr: Value) -> Value:
+        """Materialize a shared pointer as an LDS byte address."""
+        return wave.LDSAddressOp(i32(), ptr).result
 
     def release_alloc(self, allocation: Value, *, after: Value) -> Value:
         """End a ``wave.alloc`` lifetime after a memory dependency."""

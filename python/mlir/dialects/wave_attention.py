@@ -1002,11 +1002,9 @@ def _emit_single_tile_mma_kernel(
     out_arg: dsl.Value,
     lane: dsl.Value,
 ) -> None:
-    score_ptr = bld.shared_memory_base(dsl.f32())
-    prob_ptr = bld.shared_memory_base(dsl.f16(), offset=cfg.score_lds_bytes)
-    value_ptr = bld.shared_memory_base(
-        dsl.f16(), offset=cfg.score_lds_bytes + cfg.prob_lds_bytes
-    )
+    score_ptr = bld.workgroup_alloc(cfg.score_lds_bytes, 16, dsl.f32())
+    prob_ptr = bld.workgroup_alloc(cfg.prob_lds_bytes, 16, dsl.f16())
+    value_ptr = bld.workgroup_alloc(cfg.value_lds_bytes, 16, dsl.f16())
     scratch_dep = bld.token()
 
     qk = _emit_qk_tile(bld, cfg, types, q_arg, k_arg, lane, 0)
@@ -1069,15 +1067,10 @@ def _emit_first_online_accs(
 def _alloc_online_scratch(
     bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig
 ) -> _OnlineScratch:
-    score_ptr = bld.shared_memory_base(dsl.f32())
-    prob_ptr = bld.shared_memory_base(dsl.f16(), offset=cfg.score_lds_bytes)
-    value_ptr = bld.shared_memory_base(
-        dsl.f16(), offset=cfg.score_lds_bytes + cfg.prob_lds_bytes
-    )
-    denom_ptr = bld.shared_memory_base(
-        dsl.f32(),
-        offset=cfg.score_lds_bytes + cfg.prob_lds_bytes + cfg.value_lds_bytes,
-    )
+    score_ptr = bld.workgroup_alloc(cfg.score_lds_bytes, 16, dsl.f32())
+    prob_ptr = bld.workgroup_alloc(cfg.prob_lds_bytes, 16, dsl.f16())
+    value_ptr = bld.workgroup_alloc(cfg.value_lds_bytes, 16, dsl.f16())
+    denom_ptr = bld.workgroup_alloc(cfg.denom_lds_bytes, 16, dsl.f32())
     return _OnlineScratch(score_ptr, prob_ptr, value_ptr, denom_ptr)
 
 
@@ -1451,7 +1444,7 @@ def build_flash_attention_f32_module(
             gmod.kernel(
                 _KERNEL_NAME,
                 kernel_inputs,
-                lds_size=cfg.lds_bytes,
+                lds_size=0,
                 workgroup_size=[cfg.threads_per_workgroup, 1, 1],
                 attrs=_target_waves_attrs(target_waves),
             ) as fb,

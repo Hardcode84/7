@@ -41,8 +41,10 @@
 //
 // IR-4W: func.func @flash_attention_bf16_gfx950
 // IR-4W-SAME: gpu.known_block_size = array<i32: 256, 1, 1>
-// IR-4W-SAME: wave.dynamic_lds_size = 68096 : i64
+// IR-4W-SAME: wave.lds_size = 0 : i64
 // IR-4W-SAME: waveamdmachine.target_waves = 1 : i64
+// IR-4W: wave.alloc() {align = 16 : i64, bytesize = 33280 : i64}
+// IR-4W: wave.alloc() {align = 16 : i64, bytesize = 34816 : i64}
 // IR-4W: [[K_READY:%.*]] = wave.join
 // IR-4W: [[LDS_READY:%.*]] = wave.barrier [[K_READY]], %{{.*}}, %{{.*}}
 // IR-4W: [[K_VALUE:%.*]], [[K_READ:%.*]] = wave.load {{.*}} after [[LDS_READY]]
@@ -50,8 +52,10 @@
 //
 // IR-8W: func.func @flash_attention_bf16_gfx950
 // IR-8W-SAME: gpu.known_block_size = array<i32: 512, 1, 1>
-// IR-8W-SAME: wave.dynamic_lds_size = 136192 : i64
+// IR-8W-SAME: wave.lds_size = 0 : i64
 // IR-8W-SAME: waveamdmachine.target_waves = 2 : i64
+// IR-8W: wave.alloc() {align = 16 : i64, bytesize = 66560 : i64}
+// IR-8W: wave.alloc() {align = 16 : i64, bytesize = 69632 : i64}
 // IR-8W: [[K_READY_8:%.*]] = wave.join
 // IR-8W: [[LDS_READY_8:%.*]] = wave.barrier [[K_READY_8]], %{{.*}}, %{{.*}}
 // IR-8W: [[K_VALUE_8:%.*]], [[K_READ_8:%.*]] = wave.load {{.*}} after [[LDS_READY_8]]

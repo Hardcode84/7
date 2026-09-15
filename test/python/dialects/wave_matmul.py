@@ -336,7 +336,13 @@ assert all("#wave.shared" in op and " after " in op for op in aiter_scale_loads)
 assert any(
     op.name == "wave.barrier" and len(op.operands) == 3 for op in aiter_packed_scale_ops
 )
-assert "wave.lds_size = 24576 : i64" in str(aiter_packed_scale_module)
+assert "wave.lds_size = 0 : i64" in str(aiter_packed_scale_module)
+assert (
+    str(aiter_packed_scale_module).count(
+        "wave.alloc() {align = 16 : i64, bytesize = 8192 : i64}"
+    )
+    == 3
+)
 aiter_output_stores = [
     op
     for op in aiter_packed_scale_ops
@@ -387,10 +393,11 @@ aiter_partial_scale_module = build_aiter_mxfp4(
 )
 aiter_partial_scale_text = str(aiter_partial_scale_module)
 assert "16*Mod(Mod(__wave_dsl_aiter_stage_wi, 64), 48)" in aiter_partial_scale_text
-assert '<"512*floor(1/64*__wave_dsl_aiter_stage_wi_first)">' in aiter_partial_scale_text
 assert (
-    '<"256*(1 + 2*floor(1/64*__wave_dsl_aiter_stage_wi_first))">'
-    in aiter_partial_scale_text
+    aiter_partial_scale_text.count(
+        '<"256*floor(1/64*__wave_dsl_aiter_stage_wi_first)">'
+    )
+    == 6
 )
 aiter_split_owner_text = str(
     build_aiter_mxfp4(
@@ -989,7 +996,7 @@ module_mxfp4 = build_wmma_f16_matmul_module(
 print("mxfp4-module")
 print(module_mxfp4)
 
-module_dynamic_lds = build_wmma_f16_matmul_module(
+module_allocated_lds = build_wmma_f16_matmul_module(
     M=64,
     N=64,
     K=64,
@@ -998,8 +1005,8 @@ module_dynamic_lds = build_wmma_f16_matmul_module(
     wave_k_tiles=2,
     matrix_intrinsic="mfma_gfx950",
 )
-print("dynamic-lds-module")
-print(module_dynamic_lds)
+print("allocated-lds-module")
+print(module_allocated_lds)
 
 static_cfg = wm._make_matmul_config(
     M=16,
@@ -1029,7 +1036,7 @@ with static_bld:
         "static_matmul_kernel",
         wm._kernel_input_types(static_cfg, include_trip_count=False),
         kernel=True,
-        lds_size=static_cfg.lds_bytes,
+        lds_size=0,
         workgroup_size=[static_cfg.threads_per_workgroup, 1, 1],
     ) as fb:
         wm._emit_kernel(fb, static_cfg)
@@ -1068,8 +1075,9 @@ print(static_bld.module)
 # CHECK: f16-ref-rounding -132.5625 -132.5
 # CHECK: mxfp4-random-module ok
 # CHECK-LABEL: func.func @wmma_f16_matmul_tiled
-# CHECK-SAME: wave.lds_size = 4096
+# CHECK-SAME: wave.lds_size = 0
 # CHECK-SAME: waveamdmachine.enable_multi_wave_specialization
+# CHECK-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 2048 : i64}
 # CHECK-NOT: wavemeta.
 # CHECK: %[[TRIP:.*]] = wave.assume %arg3 as "x" {{\[.*\]}} : i32
 # CHECK: scf.for %{{.*}} = %{{.*}} to %[[TRIP]] step
@@ -1087,7 +1095,7 @@ print(static_bld.module)
 # CHECK: func.func private @wave_memref_to_ptr_global_bf16
 # CHECK: func.func @wmma_f16_matmul_tiled(%{{.*}}!wave.ptr<#wave.global, bf16>
 # CHECK: waveamd.mma "mfma.f32.16x16x32.bf16"
-# CHECK: mxfp4-module
+# CHECK: {{^mxfp4-module$}}
 # CHECK: func.func private @wave_memref_to_ptr_global_i8
 # CHECK: func.func @wmma_f16_matmul_tiled
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
@@ -1096,14 +1104,13 @@ print(static_bld.module)
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
 # CHECK-SAME: i32
+# CHECK-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 4096 : i64}
+# CHECK-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 1024 : i64}
 # CHECK: %{{.*}}, %{{.*}} = wave.load
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
 # CHECK: %{{.*}}, %{{.*}} = wave.load
 # CHECK-SAME: !wave.ptr<#wave.global, i8>
-# CHECK: wave.shared_memory_base
-# CHECK-SAME: !wave.ptr<#wave.shared, i8>
-# CHECK: wave.load
-# CHECK-SAME: -> (!wave.simd<vector<16xi8>, 64>, !wave.mem.token)
+# CHECK: wave.load {{.*}}!wave.ptr<#wave.global, i8>{{.*}}!wave.simd<vector<16xi8>, 64>
 # CHECK: wave.store
 # CHECK-SAME: !wave.simd<vector<16xi8>, 64>
 # CHECK: wave.gather
@@ -1112,13 +1119,14 @@ print(static_bld.module)
 # CHECK-COUNT-8: waveamd.mma_scale "mfma.scale.f32.16x16x128.f4.f4"
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
 # CHECK-SAME: !wave.simd<vector<8xi8>, 64>
-# CHECK: dynamic-lds-module
-# CHECK: attributes {gpu.kernel, gpu.known_block_size = array<i32: 1024, 1, 1>, wave.dynamic_lds_size = 65536 : i64, wave.kernel, wave.lds_size = 0 : i64, wave.workgroup_size = array<i32: 1024, 1, 1>}
-# CHECK: arith.constant 65536 : i32
+# CHECK: allocated-lds-module
+# CHECK: attributes {gpu.kernel, gpu.known_block_size = array<i32: 1024, 1, 1>, wave.kernel, wave.lds_size = 0 : i64, wave.workgroup_size = array<i32: 1024, 1, 1>}
+# CHECK-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 32768 : i64}
 # CHECK: gpu.launch_func
-# CHECK-SAME: dynamic_shared_memory_size
+# CHECK-NOT: dynamic_shared_memory_size
 # CHECK-LABEL: func.func @static_matmul_kernel
-# CHECK-SAME: wave.lds_size = 2048 : i64
+# CHECK-SAME: wave.lds_size = 0 : i64
 # CHECK: %[[TRIP:.*]] = arith.constant 1 : i32
+# CHECK-COUNT-2: wave.alloc() {align = 16 : i64, bytesize = 1024 : i64}
 # CHECK-NOT: wave.assume %[[TRIP]]
 # CHECK: scf.for %{{.*}} = %{{.*}} to %[[TRIP]] step
