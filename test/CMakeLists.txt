@@ -22,6 +22,7 @@ set(WAVE_MLIR_TEST_DEPENDS
   wave-symbols-test
   wave-target-info
   wave-translate
+  wave_runtime
   wavec
 )
 if(TARGET WavePythonModules)
