@@ -28,30 +28,21 @@ namespace {
 using ConcreteAlternatives = DenseMap<Value, SmallVector<Value>>;
 
 static Operation *cloneWithMappedOperands(IRRewriter &rewriter, Operation *op,
-                                           IRMapping &map) {
+                                          IRMapping &map) {
   SmallVector<Type> resultTypes(op->getResultTypes());
   Operation::CloneOptions options = Operation::CloneOptions::all();
   options.withResultTypes(std::move(resultTypes));
   return rewriter.insert(op->clone(map, options));
 }
 
-static LogicalResult
-mapAlternativeOperands(IRMapping &map, Operation *op,
-                       const ConcreteAlternatives &concrete,
-                       unsigned alternative) {
+static void mapAlternativeOperands(IRMapping &map, Operation *op,
+                                   const ConcreteAlternatives &concrete,
+                                   unsigned alternative) {
   for (Value operand : op->getOperands()) {
     auto found = concrete.find(operand);
-    if (found != concrete.end()) {
-      if (alternative >= found->second.size())
-        return op->emitOpError(
-            "concrete materialization has inconsistent alternative count");
-      map.map(operand, found->second[alternative]);
-    } else
-      map.map(operand, operand);
-    if (!map.lookupOrNull(operand))
-      return op->emitOpError("materialization produced a null operand");
+    map.map(operand,
+            found == concrete.end() ? operand : found->second[alternative]);
   }
-  return success();
 }
 
 static LogicalResult duplicateAccess(IRRewriter &rewriter, Operation *access,
@@ -61,20 +52,12 @@ static LogicalResult duplicateAccess(IRRewriter &rewriter, Operation *access,
     return access->emitOpError(
         "effectful materialization alternative must be region-free");
   SmallVector<SmallVector<Value>> resultAlternatives(access->getNumResults());
-  if (llvm::any_of(access->getResultTypes(), [](Type type) { return !type; }))
-    return access->emitOpError("materialization access has a null result type");
   rewriter.setInsertionPoint(access);
   for (unsigned alternative : llvm::seq(choice.getChoices().size())) {
     IRMapping accessMap;
-    if (failed(
-            mapAlternativeOperands(accessMap, access, concrete, alternative)))
-      return failure();
+    mapAlternativeOperands(accessMap, access, concrete, alternative);
     Operation *concreteAccess =
         cloneWithMappedOperands(rewriter, access, accessMap);
-    if (llvm::any_of(concreteAccess->getResultTypes(),
-                     [](Type type) { return !type; }))
-      return concreteAccess->emitOpError(
-          "cloned materialization access has a null result type");
     for (auto [result, alternatives] :
          llvm::zip_equal(concreteAccess->getResults(), resultAlternatives))
       alternatives.push_back(result);
@@ -87,6 +70,8 @@ static LogicalResult duplicateAccess(IRRewriter &rewriter, Operation *access,
     auto resultChoice = MaterializationVariantsOp::create(
         rewriter, access->getLoc(), result.getType(), alternatives);
     replacements.push_back(resultChoice.getResult());
+    if (isa<MemTokenType>(result.getType()))
+      MaterializationAnchorOp::create(rewriter, access->getLoc(), resultChoice);
   }
   rewriter.replaceOp(access, replacements);
   return success();
@@ -103,8 +88,7 @@ static LogicalResult duplicatePureAddressOp(IRRewriter &rewriter, Operation *op,
   rewriter.setInsertionPoint(op);
   for (unsigned alternative : llvm::seq(choice.getChoices().size())) {
     IRMapping map;
-    if (failed(mapAlternativeOperands(map, op, concrete, alternative)))
-      return failure();
+    mapAlternativeOperands(map, op, concrete, alternative);
     Operation *clone = cloneWithMappedOperands(rewriter, op, map);
     for (auto [result, alternatives] :
          llvm::zip_equal(clone->getResults(), resultAlternatives))
@@ -113,6 +97,94 @@ static LogicalResult duplicatePureAddressOp(IRRewriter &rewriter, Operation *op,
   for (auto [result, alternatives] :
        llvm::zip_equal(op->getResults(), resultAlternatives))
     concrete[result] = std::move(alternatives);
+  return success();
+}
+
+static llvm::SetVector<Operation *>
+collectDependentUsers(llvm::SetVector<Value> &dependentValues) {
+  llvm::SetVector<Operation *> reachable;
+  for (size_t index = 0; index < dependentValues.size(); ++index) {
+    Value value = dependentValues[index];
+    for (Operation *user : value.getUsers()) {
+      if (!reachable.insert(user) || !isMemoryEffectFree(user))
+        continue;
+      for (Value result : user->getResults())
+        dependentValues.insert(result);
+    }
+  }
+
+  return reachable;
+}
+
+static SmallVector<Operation *>
+collectReadyUsers(const llvm::SetVector<Operation *> &pending,
+                  const llvm::SetVector<Value> &dependentValues,
+                  const ConcreteAlternatives &concrete) {
+  SmallVector<Operation *> readyUsers;
+  for (Operation *user : pending) {
+    bool ready = llvm::all_of(user->getOperands(), [&](Value operand) {
+      return !dependentValues.contains(operand) || concrete.contains(operand);
+    });
+    if (ready)
+      readyUsers.push_back(user);
+  }
+  return readyUsers;
+}
+
+static LogicalResult duplicateDependentUsers(
+    IRRewriter &rewriter, MaterializationVariantsOp sourceChoice,
+    ConcreteAlternatives &concrete, llvm::SetVector<Value> &dependentValues,
+    llvm::SetVector<Operation *> &cleanupRoots) {
+  llvm::SetVector<Operation *> reachable =
+      collectDependentUsers(dependentValues);
+  llvm::SetVector<Operation *> pending = reachable;
+  while (!pending.empty()) {
+    SmallVector<Operation *> readyUsers =
+        collectReadyUsers(pending, dependentValues, concrete);
+    if (readyUsers.empty()) {
+      pending.front()->emitOpError(
+          "materialization address alternatives contain a cycle");
+      return failure();
+    }
+    for (Operation *user : readyUsers) {
+      pending.remove(user);
+      if (!isMemoryEffectFree(user)) {
+        if (failed(duplicateAccess(rewriter, user, concrete, sourceChoice)))
+          return failure();
+        continue;
+      }
+      if (failed(
+              duplicatePureAddressOp(rewriter, user, concrete, sourceChoice)))
+        return failure();
+      cleanupRoots.insert(user);
+    }
+  }
+  return success();
+}
+
+static LogicalResult materializePointerChoices(
+    IRRewriter &rewriter, MaterializationVariantsOp sourceChoice,
+    ArrayRef<PtrAddOp> pointers, llvm::SetVector<Operation *> &cleanupRoots) {
+  ConcreteAlternatives concrete;
+  llvm::SetVector<Value> dependentValues;
+  cleanupRoots.insert(sourceChoice);
+  for (PtrAddOp ptrAdd : pointers) {
+    cleanupRoots.insert(ptrAdd);
+    SmallVector<Value> concretePointers;
+    rewriter.setInsertionPoint(ptrAdd);
+    for (Value concreteOffset : sourceChoice.getChoices()) {
+      IRMapping map;
+      map.map(sourceChoice.getResult(), concreteOffset);
+      concretePointers.push_back(
+          cloneWithMappedOperands(rewriter, ptrAdd, map)->getResult(0));
+    }
+    concrete[ptrAdd.getResult()] = std::move(concretePointers);
+    dependentValues.insert(ptrAdd.getResult());
+  }
+
+  if (failed(duplicateDependentUsers(rewriter, sourceChoice, concrete,
+                                     dependentValues, cleanupRoots)))
+    return failure();
   return success();
 }
 
@@ -134,65 +206,11 @@ struct WaveMaterializeMemoryVariantsPass
     });
 
     IRRewriter rewriter(&getContext());
-    for (MaterializationVariantsOp sourceChoice : addressChoices) {
-      ConcreteAlternatives concrete;
-      llvm::SetVector<Value> dependentValues;
-      cleanupRoots.insert(sourceChoice);
-      for (PtrAddOp ptrAdd : pointersByChoice.lookup(sourceChoice)) {
-          cleanupRoots.insert(ptrAdd);
-          SmallVector<Value> concretePointers;
-          rewriter.setInsertionPoint(ptrAdd);
-        for (Value concreteOffset : sourceChoice.getChoices()) {
-            IRMapping map;
-          map.map(sourceChoice.getResult(), concreteOffset);
-            concretePointers.push_back(
-                cloneWithMappedOperands(rewriter, ptrAdd, map)->getResult(0));
-          }
-          concrete[ptrAdd.getResult()] = std::move(concretePointers);
-          dependentValues.insert(ptrAdd.getResult());
-        }
-
-      llvm::SetVector<Operation *> reachable;
-      for (size_t index = 0; index < dependentValues.size(); ++index) {
-        Value value = dependentValues[index];
-        for (Operation *user : value.getUsers()) {
-          if (!reachable.insert(user) || !isMemoryEffectFree(user))
-            continue;
-          for (Value result : user->getResults())
-            dependentValues.insert(result);
-        }
-      }
-
-      llvm::SetVector<Operation *> pending = reachable;
-      while (!pending.empty()) {
-        SmallVector<Operation *> readyUsers;
-        for (Operation *user : pending) {
-          bool ready = llvm::all_of(user->getOperands(), [&](Value operand) {
-            return !dependentValues.contains(operand) ||
-                   concrete.contains(operand);
-          });
-          if (ready)
-            readyUsers.push_back(user);
-        }
-        if (readyUsers.empty()) {
-          pending.front()->emitOpError(
-              "materialization address alternatives contain a cycle");
-          return signalPassFailure();
-        }
-        for (Operation *user : readyUsers) {
-          pending.remove(user);
-          if (!isMemoryEffectFree(user)) {
-            if (failed(duplicateAccess(rewriter, user, concrete, sourceChoice)))
-              return signalPassFailure();
-            continue;
-          }
-          if (failed(duplicatePureAddressOp(rewriter, user, concrete,
-                                            sourceChoice)))
-            return signalPassFailure();
-          cleanupRoots.insert(user);
-        }
-      }
-    }
+    for (MaterializationVariantsOp sourceChoice : addressChoices)
+      if (failed(materializePointerChoices(
+              rewriter, sourceChoice, pointersByChoice.lookup(sourceChoice),
+              cleanupRoots)))
+        return signalPassFailure();
     RewritePatternSet patterns(&getContext());
     GreedyRewriteConfig config;
     config.setStrictness(GreedyRewriteStrictness::ExistingOps)

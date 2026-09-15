@@ -309,7 +309,7 @@ finishSingleWaveRefinement(const SingleWaveRefinementState &state) {
   unsigned recurrenceModelMoves = state.accepted.recurrenceModelMoves;
   if (state.usedModeledRecurrence && recurrenceModelMoves == 0)
     recurrenceModelMoves = 1;
-    return {kMachineScheduleSteadyStateIterations, state.refinements,
+  return {kMachineScheduleSteadyStateIterations, state.refinements,
           recurrenceModelMoves};
 }
 

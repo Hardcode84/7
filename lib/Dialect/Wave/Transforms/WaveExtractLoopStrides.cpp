@@ -1279,21 +1279,42 @@ getExplicitPowerOfTwoModulus(sym::ExprHandle expr) {
   return modulus;
 }
 
+static bool canCreateModularChoice(
+    scf::ForOp loop, IndexExprOp indexExpr,
+    const llvm::SmallPtrSetImpl<Operation *> &materializationAlternatives) {
+  // Nested pointer carries need the original offset range proof.
+  return !materializationAlternatives.contains(indexExpr) &&
+         llvm::none_of(loop.getBody()->without_terminator(),
+                       [](Operation &op) { return isa<scf::ForOp>(op); });
+}
+
+static LogicalResult wrapOffsetRing(sym::Store &store, int64_t modulus,
+                                    sym::ExprHandle &base,
+                                    sym::ExprHandle &proof) {
+  FailureOr<sym::ExprHandle> ring = sym::composeExprInt(store, modulus);
+  if (failed(ring))
+    return failure();
+  FailureOr<sym::ExprHandle> wrappedBase =
+      sym::composeExprBinary(store, base, sym::ExprBinaryOp::Mod, *ring);
+  FailureOr<sym::ExprHandle> wrappedProof =
+      sym::composeExprBinary(store, proof, sym::ExprBinaryOp::Mod, *ring);
+  if (failed(wrappedBase) || failed(wrappedProof))
+    return failure();
+  base = *wrappedBase;
+  proof = *wrappedProof;
+  return success();
+}
+
 static FailureOr<bool> buildExplicitModularOffsetCarryCandidate(
     scf::ForOp loop, IndexExprOp indexExpr, sym::Store &store,
     DataFlowSolver &solver, LoopCyclicOffsetCandidate &candidate,
     const llvm::SmallPtrSetImpl<Operation *> &materializationAlternatives) {
-  if (materializationAlternatives.contains(indexExpr))
+  if (!canCreateModularChoice(loop, indexExpr, materializationAlternatives))
     return false;
   std::optional<int64_t> modulus =
       getExplicitPowerOfTwoModulus(indexExpr.getExpr().getValue());
   if (!modulus)
     return false;
-  // Nested pointer carries need the original offset range proof.
-  if (llvm::any_of(loop.getBody()->without_terminator(),
-                   [](Operation &op) { return isa<scf::ForOp>(op); }))
-    return false;
-
   FailureOr<ExpandedIndexExpr> expanded =
       expandIndexExpr(indexExpr, loop, store, solver,
                       /*modelWrapping=*/true);
@@ -1313,33 +1334,21 @@ static FailureOr<bool> buildExplicitModularOffsetCarryCandidate(
                    [](Value value) { return isa<SimdType>(value.getType()); }))
     return false;
 
-  // The expression explicitly defines its quotient ring. Keep the base and
-  // proof in that ring so a later loop rewrite can recognize the same modular
-  // recurrence without relying on signed host-integer interpretation.
-  FailureOr<sym::ExprHandle> ring = sym::composeExprInt(store, *modulus);
-  FailureOr<sym::ExprHandle> wrappedBase =
-      succeeded(ring) ? sym::composeExprBinary(store, base->expr,
-                                               sym::ExprBinaryOp::Mod, *ring)
-                      : FailureOr<sym::ExprHandle>(failure());
-  FailureOr<sym::ExprHandle> wrappedProof =
-      succeeded(ring) ? sym::composeExprBinary(store, expanded->expr,
-                                               sym::ExprBinaryOp::Mod, *ring)
-                      : FailureOr<sym::ExprHandle>(failure());
-  if (failed(wrappedBase) || failed(wrappedProof))
-    return failure();
-
-  base->expr = *wrappedBase;
   candidate.members.push_back(
       {indexExpr, 0, /*retainRematerializedAlternative=*/true});
   llvm::append_range(candidate.producers, expanded->producers);
   candidate.base = std::move(*base);
-  candidate.proof.expr = *wrappedProof;
+  candidate.proof.expr = expanded->expr;
   candidate.proof.assumptions = expanded->assumptions;
   candidate.proof.names = expanded->names;
   candidate.proof.bindings = expanded->bindings;
   candidate.increment = std::move(*increment);
   candidate.ring = *modulus;
   candidate.canAnchor = true;
+  // Keep base and proof in the explicit ring across subsequent loop rewrites.
+  if (failed(wrapOffsetRing(store, *modulus, candidate.base.expr,
+                            candidate.proof.expr)))
+    return failure();
   return true;
 }
 
@@ -1391,13 +1400,10 @@ computeCyclicOffsetCarryShape(scf::ForOp loop, CyclicOffsetPattern pattern) {
   return shape;
 }
 
-static LogicalResult
-buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
-                           sym::Store &store, DataFlowSolver &solver,
-                           LoopCyclicOffsetCandidate &candidate,
-                           bool &matched,
-                           const llvm::SmallPtrSetImpl<Operation *>
-                               &materializationAlternatives) {
+static LogicalResult buildCyclicOffsetCandidate(
+    scf::ForOp loop, IndexExprOp indexExpr, sym::Store &store,
+    DataFlowSolver &solver, LoopCyclicOffsetCandidate &candidate, bool &matched,
+    const llvm::SmallPtrSetImpl<Operation *> &materializationAlternatives) {
   matched = false;
   if (!canRewriteCyclicOffsetInLoop(loop, indexExpr))
     return success();
@@ -1408,8 +1414,7 @@ buildCyclicOffsetCandidate(scf::ForOp loop, IndexExprOp indexExpr,
     return failure();
   if (!*match) {
     FailureOr<bool> modularCarry = buildExplicitModularOffsetCarryCandidate(
-        loop, indexExpr, store, solver, candidate,
-        materializationAlternatives);
+        loop, indexExpr, store, solver, candidate, materializationAlternatives);
     if (failed(modularCarry))
       return failure();
     matched = *modularCarry;
@@ -2012,8 +2017,7 @@ static void eraseDefaultYield(IRRewriter &rewriter, Block &body) {
 static LogicalResult cloneBodyWithoutOffsetCarries(
     IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
     LoopOffsetCarryCandidate candidate, const llvm::BitVector &removed,
-    ArrayRef<unsigned> newIndex,
-    MaterializationAlternatives &alternatives) {
+    ArrayRef<unsigned> newIndex, MaterializationAlternatives &alternatives) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
   eraseDefaultYield(rewriter, dstBody);
@@ -2116,8 +2120,7 @@ static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
                          loop.getUpperBound(), loop.getStep(), initArgs);
   copyLoopAttrs(loop, newLoop);
   if (failed(cloneBodyWithCarriedCyclicOffset(rewriter, loop, newLoop,
-                                              candidate, store,
-                                              alternatives)))
+                                              candidate, store, alternatives)))
     return failure();
 
   rewriter.replaceOp(loop,
@@ -2179,12 +2182,10 @@ rewriteOneLoop(IRRewriter &rewriter, scf::ForOp loop, sym::Store &store,
   return true;
 }
 
-static FailureOr<bool> rewriteOneCyclicOffset(IRRewriter &rewriter,
-                                              scf::ForOp loop,
-                                              sym::Store &store,
-                                              DataFlowSolver &solver,
-                                              MaterializationAlternatives
-                                                  &alternatives) {
+static FailureOr<bool>
+rewriteOneCyclicOffset(IRRewriter &rewriter, scf::ForOp loop, sym::Store &store,
+                       DataFlowSolver &solver,
+                       MaterializationAlternatives &alternatives) {
   FailureOr<std::optional<LoopCyclicOffsetCandidate>> candidate =
       findCyclicOffsetCandidate(loop, store, solver, alternatives);
   if (failed(candidate))
@@ -2219,9 +2220,8 @@ rewriteOneStrideExtraction(IRRewriter &rewriter, scf::ForOp loop,
   if (failed(rewritten) || *rewritten)
     return rewritten;
 
-  rewritten = rewriteOneCyclicOffset(rewriter, loop,
-                                     dialect->getSymbolStore(), solver,
-                                     alternatives);
+  rewritten = rewriteOneCyclicOffset(rewriter, loop, dialect->getSymbolStore(),
+                                     solver, alternatives);
   if (failed(rewritten) || *rewritten)
     return rewritten;
 

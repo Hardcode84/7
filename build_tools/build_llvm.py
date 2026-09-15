@@ -171,8 +171,7 @@ def patch_fingerprint() -> str:
     return digest.hexdigest()
 
 
-def build_config_stamp(enable_python_bindings: bool,
-                       enable_rocm_runner: bool) -> str:
+def build_config_stamp(enable_python_bindings: bool, enable_rocm_runner: bool) -> str:
     return (
         f"python_bindings={int(enable_python_bindings)}\n"
         f"rocm_runner={int(enable_rocm_runner)}\n"
@@ -285,10 +284,8 @@ def already_installed(
     ):
         return False
     config_stamp = install_dir / CONFIG_STAMP_FILE
-    if (
-        not config_stamp.is_file()
-        or config_stamp.read_text()
-        != build_config_stamp(enable_python_bindings, enable_rocm_runner)
+    if not config_stamp.is_file() or config_stamp.read_text() != build_config_stamp(
+        enable_python_bindings, enable_rocm_runner
     ):
         return False
     for package in ("llvm", "mlir", "clang", "lld"):

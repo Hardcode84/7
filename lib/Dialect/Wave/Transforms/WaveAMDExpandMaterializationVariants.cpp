@@ -58,14 +58,15 @@ static void appendPredecessors(RegionBranchOpInterface branch,
     branch.getPredecessorValues(successor, found - inputs.begin(), pending);
 }
 
-struct EffectTrace {
-  EffectAlternative effects;
-  llvm::DenseSet<Value> tokens;
-};
+static void appendArgumentPredecessors(BlockArgument arg,
+                                       SmallVectorImpl<Value> &pending) {
+  if (auto branch =
+          dyn_cast<RegionBranchOpInterface>(arg.getOwner()->getParentOp()))
+    appendPredecessors(branch, RegionSuccessor(arg.getOwner()->getParent()),
+                       arg, pending);
+}
 
-static EffectTrace
-collectEffectAncestors(Value root,
-                       const llvm::DenseSet<Value> &sharedTokens = {}) {
+static EffectAlternative collectEffectProducers(Value root) {
   SmallVector<Value> pending{root};
   llvm::DenseSet<Value> visited;
   llvm::SetVector<Operation *> effects;
@@ -73,72 +74,33 @@ collectEffectAncestors(Value root,
     Value value = pending.pop_back_val();
     if (!visited.insert(value).second)
       continue;
-    bool isToken = isa<MemTokenType>(value.getType());
-    if (isToken && sharedTokens.contains(value))
-      continue;
     if (auto arg = dyn_cast<BlockArgument>(value)) {
-      if (auto branch =
-              dyn_cast<RegionBranchOpInterface>(arg.getOwner()->getParentOp()))
-        appendPredecessors(branch, RegionSuccessor(arg.getOwner()->getParent()),
-                           value, pending);
+      appendArgumentPredecessors(arg, pending);
       continue;
     }
     Operation *def = value.getDefiningOp();
     if (!def)
       continue;
-    // Address operands are setup for this effect, not earlier effects owned by
-    // the alternative. Follow only explicit memory-token dependencies beyond
-    // an effect. Shared tokens form the boundary between an alternative and
-    // the memory history that all alternatives depend on.
-    if (!isMemoryEffectFree(def)) {
-      effects.insert(def);
-      llvm::copy_if(
-          def->getOperands(), std::back_inserter(pending),
-          [](Value operand) { return isa<MemTokenType>(operand.getType()); });
-      continue;
-    }
     if (auto branch = dyn_cast<RegionBranchOpInterface>(def)) {
       appendPredecessors(branch, RegionSuccessor(def), value, pending);
       continue;
     }
+    if (!isMemoryEffectFree(def)) {
+      // Token predecessors are required history, not alternative-owned effects.
+      effects.insert(def);
+      continue;
+    }
     llvm::append_range(pending, def->getOperands());
   }
-  EffectTrace trace;
-  trace.effects = effects.takeVector();
-  for (Value value : visited)
-    if (isa<MemTokenType>(value.getType()))
-      trace.tokens.insert(value);
-  return trace;
+  return effects.takeVector();
 }
 
 static EffectAlternatives
 collectAlternativeEffects(MaterializationVariantsOp choice) {
-  SmallVector<EffectTrace> provisional;
-  for (Value value : choice.getChoices())
-    provisional.push_back(collectEffectAncestors(value));
-
-  llvm::DenseSet<Value> sharedTokens;
-  if (!provisional.empty()) {
-    sharedTokens = provisional.front().tokens;
-    SmallVector<Value> uniqueTokens;
-    for (Value token : sharedTokens)
-      if (llvm::any_of(llvm::drop_begin(provisional),
-                       [&](const EffectTrace &trace) {
-                         return !trace.tokens.contains(token);
-                       }))
-        uniqueTokens.push_back(token);
-    for (Value token : uniqueTokens)
-      sharedTokens.erase(token);
-    // A cyclic dependency can make an alternative's result reachable from a
-    // sibling result. Roots are selections, never shared dependency bounds.
-    for (Value value : choice.getChoices())
-      sharedTokens.erase(value);
-  }
-
   EffectAlternatives alternatives;
   llvm::DenseMap<Operation *, unsigned> occurrences;
   for (Value value : choice.getChoices()) {
-    alternatives.push_back(collectEffectAncestors(value, sharedTokens).effects);
+    alternatives.push_back(collectEffectProducers(value));
     for (Operation *effect : alternatives.back())
       ++occurrences[effect];
   }
@@ -217,23 +179,7 @@ static void addAssignment(CandidateScope &scope, ArrayRef<unsigned> assignment,
   scope.assignments.emplace_back(assignment);
 }
 
-static bool buildAssignments(unsigned limit, CandidateScope &scope) {
-  unsigned product = 1;
-  bool bounded = false;
-  for (unsigned arity : scope.dimensionArities) {
-    if (arity > limit / product) {
-      bounded = true;
-      break;
-    }
-    product *= arity;
-  }
-  if (!bounded) {
-    for (unsigned ordinal = 0; ordinal < product; ++ordinal)
-      scope.assignments.push_back(
-          decodeAssignment(scope.dimensionArities, ordinal));
-    return false;
-  }
-
+static void buildBoundedAssignments(unsigned limit, CandidateScope &scope) {
   SmallVector<unsigned> baseline(scope.dimensionArities.size(), 0);
   addAssignment(scope, baseline, limit);
 
@@ -261,6 +207,26 @@ static bool buildAssignments(unsigned limit, CandidateScope &scope) {
   for (unsigned ordinal = 0; scope.assignments.size() < limit; ++ordinal)
     addAssignment(scope, decodeAssignment(scope.dimensionArities, ordinal),
                   limit);
+}
+
+static bool buildAssignments(unsigned limit, CandidateScope &scope) {
+  unsigned product = 1;
+  bool bounded = false;
+  for (unsigned arity : scope.dimensionArities) {
+    if (arity > limit / product) {
+      bounded = true;
+      break;
+    }
+    product *= arity;
+  }
+  if (!bounded) {
+    for (unsigned ordinal = 0; ordinal < product; ++ordinal)
+      scope.assignments.push_back(
+          decodeAssignment(scope.dimensionArities, ordinal));
+    return false;
+  }
+
+  buildBoundedAssignments(limit, scope);
   return true;
 }
 
@@ -308,18 +274,23 @@ static Operation *scopeRoot(Operation *op) {
   return op;
 }
 
+static void collectChoiceRoots(ArrayRef<MaterializationVariantsOp> choices,
+                               const ChoiceEffects &choiceEffects,
+                               SmallVectorImpl<Value> &pending,
+                               llvm::DenseSet<Operation *> &effectProducers) {
+  for (MaterializationVariantsOp choice : choices) {
+    llvm::append_range(pending, choice.getChoices());
+    for (const EffectAlternative &alternative : choiceEffects.lookup(choice))
+      effectProducers.insert(alternative.begin(), alternative.end());
+  }
+}
+
 static llvm::DenseSet<Operation *>
 collectChoiceSetup(ArrayRef<MaterializationVariantsOp> choices,
                    const ChoiceEffects &choiceEffects) {
   SmallVector<Value> pending;
   llvm::DenseSet<Operation *> effectProducers;
-  for (MaterializationVariantsOp choice : choices) {
-    for (Value value : choice.getChoices()) {
-      pending.push_back(value);
-    }
-    for (const EffectAlternative &alternative : choiceEffects.lookup(choice))
-      effectProducers.insert(alternative.begin(), alternative.end());
-  }
+  collectChoiceRoots(choices, choiceEffects, pending, effectProducers);
   llvm::DenseSet<Value> visited;
   llvm::DenseSet<Operation *> setup;
   while (!pending.empty()) {
@@ -327,10 +298,7 @@ collectChoiceSetup(ArrayRef<MaterializationVariantsOp> choices,
     if (!visited.insert(value).second)
       continue;
     if (auto arg = dyn_cast<BlockArgument>(value)) {
-      if (auto branch =
-              dyn_cast<RegionBranchOpInterface>(arg.getOwner()->getParentOp()))
-        appendPredecessors(branch, RegionSuccessor(arg.getOwner()->getParent()),
-                           value, pending);
+      appendArgumentPredecessors(arg, pending);
       continue;
     }
     Operation *def = value.getDefiningOp();
@@ -475,33 +443,28 @@ static LogicalResult checkBlockExits(Block &block) {
   return success();
 }
 
-static LogicalResult populateCandidate(const CandidateScope &scope,
-                                       ArrayRef<unsigned> dimensionSelections,
-                                       Region &region) {
-  IRMapping mapping;
-  mapping.map(scope.inputs, region.front().getArguments());
-  OpBuilder builder = OpBuilder::atBlockEnd(&region.front());
-  for (Operation *op : scope.operations)
-    builder.clone(*op, mapping);
-  for (size_t index : llvm::seq(scope.choices.size())) {
-    MaterializationVariantsOp source = scope.choices[index];
-    unsigned selection = dimensionSelections[scope.choiceDimensions[index]];
-    auto choice = cast<MaterializationVariantsOp>(
-        mapping.lookup(source.getResult()).getDefiningOp());
-    Value selected = choice.getChoices()[selection];
-    choice.getResult().replaceAllUsesWith(selected);
-    mapping.map(source.getResult(), selected);
-    choice.erase();
+static LogicalResult
+eraseUnusedEffects(llvm::SetVector<Operation *> &rejected) {
+  while (!rejected.empty()) {
+    bool erased = false;
+    for (Operation *op : llvm::to_vector(rejected)) {
+      if (!op->use_empty())
+        continue;
+      rejected.remove(op);
+      op->erase();
+      erased = true;
+    }
+    if (!erased)
+      return emitError(rejected.front()->getLoc())
+             << "rejected materialization effects retain a live use";
   }
+  return success();
+}
 
-  SmallVector<Value> outputs;
-  for (Value value : scope.outputs)
-    outputs.push_back(mapping.lookup(value));
-  CandidateYieldOp::create(builder, scope.operations.back()->getLoc(), outputs,
-                           IntegerAttr{});
-
-  IRRewriter rewriter(builder.getContext());
-  eliminateTriviallyDeadOps(rewriter, region);
+static LogicalResult
+eraseRejectedEffects(const CandidateScope &scope,
+                     ArrayRef<unsigned> dimensionSelections, Region &region,
+                     const IRMapping &mapping) {
   llvm::DenseSet<Operation *> liveOperations;
   region.walk([&](Operation *op) { liveOperations.insert(op); });
 
@@ -522,19 +485,39 @@ static LogicalResult populateCandidate(const CandidateScope &scope,
       }
     }
   }
-  while (!rejected.empty()) {
-    bool erased = false;
-    for (Operation *op : llvm::to_vector(rejected)) {
-      if (!op->use_empty())
-        continue;
-      rejected.remove(op);
-      op->erase();
-      erased = true;
-    }
-    if (!erased)
-      return emitError(rejected.front()->getLoc())
-             << "rejected materialization effects retain a live use";
+  return eraseUnusedEffects(rejected);
+}
+
+static LogicalResult populateCandidate(const CandidateScope &scope,
+                                       ArrayRef<unsigned> dimensionSelections,
+                                       Region &region) {
+  IRMapping mapping;
+  mapping.map(scope.inputs, region.front().getArguments());
+  OpBuilder builder = OpBuilder::atBlockEnd(&region.front());
+  for (Operation *op : scope.operations)
+    builder.clone(*op, mapping);
+  for (size_t index : llvm::seq(scope.choices.size())) {
+    MaterializationVariantsOp source = scope.choices[index];
+    unsigned selection = dimensionSelections[scope.choiceDimensions[index]];
+    auto choice = cast<MaterializationVariantsOp>(
+        mapping.lookup(source.getResult()).getDefiningOp());
+    Value selected = choice.getChoices()[selection];
+    choice.getResult().replaceAllUsesWith(selected);
+    mapping.map(source.getResult(), selected);
+    choice.erase();
   }
+
+  region.walk([](MaterializationAnchorOp anchor) { anchor.erase(); });
+  SmallVector<Value> outputs;
+  for (Value value : scope.outputs)
+    outputs.push_back(mapping.lookup(value));
+  CandidateYieldOp::create(builder, scope.operations.back()->getLoc(), outputs,
+                           IntegerAttr{});
+
+  IRRewriter rewriter(builder.getContext());
+  eliminateTriviallyDeadOps(rewriter, region);
+  if (failed(eraseRejectedEffects(scope, dimensionSelections, region, mapping)))
+    return failure();
   eliminateTriviallyDeadOps(rewriter, region);
   return success();
 }
@@ -560,9 +543,9 @@ static LogicalResult expandScope(CandidateScope &scope) {
   parallelFor(first->getContext(), 0, scope.assignments.size(),
               [&](size_t ordinal) {
                 if (failed(populateCandidate(scope, scope.assignments[ordinal],
-                                 wrapper.getCandidates()[ordinal])))
-      failedCandidate.store(true, std::memory_order_relaxed);
-  });
+                                             wrapper.getCandidates()[ordinal])))
+                  failedCandidate.store(true, std::memory_order_relaxed);
+              });
   if (failedCandidate.load(std::memory_order_relaxed))
     return failure();
   for (auto [source, result] :
@@ -570,6 +553,18 @@ static LogicalResult expandScope(CandidateScope &scope) {
     source.replaceAllUsesWith(result);
   for (Operation *op : llvm::reverse(scope.operations))
     op->erase();
+  return success();
+}
+
+static LogicalResult expandScopes(unsigned maxCandidates,
+                                  MutableArrayRef<CandidateScope> scopes,
+                                  const ChoiceEffects &choiceEffects) {
+  for (CandidateScope &scope : scopes)
+    if (failed(checkScope(maxCandidates, scope, choiceEffects)))
+      return failure();
+  for (CandidateScope &scope : scopes)
+    if (failed(expandScope(scope)))
+      return failure();
   return success();
 }
 
@@ -614,12 +609,10 @@ struct WaveAMDExpandMaterializationVariantsPass
         formation.seed(root);
       formation.form(scopes);
     }
-    for (CandidateScope &scope : scopes)
-      if (failed(checkScope(maxCandidates, scope, choiceEffects)))
-        return signalPassFailure();
-    for (CandidateScope &scope : scopes)
-      if (failed(expandScope(scope)))
-        return signalPassFailure();
+    if (failed(expandScopes(maxCandidates, scopes, choiceEffects)))
+      return signalPassFailure();
+    getOperation()->walk(
+        [](MaterializationAnchorOp anchor) { anchor.erase(); });
   }
 };
 } // namespace

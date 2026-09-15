@@ -298,8 +298,10 @@ instruction order. Do not reschedule the winner. The remaining postschedule
 pipeline runs once on the resulting function.
 
 The backend pipeline expands live choices after common machine optimizations
-and multi-wave specialization. Generic dead-code elimination can remove an
-unused value or token choice before expansion. The registered cleanup pipeline nests
+and multi-wave specialization. Temporary `materialization_anchor` operations
+consume generated token choices so that cleanup cannot erase them. Expansion
+removes these anchors after it resolves the choices, before scheduling.
+The registered cleanup pipeline nests
 `remove-dead-values`, `cse`, and `canonicalize` on candidate wrappers. The pass
 manager can process sibling wrappers in parallel without changing their shared
 inputs. Scheduling and collapse run next, before packed-MFMA optimization and
@@ -470,8 +472,10 @@ merged scope; do not couple choices by operand ordinal.
 
 Before machine selection, duplicate a memory operation whose address uses a
 choice. Each duplicate contains one complete address tree. Put an independent
-choice on each result and token. Candidate construction traces each operand
-through pure operations and token dependencies. It removes effects common to
+choice on each result and token. Anchor each token choice. Machine selection
+lowers the anchor to its machine form. Candidate construction traces each
+operand through pure operations to its first effect. Token predecessors are
+required history and remain in the program. It removes effects common to
 all operands and couples result choices only when their remaining per-operand
 effect slices are identical. It does not use an operation attribute. A token
 choice used as a dependency remains independent from the address choice of the

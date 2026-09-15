@@ -180,15 +180,16 @@ func.func @couple_effect_results_through_pure_ops(
       : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
 }
 
-// CHECK-LABEL: func.func @remove_complete_effect_chains
-// CHECK: waveamdmachine.materialization_candidates
+// CHECK-LABEL: func.func @preserve_prerequisite_effects
+// CHECK: [[PRIOR:%.*]] = waveamdmachine.buffer_store_b32
+// CHECK: waveamdmachine.materialization_candidates {{.*}}, [[PRIOR]],
 // CHECK-COUNT-2: waveamdmachine.buffer_store_b32
 // CHECK: waveamdmachine.candidate_yield
 // CHECK-COUNT-2: waveamdmachine.buffer_store_b32
 // CHECK: waveamdmachine.candidate_yield
 // CHECK-NOT: waveamdmachine.candidate_yield
 // CHECK: return
-func.func @remove_complete_effect_chains(
+func.func @preserve_prerequisite_effects(
     %off0: !waveamdmachine.reg<vgpr, 1>,
     %off1: !waveamdmachine.reg<vgpr, 1>,
     %value: !waveamdmachine.reg<vgpr, 1>,

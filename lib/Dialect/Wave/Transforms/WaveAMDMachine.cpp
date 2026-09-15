@@ -682,13 +682,7 @@ LogicalResult WaveAMDMachineSelector::run() {
       return failure();
 
   for (Operation *op : llvm::reverse(opsToErase)) {
-    if (!op->use_empty()) {
-      InFlightDiagnostic diag = op->emitError(
-          "machine selection left a source operation with live uses:");
-      for (Operation *user : op->getUsers())
-        diag << " " << user->getName();
-      return failure();
-    }
+    assert(op->use_empty() && "machine selection must replace all source uses");
     op->erase();
   }
 
@@ -3058,16 +3052,15 @@ void WaveAMDMachineSelector::eraseIfTopLevel(Operation *op) {
 }
 
 LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
-  // Reset the insertion point only when stepping into a fresh top-level
-  // op (either directly inside the function body, or inside a
-  // structured loop body whose pre/post layout we are rebuilding from
-  // scratch).
+  // Structured selection owns insertion points outside function/loop bodies.
   Operation *parentOp = op->getBlock()->getParentOp();
   if (parentOp == func || isa<waveamdmachine::UniformLoopOp>(parentOp))
     builder.setInsertionPoint(op);
-  LogicalResult result = llvm::TypeSwitch<Operation *, LogicalResult>(op)
+  return llvm::TypeSwitch<Operation *, LogicalResult>(op)
       .Case<MaterializationVariantsOp>(
           [&](auto choice) { return selectMaterializationVariants(choice); })
+      .Case<MaterializationAnchorOp>(
+          [&](auto anchor) { return selectMaterializationAnchor(anchor); })
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
       .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
       .Case<ConstantOp>([&](auto o) { return selectConstant(o); })
@@ -3152,10 +3145,6 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
         return op->emitError(
             "unsupported operation in WaveAMDMachine selection");
       });
-  if (failed(result))
-    return failure();
-
-  return success();
 }
 
 LogicalResult WaveAMDMachineSelector::selectConstant(arith::ConstantIntOp op) {
@@ -3596,6 +3585,14 @@ LogicalResult WaveAMDMachineSelector::selectSplat(SplatOp op) {
 // The selected value passes straight through.
 LogicalResult WaveAMDMachineSelector::selectAssume(AssumeOp op) {
   values[op.getResult()] = expect(op.getValue(), op);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectMaterializationAnchor(
+    MaterializationAnchorOp op) {
+  waveamdmachine::MaterializationAnchorOp::create(builder, op.getLoc(),
+                                                  expect(op.getToken(), op));
   eraseIfTopLevel(op);
   return success();
 }
