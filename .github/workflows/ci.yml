@@ -58,7 +58,7 @@ jobs:
 
       - name: Restore LLVM
         id: llvm-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             build/llvm-install
@@ -88,6 +88,18 @@ jobs:
           test -f build/_deps/llvm-project/llvm/utils/lit/lit/main.py
           test -x build/llvm-build/bin/llvm-lit
           test -f build/llvm-build/lib/Target/AMDGPU/AMDGPUGenInstrInfo.inc
+
+      - name: Save LLVM
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/llvm-install
+            build/_deps/llvm-project/llvm/lib/Target/AMDGPU
+            build/_deps/llvm-project/llvm/utils/lit
+            build/llvm-build/bin/llvm-lit
+            build/llvm-build/lib/Target/AMDGPU
+          key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
 
       - name: Configure Wave
         run: |
