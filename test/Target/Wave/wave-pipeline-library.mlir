@@ -63,6 +63,8 @@
 // PIPELINE-NEXT: // First canon picks constant arms; second cleans joins and dead conditions.
 // PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "wave-convert-arith-selects"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "wave-lower-token-selects"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"

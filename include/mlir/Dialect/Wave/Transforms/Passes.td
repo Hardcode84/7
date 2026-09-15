@@ -200,13 +200,26 @@ def WaveLowerSymbolicMemory : Pass<"wave-lower-symbolic-memory"> {
 }
 
 def WaveLowerTokenSelects : Pass<"wave-lower-token-selects"> {
-  let summary = "Lower unresolved memory-token selects";
+  let summary = "Lower unresolved Wave memory-token selects";
   let description = [{
-    Lowers unresolved memory-token `wave.select` and `arith.select` operations
-    to conservative `wave.join` operations. Pipeline placement after
-    canonicalization preserves constant-condition arm elimination.
+    Lowers unresolved memory-token `wave.select` operations to conservative
+    `wave.join` operations. Pipeline placement after canonicalization preserves
+    constant-condition arm elimination.
   }];
   let dependentDialects = [
+    "wave::WaveDialect"
+  ];
+}
+
+def WaveConvertArithSelects : Pass<"wave-convert-arith-selects"> {
+  let summary = "Convert arithmetic selects of Wave values";
+  let description = [{
+    Converts `arith.select` operations whose result has a Wave dialect type to
+    `wave.select`. Arithmetic selects of builtin values remain unchanged. This
+    pass establishes Wave dialect ownership before Wave legalization.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect",
     "wave::WaveDialect"
   ];
 }

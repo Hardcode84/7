@@ -8,7 +8,6 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/IR/PatternMatch.h"
 
@@ -27,21 +26,19 @@ namespace {
 struct WaveLowerTokenSelectsPass
     : public wave::impl::WaveLowerTokenSelectsBase<WaveLowerTokenSelectsPass> {
   void runOnOperation() override {
-    SmallVector<Operation *> selects;
-    getOperation()->walk([&](Operation *select) {
-      if (isa<SelectOp, arith::SelectOp>(select) &&
-          isa<MemTokenType>(select->getResult(0).getType()))
+    SmallVector<SelectOp> selects;
+    getOperation()->walk([&](SelectOp select) {
+      if (isa<MemTokenType>(select.getType()))
         selects.push_back(select);
     });
 
     IRRewriter rewriter(&getContext());
-    for (Operation *select : selects) {
+    for (SelectOp select : selects) {
       rewriter.setInsertionPoint(select);
-      std::array<Value, 2> dependencies{select->getOperand(1),
-                                        select->getOperand(2)};
-      JoinOp join =
-          JoinOp::create(rewriter, select->getLoc(),
-                         select->getResult(0).getType(), dependencies);
+      std::array<Value, 2> dependencies{select.getTrueValue(),
+                                        select.getFalseValue()};
+      JoinOp join = JoinOp::create(rewriter, select.getLoc(), select.getType(),
+                                   dependencies);
       rewriter.replaceOp(select, join.getResult());
     }
   }
