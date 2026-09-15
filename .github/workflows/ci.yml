@@ -16,17 +16,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
   cancel-in-progress: true
 
+env:
+  CC: clang-18
+  CXX: clang++-18
+  LDFLAGS: -fuse-ld=lld-18
+  LLVM_CACHE_VERSION: v2-clang18-lld18
+  VENV_DIR: ${{ github.workspace }}/.venv
+
 jobs:
-  compile-and-lit:
-    name: Compile and lit
+  llvm:
+    name: Prepare LLVM
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-    env:
-      CC: clang-18
-      CXX: clang++-18
-      LDFLAGS: -fuse-ld=lld-18
-      LLVM_CACHE_VERSION: v2-clang18-lld18
-      VENV_DIR: ${{ github.workspace }}/.venv
+    outputs:
+      cache-key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
 
     steps:
       - name: Check out sources
@@ -100,6 +103,61 @@ jobs:
             build/llvm-build/bin/llvm-lit
             build/llvm-build/lib/Target/AMDGPU
           key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
+
+  compile-and-lit:
+    name: Compile and lit
+    needs: llvm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Set up compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clang-18 lld-18
+          "${CC}" --version
+          "${CXX}" --version
+          ld.lld-18 --version
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Create build environment
+        run: |
+          python -m venv "${VENV_DIR}"
+          "${VENV_DIR}/bin/python" -m pip install \
+            --requirement build_tools/requirements.txt
+          echo "${VENV_DIR}/bin" >> "${GITHUB_PATH}"
+          "${VENV_DIR}/bin/cmake" --version
+          "${VENV_DIR}/bin/ninja" --version
+
+      - name: Restore LLVM
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/llvm-install
+            build/_deps/llvm-project/llvm/lib/Target/AMDGPU
+            build/_deps/llvm-project/llvm/utils/lit
+            build/llvm-build/bin/llvm-lit
+            build/llvm-build/lib/Target/AMDGPU
+          key: ${{ needs.llvm.outputs.cache-key }}
+          fail-on-cache-miss: true
+
+      - name: Verify LLVM tree
+        run: |
+          test "$(cat build/llvm-install/.wave-mlir-commit)" = "$(cat llvm-commit.txt)"
+          test "$(cat build/llvm-install/.wave-mlir-patches)" = "$(python -c 'from build_tools.build_llvm import patch_fingerprint; print(patch_fingerprint())')"
+          test -f build/_deps/llvm-project/llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.h
+          test -f build/_deps/llvm-project/llvm/utils/lit/lit/main.py
+          test -x build/llvm-build/bin/llvm-lit
+          test -f build/llvm-build/lib/Target/AMDGPU/AMDGPUGenInstrInfo.inc
 
       - name: Configure Wave
         run: |
