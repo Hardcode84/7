@@ -106,9 +106,23 @@ static bool tokenUsedOnlyBy(Value token, Operation *op) {
 }
 
 static JoinOp getOnlyJoinUser(Value token) {
-  if (!token.hasOneUse())
-    return {};
-  return dyn_cast<JoinOp>(token.use_begin()->getOwner());
+  JoinOp onlyUser;
+  for (OpOperand &use : token.getUses()) {
+    JoinOp join = dyn_cast<JoinOp>(use.getOwner());
+    if (!join || (onlyUser && onlyUser != join))
+      return {};
+    onlyUser = join;
+  }
+  return onlyUser;
+}
+
+static JoinOp getUniqueJoinSink(Value token) {
+  JoinOp sink;
+  while (JoinOp join = getOnlyJoinUser(token)) {
+    sink = join;
+    token = join.getResult();
+  }
+  return sink;
 }
 
 static bool equivalentDependencies(Value lhs, Value rhs) {
@@ -121,7 +135,7 @@ static bool equivalentDependencies(Value lhs, Value rhs) {
 static std::optional<JoinOp> getCommonJoinUser(const MemoryGroup &group) {
   JoinOp join;
   for (Operation *op : group.ops) {
-    JoinOp tokenJoin = getOnlyJoinUser(getMemoryToken(op));
+    JoinOp tokenJoin = getUniqueJoinSink(getMemoryToken(op));
     if (!tokenJoin)
       return std::nullopt;
     if (!join) {
@@ -282,7 +296,8 @@ getRewriteOrderedGroups(const MemoryGroup &lhs, const MemoryGroup &rhs) {
     return std::make_pair(&lhs, &rhs);
   if (rhs.lastOp->isBeforeInBlock(lhs.firstOp))
     return std::make_pair(&rhs, &lhs);
-  if (!deadStoreTokensShareDependency(lhs, rhs))
+  if (!deadStoreTokensShareDependency(lhs, rhs) &&
+      !tokensUsedOnlyBySameJoin(lhs, rhs))
     return std::nullopt;
   if (lhs.firstOp->isBeforeInBlock(rhs.firstOp))
     return std::make_pair(&lhs, &rhs);
