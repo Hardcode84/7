@@ -72,20 +72,14 @@ _a4w4_kernel:
 		s_mul_hi_u32 s23, s21, s23
 		s_mul_i32 s25, s23, s13
 		s_sub_i32 s21, s21, s25
-		s_cmp_ge_u32 s21, s13
-		s_cselect_b32 s25, 1, 0
-		s_add_i32 s26, s23, 1
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s23, s26, s23
-		s_cselect_b32 s25, 1, 0
+		s_add_i32 s25, s23, 1
 		s_sub_i32 s26, s21, s13
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s21, s26, s21
 		s_cmp_ge_u32 s21, s13
-		s_cselect_b32 s25, 1, 0
-		s_add_i32 s26, s23, 1
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s23, s26, s23
+		s_cselect_b32 s23, s25, s23
+		s_cselect_b32 s21, s26, s21
+		s_add_i32 s25, s23, 1
+		s_cmp_ge_u32 s21, s13
+		s_cselect_b32 s23, s25, s23
 		s_cselect_b32 s25, 1, 0
 		s_xor_b32 s23, s23, s22
 		s_sub_i32 s22, s23, s22
@@ -115,17 +109,13 @@ _a4w4_kernel:
 		s_mul_hi_u32 s21, s13, s21
 		s_mul_i32 s23, s21, s1
 		s_sub_i32 s13, s13, s23
+		s_sub_i32 s23, s13, s1
 		s_cmp_ge_u32 s13, s1
+		s_cselect_b32 s13, s23, s13
 		s_cselect_b32 s23, 1, 0
 		s_sub_i32 s25, s13, s1
-		s_cmp_lg_u32 s23, 0
-		s_cselect_b32 s13, s25, s13
-		s_cselect_b32 s23, 1, 0
 		s_cmp_ge_u32 s13, s1
-		s_cselect_b32 s25, 1, 0
-		s_sub_i32 s1, s13, s1
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s1, s1, s13
+		s_cselect_b32 s1, s25, s13
 		s_cselect_b32 s13, 1, 0
 		s_xor_b32 s1, s1, s16
 		s_sub_i32 s1, s1, s16

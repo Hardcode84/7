@@ -8,8 +8,11 @@
 // CHECK: [[RCP:%.*]] = wave.urecip [[D]]
 // CHECK: wave.binary mulhui [[RCP]]
 // CHECK: wave.binary mulhui [[X]]
-// CHECK: [[TAKE:%.*]] = arith.cmpi uge
-// CHECK: wave.select [[TAKE]]
+// CHECK: [[INCREMENTED:%.*]] = wave.binary addi
+// CHECK-NEXT: [[REDUCED:%.*]] = wave.binary subi
+// CHECK-NEXT: [[TAKE:%.*]] = arith.cmpi uge
+// CHECK-NEXT: wave.select [[TAKE]], [[INCREMENTED]]
+// CHECK-NEXT: wave.select [[TAKE]], [[REDUCED]]
 // CHECK-NOT: divui
 // CHECK-NOT: remui
 func.func @dynamic_unsigned_i32(%x: i32, %d: i32) -> (i32, i32) {

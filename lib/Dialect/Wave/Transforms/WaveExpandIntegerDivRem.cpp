@@ -338,13 +338,13 @@ static DivRemValues createUnsignedRestoringDivRem(OpBuilder &builder,
                                    createShiftAmount(builder, loc, type, 1)),
                          nextBit);
 
-    Value take = createCompare(builder, loc, arith::CmpIPredicate::uge,
-                               remainder, divisor, type);
     Value reduced = createSub(builder, loc, type, remainder, divisor);
-    remainder = createSelect(builder, loc, type, take, reduced, remainder);
     Value withBit =
         createOr(builder, loc, type, quotient,
                  createConstantLike(builder, loc, type, uint64_t{1} << bit));
+    Value take = createCompare(builder, loc, arith::CmpIPredicate::uge,
+                               remainder, divisor, type);
+    remainder = createSelect(builder, loc, type, take, reduced, remainder);
     quotient = createSelect(builder, loc, type, take, withBit, quotient);
   }
 
@@ -365,13 +365,13 @@ static DivRemValues createUnsignedI32DivRem(OpBuilder &builder, Location loc,
                               createMul(builder, loc, type, quotient, divisor));
   Value one = createConstantLike(builder, loc, type, 1);
   for ([[maybe_unused]] unsigned i : llvm::seq<unsigned>(0, 2)) {
+    Value incrementedQuotient = createAdd(builder, loc, type, quotient, one);
+    Value reducedRemainder = createSub(builder, loc, type, remainder, divisor);
     Value take = createCompare(builder, loc, arith::CmpIPredicate::uge,
                                remainder, divisor, type);
-    quotient =
-        createSelect(builder, loc, type, take,
-                     createAdd(builder, loc, type, quotient, one), quotient);
-    remainder = createSelect(builder, loc, type, take,
-                             createSub(builder, loc, type, remainder, divisor),
+    quotient = createSelect(builder, loc, type, take, incrementedQuotient,
+                            quotient);
+    remainder = createSelect(builder, loc, type, take, reducedRemainder,
                              remainder);
   }
   return DivRemValues{quotient, remainder};

@@ -122,20 +122,14 @@ _attn_fwd_persistent:
 		s_mul_hi_u32 s24, s1, s24
 		s_mul_i32 s25, s24, s23
 		s_sub_i32 s1, s1, s25
-		s_cmp_ge_u32 s1, s23
-		s_cselect_b32 s25, 1, 0
-		s_add_i32 s26, s24, 1
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s24, s26, s24
-		s_cselect_b32 s25, 1, 0
+		s_add_i32 s25, s24, 1
 		s_sub_i32 s26, s1, s23
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s1, s26, s1
 		s_cmp_ge_u32 s1, s23
-		s_cselect_b32 s25, 1, 0
-		s_add_i32 s26, s24, 1
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s24, s26, s24
+		s_cselect_b32 s24, s25, s24
+		s_cselect_b32 s1, s26, s1
+		s_add_i32 s25, s24, 1
+		s_cmp_ge_u32 s1, s23
+		s_cselect_b32 s24, s25, s24
 		s_cselect_b32 s25, 1, 0
 		s_xor_b32 s24, s24, s22
 		s_sub_i32 s22, s24, s22

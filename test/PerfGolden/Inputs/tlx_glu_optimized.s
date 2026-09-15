@@ -77,20 +77,14 @@ tlx_addmm_glu_kernel_optimized:
 		s_mul_hi_u32 s23, s20, s23
 		s_mul_i32 s24, s23, s1
 		s_sub_i32 s20, s20, s24
-		s_cmp_ge_u32 s20, s1
-		s_cselect_b32 s24, 1, 0
-		s_add_i32 s25, s23, 1
-		s_cmp_lg_u32 s24, 0
-		s_cselect_b32 s23, s25, s23
-		s_cselect_b32 s24, 1, 0
+		s_add_i32 s24, s23, 1
 		s_sub_i32 s25, s20, s1
-		s_cmp_lg_u32 s24, 0
-		s_cselect_b32 s20, s25, s20
 		s_cmp_ge_u32 s20, s1
-		s_cselect_b32 s24, 1, 0
-		s_add_i32 s25, s23, 1
-		s_cmp_lg_u32 s24, 0
-		s_cselect_b32 s23, s25, s23
+		s_cselect_b32 s23, s24, s23
+		s_cselect_b32 s20, s25, s20
+		s_add_i32 s24, s23, 1
+		s_cmp_ge_u32 s20, s1
+		s_cselect_b32 s23, s24, s23
 		s_cselect_b32 s24, 1, 0
 		s_xor_b32 s23, s23, s21
 		s_sub_i32 s21, s23, s21
@@ -123,17 +117,13 @@ tlx_addmm_glu_kernel_optimized:
 		s_mul_hi_u32 s23, s1, s23
 		s_mul_i32 s25, s23, s0
 		s_sub_i32 s1, s1, s25
+		s_sub_i32 s25, s1, s0
 		s_cmp_ge_u32 s1, s0
+		s_cselect_b32 s1, s25, s1
 		s_cselect_b32 s25, 1, 0
 		s_sub_i32 s26, s1, s0
-		s_cmp_lg_u32 s25, 0
-		s_cselect_b32 s1, s26, s1
-		s_cselect_b32 s25, 1, 0
 		s_cmp_ge_u32 s1, s0
-		s_cselect_b32 s26, 1, 0
-		s_sub_i32 s0, s1, s0
-		s_cmp_lg_u32 s26, 0
-		s_cselect_b32 s0, s0, s1
+		s_cselect_b32 s0, s26, s1
 		s_cselect_b32 s1, 1, 0
 		s_xor_b32 s0, s0, s16
 		s_sub_i32 s0, s0, s16

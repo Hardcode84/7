@@ -51,20 +51,14 @@ _attn_fwd_async_prefetch:
 		s_mul_hi_u32 s26, s1, s26
 		s_mul_i32 s28, s26, s24
 		s_sub_i32 s1, s1, s28
-		s_cmp_ge_u32 s1, s24
-		s_cselect_b32 s28, 1, 0
-		s_add_i32 s29, s26, 1
-		s_cmp_lg_u32 s28, 0
-		s_cselect_b32 s26, s29, s26
-		s_cselect_b32 s28, 1, 0
+		s_add_i32 s28, s26, 1
 		s_sub_i32 s29, s1, s24
-		s_cmp_lg_u32 s28, 0
-		s_cselect_b32 s1, s29, s1
 		s_cmp_ge_u32 s1, s24
-		s_cselect_b32 s28, 1, 0
-		s_add_i32 s29, s26, 1
-		s_cmp_lg_u32 s28, 0
-		s_cselect_b32 s26, s29, s26
+		s_cselect_b32 s26, s28, s26
+		s_cselect_b32 s1, s29, s1
+		s_add_i32 s28, s26, 1
+		s_cmp_ge_u32 s1, s24
+		s_cselect_b32 s26, s28, s26
 		s_cselect_b32 s28, 1, 0
 		s_xor_b32 s26, s26, s17
 		s_sub_i32 s17, s26, s17
