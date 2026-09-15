@@ -616,8 +616,6 @@ def matmul_calibrator_command(
         cmd.append("--hpl")
     if spec.streamk_workers:
         cmd.extend(["--streamk-workers", str(spec.streamk_workers)])
-    if args.multi_wave_specialize:
-        cmd.append("--multi-wave-specialize")
     if args.rocm_lib:
         cmd.extend(["--rocm-lib", args.rocm_lib])
     cmd.extend(args.extra_calibrator_arg)
@@ -969,7 +967,6 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--keep-going", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-rebuild", action="store_true")
-    parser.add_argument("--multi-wave-specialize", action="store_true")
 
 
 def add_tool_arguments(parser: argparse.ArgumentParser) -> None:
