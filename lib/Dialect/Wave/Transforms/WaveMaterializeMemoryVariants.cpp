@@ -51,6 +51,10 @@ static LogicalResult duplicateAccess(IRRewriter &rewriter, Operation *access,
   if (access->getNumRegions() != 0)
     return access->emitOpError(
         "effectful materialization alternative must be region-free");
+  if (!wouldOpBeTriviallyDead(access) &&
+      !access->hasTrait<OpTrait::wave::DiscardableMemoryOp>())
+    return access->emitOpError(
+        "memory alternatives require discardable effects");
   SmallVector<SmallVector<Value>> resultAlternatives(access->getNumResults());
   rewriter.setInsertionPoint(access);
   for (unsigned alternative : llvm::seq(choice.getChoices().size())) {
@@ -70,8 +74,6 @@ static LogicalResult duplicateAccess(IRRewriter &rewriter, Operation *access,
     auto resultChoice = MaterializationVariantsOp::create(
         rewriter, access->getLoc(), result.getType(), alternatives);
     replacements.push_back(resultChoice.getResult());
-    if (isa<MemTokenType>(result.getType()))
-      MaterializationAnchorOp::create(rewriter, access->getLoc(), resultChoice);
   }
   rewriter.replaceOp(access, replacements);
   return success();

@@ -3078,8 +3078,6 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
   return llvm::TypeSwitch<Operation *, LogicalResult>(op)
       .Case<MaterializationVariantsOp>(
           [&](auto choice) { return selectMaterializationVariants(choice); })
-      .Case<MaterializationAnchorOp>(
-          [&](auto anchor) { return selectMaterializationAnchor(anchor); })
       .Case<arith::ConstantIntOp>([&](auto o) { return selectConstant(o); })
       .Case<arith::ConstantOp>([&](auto o) { return selectConstant(o); })
       .Case<ConstantOp>([&](auto o) { return selectConstant(o); })
@@ -3604,14 +3602,6 @@ LogicalResult WaveAMDMachineSelector::selectSplat(SplatOp op) {
 // The selected value passes straight through.
 LogicalResult WaveAMDMachineSelector::selectAssume(AssumeOp op) {
   values[op.getResult()] = expect(op.getValue(), op);
-  eraseIfTopLevel(op);
-  return success();
-}
-
-LogicalResult WaveAMDMachineSelector::selectMaterializationAnchor(
-    MaterializationAnchorOp op) {
-  waveamdmachine::MaterializationAnchorOp::create(builder, op.getLoc(),
-                                                  expect(op.getToken(), op));
   eraseIfTopLevel(op);
   return success();
 }

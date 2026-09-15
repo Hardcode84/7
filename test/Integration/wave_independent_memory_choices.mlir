@@ -2,11 +2,17 @@
 // RUN: wave-opt %t.once --wave-materialize-memory-variants -o %t.twice
 // RUN: diff %t.once %t.twice
 // RUN: FileCheck %s < %t.once
+// RUN: wave-opt %t.once --waveamd-to-machine --waveamd-expand-materialization-variants=max-candidates=1 \
+// RUN:   --waveamd-collapse-materialization-variants --canonicalize | FileCheck %s --check-prefix=CLEAN
+// CLEAN-LABEL: func.func @independent_address_dependencies
+// CLEAN-COUNT-2: waveamdmachine.buffer_store_b32
+// CLEAN-NOT: waveamdmachine.buffer_store_b32
+// CLEAN: waveamdmachine.s_endpgm
 // RUN: wave-opt %s --wave-materialize-memory-variants --canonicalize --cse --waveamd-to-machine \
 // RUN:   --waveamd-abi-lowering --waveamd-buffer-rsrc-to-tuples --canonicalize --cse --waveamd-expand-materialization-variants --canonicalize --cse \
 // RUN:   -o %t.expanded
 // RUN: FileCheck %s --check-prefix=EXPAND-STORES \
-// RUN:   --implicit-check-not=materialization_variants --implicit-check-not=materialization_anchor < %t.expanded
+// RUN:   --implicit-check-not=materialization_variants < %t.expanded
 // RUN: FileCheck %s --check-prefix=EXPAND-CANDIDATES < %t.expanded
 
 // RUN: wave-opt %t.expanded --waveamd-machine-schedule=apply-schedule --waveamd-collapse-materialization-variants -o %t.winner
@@ -21,11 +27,9 @@
 // CHECK: [[FIRST0:%.*]] = wave.store
 // CHECK: [[FIRST1:%.*]] = wave.store
 // CHECK: [[FIRST:%.*]] = wave.materialization_variants [[FIRST0]], [[FIRST1]]
-// CHECK: wave.materialization_anchor [[FIRST]]
 // CHECK: [[SECOND0:%.*]] = wave.store {{.*}} after [[FIRST]]
 // CHECK: [[SECOND1:%.*]] = wave.store {{.*}} after [[FIRST]]
 // CHECK: [[SECOND:%.*]] = wave.materialization_variants [[SECOND0]], [[SECOND1]]
-// CHECK: wave.materialization_anchor [[SECOND]]
 // EXPAND-STORES-COUNT-8: waveamdmachine.buffer_store_b32
 // EXPAND-CANDIDATES-COUNT-4: waveamdmachine.candidate_yield
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {

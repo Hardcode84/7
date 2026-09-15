@@ -412,7 +412,6 @@ public:
   LogicalResult selectWorkitemId(WorkitemIdOp op);
   LogicalResult selectSplat(SplatOp op);
   LogicalResult selectAssume(AssumeOp op);
-  LogicalResult selectMaterializationAnchor(MaterializationAnchorOp op);
   LogicalResult selectMaterializationVariants(MaterializationVariantsOp op);
   LogicalResult selectURecip(URecipOp op);
   LogicalResult selectCtz(CtzOp op);

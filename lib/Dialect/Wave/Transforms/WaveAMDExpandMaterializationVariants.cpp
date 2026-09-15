@@ -443,54 +443,9 @@ static LogicalResult checkBlockExits(Block &block) {
   return success();
 }
 
-static LogicalResult
-eraseUnusedEffects(llvm::SetVector<Operation *> &rejected) {
-  while (!rejected.empty()) {
-    bool erased = false;
-    for (Operation *op : llvm::to_vector(rejected)) {
-      if (!op->use_empty())
-        continue;
-      rejected.remove(op);
-      op->erase();
-      erased = true;
-    }
-    if (!erased)
-      return emitError(rejected.front()->getLoc())
-             << "rejected materialization effects retain a live use";
-  }
-  return success();
-}
-
-static LogicalResult
-eraseRejectedEffects(const CandidateScope &scope,
-                     ArrayRef<unsigned> dimensionSelections, Region &region,
-                     const IRMapping &mapping) {
-  llvm::DenseSet<Operation *> liveOperations;
-  region.walk([&](Operation *op) { liveOperations.insert(op); });
-
-  llvm::SetVector<Operation *> rejected;
-  for (auto [dimension, alternatives] :
-       llvm::enumerate(scope.dimensionEffectProducers)) {
-    unsigned selection = dimensionSelections[dimension];
-    for (auto [alternative, producers] : llvm::enumerate(alternatives)) {
-      if (alternative == selection)
-        continue;
-      for (Operation *producer : producers) {
-        Operation *clone = mapping.lookupOrNull(producer);
-        if (!clone)
-          return producer->emitOpError(
-              "effectful alternative is outside its candidate scope");
-        if (liveOperations.contains(clone))
-          rejected.insert(clone);
-      }
-    }
-  }
-  return eraseUnusedEffects(rejected);
-}
-
-static LogicalResult populateCandidate(const CandidateScope &scope,
-                                       ArrayRef<unsigned> dimensionSelections,
-                                       Region &region) {
+static void populateCandidate(const CandidateScope &scope,
+                              ArrayRef<unsigned> dimensionSelections,
+                              Region &region) {
   IRMapping mapping;
   mapping.map(scope.inputs, region.front().getArguments());
   OpBuilder builder = OpBuilder::atBlockEnd(&region.front());
@@ -507,22 +462,16 @@ static LogicalResult populateCandidate(const CandidateScope &scope,
     choice.erase();
   }
 
-  region.walk([](MaterializationAnchorOp anchor) { anchor.erase(); });
   SmallVector<Value> outputs;
   for (Value value : scope.outputs)
     outputs.push_back(mapping.lookup(value));
   CandidateYieldOp::create(builder, scope.operations.back()->getLoc(), outputs,
                            IntegerAttr{});
-
   IRRewriter rewriter(builder.getContext());
   eliminateTriviallyDeadOps(rewriter, region);
-  if (failed(eraseRejectedEffects(scope, dimensionSelections, region, mapping)))
-    return failure();
-  eliminateTriviallyDeadOps(rewriter, region);
-  return success();
 }
 
-static LogicalResult expandScope(CandidateScope &scope) {
+static void expandScope(CandidateScope &scope) {
   collectScopeValues(scope);
   Operation *first = scope.operations.front();
   OpBuilder builder(first);
@@ -539,21 +488,16 @@ static LogicalResult expandScope(CandidateScope &scope) {
       block->addArgument(input.getType(), input.getLoc());
   }
   // Shared input use lists stay fixed while workers clone private regions.
-  std::atomic<bool> failedCandidate = false;
   parallelFor(first->getContext(), 0, scope.assignments.size(),
               [&](size_t ordinal) {
-                if (failed(populateCandidate(scope, scope.assignments[ordinal],
-                                             wrapper.getCandidates()[ordinal])))
-                  failedCandidate.store(true, std::memory_order_relaxed);
+                populateCandidate(scope, scope.assignments[ordinal],
+                                  wrapper.getCandidates()[ordinal]);
               });
-  if (failedCandidate.load(std::memory_order_relaxed))
-    return failure();
   for (auto [source, result] :
        llvm::zip_equal(scope.outputs, wrapper.getResults()))
     source.replaceAllUsesWith(result);
   for (Operation *op : llvm::reverse(scope.operations))
     op->erase();
-  return success();
 }
 
 static LogicalResult expandScopes(unsigned maxCandidates,
@@ -563,8 +507,7 @@ static LogicalResult expandScopes(unsigned maxCandidates,
     if (failed(checkScope(maxCandidates, scope, choiceEffects)))
       return failure();
   for (CandidateScope &scope : scopes)
-    if (failed(expandScope(scope)))
-      return failure();
+    expandScope(scope);
   return success();
 }
 
@@ -611,8 +554,6 @@ struct WaveAMDExpandMaterializationVariantsPass
     }
     if (failed(expandScopes(maxCandidates, scopes, choiceEffects)))
       return signalPassFailure();
-    getOperation()->walk(
-        [](MaterializationAnchorOp anchor) { anchor.erase(); });
   }
 };
 } // namespace
@@ -622,8 +563,11 @@ void mlir::wave::registerWaveMaterializationPipelines() {
       "waveamd-cleanup-materialization-variants",
       "Clean isolated materialization candidate bodies", [](OpPassManager &pm) {
         OpPassManager &nested = pm.nest<MaterializationCandidatesOp>();
-        nested.addPass(createRemoveDeadValuesPass());
-        nested.addPass(createCSEPass());
-        nested.addPass(createCanonicalizerPass());
+        nested.addPass(createCompositeFixedPointPass(
+            "WaveMaterializationCleanup", [](OpPassManager &cleanup) {
+              cleanup.addPass(createRemoveDeadValuesPass());
+              cleanup.addPass(createCanonicalizerPass());
+              cleanup.addPass(createCSEPass());
+            }));
       });
 }

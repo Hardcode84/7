@@ -1973,17 +1973,6 @@ def WaveAMDMachine_MaterializationVariantsOp : WaveAMDMachine_Op<"materializatio
   let hasCanonicalizer = 1;
 }
 
-def WaveAMDMachine_MaterializationAnchorOp : WaveAMDMachine_Op<"materialization_anchor", [
-    MemoryEffects<[MemWrite]>]> {
-  let summary = "keep a materialization token choice live until expansion";
-  let description = [{
-    Temporary token use for memory materialization. Candidate expansion removes
-    this operation after it resolves the choices. No runtime effect is emitted.
-  }];
-  let arguments = (ins WaveAMDMachine_MemToken:$token);
-  let assemblyFormat = "$token attr-dict `:` type($token)";
-}
-
 def WaveAMDMachine_CandidateYieldOp : WaveAMDMachine_Op<"candidate_yield", [
   Pure, ReturnLike, Terminator,
   ParentOneOf<["MaterializationCandidatesOp"]>,

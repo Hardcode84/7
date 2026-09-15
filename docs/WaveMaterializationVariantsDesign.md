@@ -68,15 +68,18 @@ effects. Results that describe the same alternative effect, including its token,
 must select that effect consistently. This relationship follows the effect
 producers, not an arbitrary group identifier or matching operand positions.
 A dependent memory operation can still have an independent address choice.
+Access duplication requires removable effects. Reject calls and atomics that
+do not provide this contract.
 
 Prerequisite effects are not owned by an alternative merely because its token
 chain reaches them. Selecting one load must not delete a required preceding
 store. Removing an unselected memory operation must preserve required history
 and all effects used by the retained program.
 
-Temporary materialization anchors keep generated token choices alive through
-common cleanup. Expansion removes the anchors after resolving those choices.
-Anchors have no runtime effect.
+Token consumers keep required memory choices live. After expansion resolves
+choices, canonicalization removes unobserved stores, DMA, and dead token
+recurrences. Expansion has no special effect-erasure rule. Run candidate cleanup
+before scheduling so scores exclude dead work.
 
 ## Search scopes
 
@@ -147,8 +150,10 @@ Expansion occurs after common machine optimizations and before scheduling.
 Every scheduled candidate is fully specialized. Functions without choices need
 no candidate wrapper or cloning.
 
-Candidate cleanup uses ordinary dead-value removal, common-subexpression
-elimination, and canonicalization. Nesting cleanup on isolated wrappers permits
+Candidate cleanup uses the upstream composite fixed-point pass. It repeats
+dead-value removal, canonicalization, and common-subexpression elimination.
+When canonicalization removes a memory user, the next iteration can remove
+its dead loop carries. The upstream iteration limit applies. Nesting cleanup on isolated wrappers permits
 parallel work on independent wrappers. A pass rooted on a wrapper preserves that
 root's input and result contract; changes to the shared signature require an
 enclosing structural rewrite. Transformations must not move candidate-dependent
@@ -200,5 +205,5 @@ ignored when another candidate succeeds. A comparison requires valid scores;
 a single remaining candidate needs no comparison. If the selected code fails
 allocation or emission, compilation fails rather than retrying losing candidates.
 
-Value choices, candidate wrappers, yields, and anchors are resolved before final
+Value choices, candidate wrappers, and yields are resolved before final
 allocation and emission. The result follows the ordinary machine-code pipeline.

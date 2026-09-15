@@ -52,17 +52,6 @@ def Wave_MaterializationVariantsOp : Wave_Op<"materialization_variants", [
   let hasCanonicalizer = 1;
 }
 
-def Wave_MaterializationAnchorOp : Wave_Op<"materialization_anchor", [
-    MemoryEffects<[MemWrite]>]> {
-  let summary = "keep a materialization token choice live until expansion";
-  let description = [{
-    Temporary token use for memory materialization. Candidate expansion removes
-    this operation after it resolves the choices. No runtime effect is emitted.
-  }];
-  let arguments = (ins Wave_MemToken:$token);
-  let assemblyFormat = "$token attr-dict `:` type($token)";
-}
-
 def Wave_ConstantOp : Wave_Op<"constant", [
     ConstantLike, Pure,
     DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>]> {
