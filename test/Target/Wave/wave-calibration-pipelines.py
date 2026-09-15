@@ -2893,7 +2893,6 @@ def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
         [
             "--kernels=f16",
             "--rand-int",
-            "--multi-wave-specialize",
             "--skip-rebuild",
             "--dry-run",
         ]
@@ -2906,10 +2905,13 @@ def check_matmul_perf_sweep_rand_int_forwarding(perf_sweep) -> None:
         "--rand-int" in cmd,
         "perf sweep command missing --rand-int",
     )
+    _, unknown = perf_sweep.build_argparser().parse_known_args(
+        ["--multi-wave-specialize"]
+    )
     require(
         "matmul_perf_sweep_rand_int_forwarding",
-        "--multi-wave-specialize" in cmd,
-        "perf sweep command missing specialization flag",
+        unknown == ["--multi-wave-specialize"],
+        "perf sweep still exposes forced multi-wave specialization",
     )
     hpl_args = perf_sweep.build_argparser().parse_args(
         ["--kernels=f16", "--hpl", "--skip-rebuild", "--dry-run"]
