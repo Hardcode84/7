@@ -37,7 +37,9 @@ else:
     config.excludes = [*config.excludes, "python"]
 
 config.test_source_root = str(Path(__file__).parent)
-config.test_exec_root = str(Path(config.wave_mlir_obj_root) / "test")
+config.test_exec_root = lit_config.params.get(
+    "wave_test_exec_root", str(Path(config.wave_mlir_obj_root) / "test")
+)
 
 _simulator = Path(config.wave_mlir_obj_root) / "simulator"
 if (_simulator / "sdk-venv/bin/rocm-sdk").is_file() and (

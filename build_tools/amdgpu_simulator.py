@@ -182,6 +182,8 @@ def run_test(
         "-sv",
         "-j",
         "1",
+        "-D",
+        f"wave_test_exec_root={log_dir / 'lit-output'}",
         "-o",
         str(report),
         *(f"--pass-env={name}" for name in PASS_ENV),
