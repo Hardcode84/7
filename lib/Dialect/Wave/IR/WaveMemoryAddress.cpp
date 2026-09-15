@@ -21,6 +21,7 @@
 #include "llvm/Support/CheckedArithmetic.h"
 
 #include <array>
+#include <numeric>
 
 using namespace mlir;
 using namespace mlir::wave;
@@ -469,7 +470,7 @@ static std::optional<TruncatingTerm> matchTruncatingTerm(sym::AddTerm addend) {
     return std::nullopt;
   std::optional<int64_t> signedCoefficient =
       llvm::checkedMul(*addCoefficient, outer->coefficient);
-  if (!signedCoefficient || *signedCoefficient >= 0)
+  if (!signedCoefficient || *signedCoefficient == 0)
     return std::nullopt;
   sym::ExprView trunc(outer->trunc);
   return TruncatingTerm{std::move(outer->factors),
@@ -483,6 +484,8 @@ static std::optional<TruncatingTerm> matchTruncatingTerm(sym::AddTerm addend) {
 static FailureOr<std::optional<RemainderOperands>>
 buildFlooredRemainderOperands(sym::Store &store, sym::ExprView argument,
                               TruncatingTerm &term) {
+  if (term.signedCoefficient >= 0)
+    return std::optional<RemainderOperands>{};
   FailureOr<sym::ExprHandle> numerator = failure();
   FailureOr<sym::ExprHandle> denominator = failure();
   for (sym::MulFactor &outer : term.outerFactors) {
@@ -565,6 +568,7 @@ buildProductRemainderOperands(sym::Store &store, sym::ExprView argument,
   splitProductFactors(argument, numeratorFactors, denominatorFactors);
   if (denominatorFactors.empty() ||
       !consumeDenominatorFactors(term.outerFactors, denominatorFactors) ||
+      term.signedCoefficient >= 0 ||
       term.signedCoefficient % coefficient->denominator != 0)
     return std::optional<RemainderOperands>{};
   int64_t scaleCoefficient = term.signedCoefficient / coefficient->denominator;
@@ -633,10 +637,143 @@ buildRemainderResidual(sym::Store &store, sym::ExprHandle expression,
 }
 
 static FailureOr<std::optional<TruncatingRemainder>>
+matchCombinedTruncatingRemainderForQuotient(
+    sym::Store &store, sym::ExprHandle expression, sym::ExprView sum,
+    sym::ExprHandle trunc) {
+  SmallVector<TruncatingTerm> terms;
+  for (uint32_t index = 0; index < sum.getAddTermCount(); ++index) {
+    std::optional<TruncatingTerm> term =
+        matchTruncatingTerm(sum.getAddTerm(index));
+    if (term && term->trunc == trunc)
+      terms.push_back(std::move(*term));
+  }
+  if (terms.size() < 2)
+    return std::optional<TruncatingRemainder>{};
+
+  sym::ExprView argument(terms.front().quotient);
+  if (argument.getKind() != sym::ExprKind::Mul)
+    return std::optional<TruncatingRemainder>{};
+  std::optional<sym::RationalLiteral> coefficient =
+      getRationalCoefficient(argument.getMulCoefficient());
+  if (!coefficient || coefficient->denominator <= 0)
+    return std::optional<TruncatingRemainder>{};
+  SmallVector<sym::MulFactor> numeratorFactors;
+  SmallVector<sym::MulFactor> denominatorFactors;
+  splitProductFactors(argument, numeratorFactors, denominatorFactors);
+  if (denominatorFactors.empty())
+    return std::optional<TruncatingRemainder>{};
+  FailureOr<sym::ExprHandle> numerator =
+      buildProduct(store, coefficient->numerator, numeratorFactors);
+  FailureOr<sym::ExprHandle> denominator =
+      buildProduct(store, coefficient->denominator, denominatorFactors);
+  SmallVector<sym::MulFactor> commonFactors = terms.front().outerFactors;
+  for (const TruncatingTerm &term : ArrayRef(terms).drop_front()) {
+    for (sym::MulFactor &common : commonFactors) {
+      auto found = llvm::find_if(
+          term.outerFactors, [&](sym::MulFactor factor) {
+            return factor.base == common.base;
+          });
+      common.exponent = found == term.outerFactors.end()
+                            ? 0
+                            : std::min(common.exponent, found->exponent);
+    }
+    llvm::erase_if(commonFactors,
+                   [](sym::MulFactor factor) { return factor.exponent == 0; });
+  }
+  int64_t commonCoefficient = 0;
+  for (const TruncatingTerm &term : terms) {
+    if (term.signedCoefficient == std::numeric_limits<int64_t>::min())
+      return std::optional<TruncatingRemainder>{};
+    commonCoefficient =
+        std::gcd(commonCoefficient, std::abs(term.signedCoefficient));
+  }
+  FailureOr<sym::ExprHandle> commonScale =
+      buildProduct(store, commonCoefficient, commonFactors);
+  FailureOr<sym::ExprHandle> reducedMultiplier =
+      sym::composeExprInt(store, 0);
+  FailureOr<sym::ExprHandle> signedTerm = sym::composeExprInt(store, 0);
+  for (const TruncatingTerm &term : terms) {
+    SmallVector<sym::MulFactor> remaining = term.outerFactors;
+    for (sym::MulFactor common : commonFactors) {
+      auto found = llvm::find_if(remaining, [&](sym::MulFactor factor) {
+        return factor.base == common.base;
+      });
+      if (found == remaining.end() || found->exponent < common.exponent)
+        return failure();
+      found->exponent -= common.exponent;
+    }
+    llvm::erase_if(remaining,
+                   [](sym::MulFactor factor) { return factor.exponent == 0; });
+    FailureOr<sym::ExprHandle> termMultiplier = buildProduct(
+        store, term.signedCoefficient / commonCoefficient, remaining);
+    FailureOr<sym::ExprHandle> addend = sym::composeExprBinary(
+        store, term.addend.coefficient, sym::ExprBinaryOp::Mul,
+        term.addend.term);
+    if (failed(reducedMultiplier) || failed(termMultiplier) ||
+        failed(signedTerm) || failed(addend))
+      return failure();
+    reducedMultiplier = sym::composeExprBinary(
+        store, *reducedMultiplier, sym::ExprBinaryOp::Add, *termMultiplier);
+    signedTerm = sym::composeExprBinary(store, *signedTerm,
+                                        sym::ExprBinaryOp::Add, *addend);
+  }
+  if (failed(numerator) || failed(denominator) || failed(commonScale) ||
+      failed(reducedMultiplier) || failed(signedTerm))
+    return failure();
+
+  FailureOr<sym::ExprHandle> negativeReduced =
+      sym::composeExprNeg(store, *reducedMultiplier);
+  FailureOr<sym::ExprHandle> difference =
+      failed(negativeReduced)
+          ? FailureOr<sym::ExprHandle>(failure())
+          : sym::composeExprBinary(store, *negativeReduced,
+                                   sym::ExprBinaryOp::Sub, *denominator);
+  if (failed(difference))
+    return failure();
+  difference = sym::simplifyExpr(store, *difference);
+  if (failed(difference))
+    return failure();
+  if (getIntegralLiteral(*difference) != 0)
+    return std::optional<TruncatingRemainder>{};
+
+  RemainderOperands operands{*numerator, *denominator, *commonScale};
+  FailureOr<sym::ExprHandle> residual =
+      buildRemainderResidual(store, expression, operands, *signedTerm);
+  if (failed(residual))
+    return failure();
+  return std::optional<TruncatingRemainder>{TruncatingRemainder{
+      operands.numerator, operands.denominator, operands.scale, *residual,
+      terms.front().quotient, terms.front().floored}};
+}
+
+static FailureOr<std::optional<TruncatingRemainder>>
+matchCombinedTruncatingRemainder(sym::Store &store, sym::ExprHandle expression,
+                                 sym::ExprView sum) {
+  SmallVector<sym::ExprHandle> tried;
+  for (uint32_t index = 0; index < sum.getAddTermCount(); ++index) {
+    std::optional<TruncatingTerm> term =
+        matchTruncatingTerm(sum.getAddTerm(index));
+    if (!term || llvm::is_contained(tried, term->trunc))
+      continue;
+    tried.push_back(term->trunc);
+    FailureOr<std::optional<TruncatingRemainder>> matched =
+        matchCombinedTruncatingRemainderForQuotient(
+            store, expression, sum, term->trunc);
+    if (failed(matched) || *matched)
+      return matched;
+  }
+  return std::optional<TruncatingRemainder>{};
+}
+
+static FailureOr<std::optional<TruncatingRemainder>>
 matchTruncatingRemainder(sym::Store &store, sym::ExprHandle expression) {
   sym::ExprView sum(expression);
   if (sum.getKind() != sym::ExprKind::Add)
     return std::optional<TruncatingRemainder>{};
+  FailureOr<std::optional<TruncatingRemainder>> combined =
+      matchCombinedTruncatingRemainder(store, expression, sum);
+  if (failed(combined) || *combined)
+    return combined;
   for (uint32_t index = 0; index < sum.getAddTermCount(); ++index) {
     std::optional<TruncatingTerm> term =
         matchTruncatingTerm(sum.getAddTerm(index));
@@ -1448,9 +1585,13 @@ struct MemoryTransactionAddressMaterializer::Impl {
     bool fixedDenominator =
         succeeded(denominator) &&
         (*denominator || isI32Input(transaction, remainder.denominator));
-    return fixedNumerator && fixedDenominator &&
-           !containsDynamicTrunc(remainder.residual) &&
-           !containsDynamicTrunc(remainder.scale);
+    if (!fixedNumerator || !fixedDenominator)
+      return false;
+    FailureOr<bool> residual =
+        canMaterializeDynamicI32(transaction, remainder.residual);
+    if (failed(residual) || !*residual)
+      return residual;
+    return canMaterializeDynamicI32(transaction, remainder.scale);
   }
 
   FailureOr<bool> canMaterializeAddI32(const MemoryTransaction &transaction,
@@ -2036,21 +2177,32 @@ struct MemoryTransactionAddressMaterializer::Impl {
     return fields;
   }
 
-  LogicalResult appendTruncatingBufferSum(const MemoryTransaction &transaction,
-                                          const BufferAddressSum &sum,
-                                          const TruncatingRemainder &remainder,
-                                          BufferAddressFields &fields) {
-    FailureOr<sym::ExprHandle> group = sym::composeExprBinary(
-        store, sum.expression, sym::ExprBinaryOp::Sub, remainder.residual);
-    FailureOr<sym::ExprHandle> simplified =
-        failed(group) ? FailureOr<sym::ExprHandle>(failure())
-                      : sym::simplifyExpr(store, *group);
-    if (failed(simplified) ||
-        failed(appendBufferAddressSum(transaction, remainder.residual,
-                                      sum.scale, fields)))
-      return failure();
-    return appendClassifiedBufferExpr(transaction, *simplified, {}, sum.scale,
+  LogicalResult appendBufferAddressExpr(const MemoryTransaction &transaction,
+                                        const BufferAddressSum &sum,
+                                        BufferAddressFields &fields) {
+    sym::ExprHandle residual = sum.expression;
+    while (true) {
+      FailureOr<std::optional<TruncatingRemainder>> remainder =
+          ::matchTruncatingRemainder(store, residual);
+      if (failed(remainder))
+        return failure();
+      if (!*remainder)
+        return appendBufferAddressSum(transaction, residual, sum.scale,
                                       fields);
+      if ((**remainder).residual == residual)
+        return anchor->emitOpError(
+            "remainder decomposition did not remove its matched terms");
+      FailureOr<sym::ExprHandle> group = sym::composeExprBinary(
+          store, residual, sym::ExprBinaryOp::Sub, (**remainder).residual);
+      FailureOr<sym::ExprHandle> simplified =
+          failed(group) ? FailureOr<sym::ExprHandle>(failure())
+                        : sym::simplifyExpr(store, *group);
+      if (failed(simplified) ||
+          failed(appendClassifiedBufferExpr(transaction, *simplified, {},
+                                            sum.scale, fields)))
+        return failure();
+      residual = (**remainder).residual;
+    }
   }
 
   FailureOr<std::optional<BufferAddressFields>>
@@ -2078,16 +2230,8 @@ struct MemoryTransactionAddressMaterializer::Impl {
     std::optional<BufferAddressSum> sum = matchBufferAddressSum(expression);
     if (!sum)
       return std::optional<BufferAddressFields>{};
-    FailureOr<std::optional<TruncatingRemainder>> remainder =
-        ::matchTruncatingRemainder(store, sum->expression);
-    if (failed(remainder))
-      return failure();
     BufferAddressFields fields;
-    if (*remainder && failed(appendTruncatingBufferSum(transaction, *sum,
-                                                       **remainder, fields)))
-      return failure();
-    if (!*remainder && failed(appendBufferAddressSum(
-                           transaction, sum->expression, sum->scale, fields)))
+    if (failed(appendBufferAddressExpr(transaction, *sum, fields)))
       return failure();
     return finalizeBufferAddressFields(fields);
   }

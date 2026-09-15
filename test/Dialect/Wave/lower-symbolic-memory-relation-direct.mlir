@@ -197,3 +197,75 @@ func.func @signed_i32_wrapped_remainder_is_narrow(
       -> (!wave.simd<vector<1xf16>, 32>, !wave.mem.token)
   return %value : !wave.simd<vector<1xf16>, 32>
 }
+
+// -----
+
+// The signed divisor can be distributed into two coefficients by fixed-width
+// normalization. Combine the coefficients before matching the quotient term.
+// CHECK-LABEL: func.func @distributed_signed_i32_remainder_is_narrow(
+// CHECK: wave.binary remsi {{.*}} : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+// CHECK-NOT: wave.binary divsi
+// CHECK-NOT: wave.gather
+func.func @distributed_signed_i32_remainder_is_narrow(
+    %base: !wave.ptr<#waveamd.buffer, f16>, %origin: i32, %divisor: i32)
+    -> !wave.simd<vector<1xf16>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "item"
+      [#wave.pred<"item >= 0">, #wave.pred<"item <= 31">]
+      : !wave.simd<i32, 32>
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"8*Mod(2*(-2147483648 + Mod(2147483648 + origin + item, 4294967296) - Mod(2147483648 + divisor, 4294967296)*Trunc((-2147483648 + Mod(2147483648 + origin + item, 4294967296))/(-2147483648 + Mod(2147483648 + divisor, 4294967296))) + 2147483648*Trunc((-2147483648 + Mod(2147483648 + origin + item, 4294967296))/(-2147483648 + Mod(2147483648 + divisor, 4294967296))) + slot), 4294967296)">>
+      bindings ["item", "origin", "divisor"]
+      (%bounded_item, %origin, %divisor)
+      : (!wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>, i32, i32)
+      -> (!wave.simd<vector<1xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<1xf16>, 32>
+}
+
+// -----
+
+// Keep full division when distributed coefficients do not reconstruct the
+// divisor exactly.
+// CHECK-LABEL: func.func @inexact_distributed_signed_i32_remainder(
+// CHECK: wave.binary divsi
+func.func @inexact_distributed_signed_i32_remainder(
+    %base: !wave.ptr<#waveamd.buffer, f16>, %origin: i32, %divisor: i32)
+    -> !wave.simd<vector<1xf16>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "item"
+      [#wave.pred<"item >= 0">, #wave.pred<"item <= 31">]
+      : !wave.simd<i32, 32>
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"8*Mod(2*(-2147483648 + Mod(2147483648 + origin + item, 4294967296) - Mod(2147483648 + divisor, 4294967296)*Trunc((-2147483648 + Mod(2147483648 + origin + item, 4294967296))/(-2147483648 + Mod(2147483648 + divisor, 4294967296))) + 2147483647*Trunc((-2147483648 + Mod(2147483648 + origin + item, 4294967296))/(-2147483648 + Mod(2147483648 + divisor, 4294967296))) + slot), 4294967296)">>
+      bindings ["item", "origin", "divisor"]
+      (%bounded_item, %origin, %divisor)
+      : (!wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>, i32, i32)
+      -> (!wave.simd<vector<1xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<1xf16>, 32>
+}
+
+// -----
+
+// Decompose each independent quotient group before address-field projection.
+// CHECK-LABEL: func.func @multiple_distributed_signed_i32_remainders(
+// CHECK-COUNT-2: wave.binary remsi
+// CHECK-NOT: wave.binary divsi
+// CHECK-NOT: wave.gather
+func.func @multiple_distributed_signed_i32_remainders(
+    %base: !wave.ptr<#waveamd.buffer, f16>, %scale: i32, %x: i32, %d: i32,
+    %y: i32, %e: i32) -> !wave.simd<vector<1xf16>, 32>
+    attributes {wave.workgroup_size = array<i32: 32, 1, 1>} {
+  %item = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %bounded_item = wave.assume %item as "item"
+      [#wave.pred<"item >= 0">, #wave.pred<"item <= 31">]
+      : !wave.simd<i32, 32>
+  %value, %token = wave.gather %base mapping
+      <bit_offset = <"8*Mod(2*(-2147483648 - 2147483648*scale + scale*Mod(2147483648 + x + item, 4294967296) - scale*Mod(2147483648 + d, 4294967296)*Trunc((-2147483648 + Mod(2147483648 + x + item, 4294967296))/(-2147483648 + Mod(2147483648 + d, 4294967296))) + 2147483648*scale*Trunc((-2147483648 + Mod(2147483648 + x + item, 4294967296))/(-2147483648 + Mod(2147483648 + d, 4294967296))) + Mod(2147483648 + y + item, 4294967296) - Mod(2147483648 + e, 4294967296)*Trunc((-2147483648 + Mod(2147483648 + y + item, 4294967296))/(-2147483648 + Mod(2147483648 + e, 4294967296))) + 2147483648*Trunc((-2147483648 + Mod(2147483648 + y + item, 4294967296))/(-2147483648 + Mod(2147483648 + e, 4294967296))) + slot), 4294967296)">>
+      bindings ["item", "scale", "x", "d", "y", "e"]
+      (%bounded_item, %scale, %x, %d, %y, %e)
+      : (!wave.ptr<#waveamd.buffer, f16>, !wave.simd<i32, 32>, i32, i32,
+         i32, i32, i32) -> (!wave.simd<vector<1xf16>, 32>, !wave.mem.token)
+  return %value : !wave.simd<vector<1xf16>, 32>
+}
