@@ -16,6 +16,7 @@ module attributes {
 
 gpu.module @kernels {
   func.func @write_lane_pairs(%dst: !wave.ptr<#wave.global, i32>)
+      -> !wave.mem.token
       attributes {
         gpu.kernel,
         wave.kernel,
@@ -44,7 +45,7 @@ gpu.module @kernels {
         : (!wave.simd<vector<2xi32>, 64>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
         -> !wave.mem.token
-    return
+    return %token : !wave.mem.token
   }
 }
 

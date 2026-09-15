@@ -97,7 +97,7 @@ def add_host(mod, kernel_name="wmma_f16_matmul_tiled"):
                     )
                 )
             threads = host.constant(w.index_type(), 1024)
-            shared = host.constant(w.i32(), 65536)
+            shared = host.constant(w.i32(), 131072)
             host.launch(
                 "kernels",
                 kernel_name,

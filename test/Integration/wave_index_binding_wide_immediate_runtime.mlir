@@ -23,6 +23,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @index_binding_wide_immediate_runtime(
     %out: !wave.ptr<#wave.global, i32>)
+    -> !wave.mem.token
     attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
@@ -66,11 +67,12 @@ func.func @index_binding_wide_immediate_runtime(
       : (!wave.simd<i32, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %negative_written : !wave.mem.token
 }
 
 func.func @index_binding_narrow_u32_runtime(
     %out: !wave.ptr<#wave.global, i32>)
+    -> !wave.mem.token
     attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
@@ -116,6 +118,6 @@ func.func @index_binding_narrow_u32_runtime(
       : (!wave.simd<i32, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %lane_written : !wave.mem.token
 }
 }
