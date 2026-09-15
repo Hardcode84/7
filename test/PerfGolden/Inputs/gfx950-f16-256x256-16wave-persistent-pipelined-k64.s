@@ -47,7 +47,7 @@ gfx950_persistent_f16_gemm:
 		s_mov_b32 s21, s5
 		s_mov_b32 s22, s6
 		s_mov_b32 s23, s7
-		s_add_i32 s6, s0, -12
+		s_sub_i32 s6, s0, 12
 		s_add_i32 s7, s8, 1
 		s_lshl_b32 s8, s0, 11
 		s_add_i32 s11, s8, 0xffffa000
@@ -71,20 +71,20 @@ gfx950_persistent_f16_gemm:
 		v_add_u32_e32 v2, 0xffd00000, v1
 		s_lshl_b32 s9, s10, 22
 		s_add_i32 s0, s9, s0
-		v_add_u32_e32 v3, s0, v0
-		v_add_u32_e32 v0, 0xffd00000, v3
+		v_add_u32_e32 v0, s0, v0
+		v_add_u32_e32 v3, 0xffd00000, v0
 		v_add_u32_e32 v4, 0xffe00000, v1
-		v_add_u32_e32 v5, 0xffe00000, v3
+		v_add_u32_e32 v5, 0xffe00000, v0
 		v_add_u32_e32 v6, 0xfff00000, v1
-		v_add_u32_e32 v7, 0xfff00000, v3
+		v_add_u32_e32 v7, 0xfff00000, v0
 		v_add_u32_e32 v8, 0xffd00040, v1
-		v_add_u32_e32 v9, 0xffd00040, v3
+		v_add_u32_e32 v9, 0xffd00040, v0
 		v_add_u32_e32 v10, 0xffe00040, v1
-		v_add_u32_e32 v11, 0xffe00040, v3
+		v_add_u32_e32 v11, 0xffe00040, v0
 		v_add_u32_e32 v12, 0xfff00040, v1
-		v_add_u32_e32 v13, 0xfff00040, v3
+		v_add_u32_e32 v13, 0xfff00040, v0
 		v_add_u32_e32 v14, 64, v1
-		v_add_u32_e32 v15, 64, v3
+		v_add_u32_e32 v15, 64, v0
 		s_mov_b32 s16, s2
 		s_mov_b32 s17, s3
 		s_mov_b32 s20, s4
@@ -93,7 +93,7 @@ gfx950_persistent_f16_gemm:
 .Lgfx950_persistent_f16_gemm.loop_head_0:
 		s_cmp_ge_u32 s0, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_1
-		s_add_i32 s2, s0, -2
+		s_sub_i32 s2, s0, 2
 		s_lshl_b32 s2, s2, 12
 		s_add_i32 s2, s2, 0xfff
 		s_and_b32 s3, s0, 1
@@ -131,7 +131,7 @@ gfx950_persistent_f16_gemm:
 		s_nop 0
 		s_add_i32 m0, m0, 0x8000
 		s_nop 0
-		buffer_load_dwordx4 v0, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v3, s[20:23], 0 offen lds
 		s_nop 0
 		s_add_i32 m0, m0, 0xffffa000
 		s_nop 0
@@ -155,7 +155,7 @@ gfx950_persistent_f16_gemm:
 		s_nop 0
 		s_add_i32 m0, m0, 0x8000
 		s_nop 0
-		buffer_load_dwordx4 v3, s[20:23], 0 offen lds
+		buffer_load_dwordx4 v0, s[20:23], 0 offen lds
 		s_getreg_b32 s2, hwreg(HW_REG_IB_STS)
 		s_and_b32 s3, s2, 15
 		s_lshr_b32 s2, s2, 18
@@ -257,20 +257,13 @@ gfx950_persistent_f16_gemm:
 		s_mul_hi_u32 s2, s0, 0xaaaaaaab
 		s_lshr_b32 s2, s2, 1
 		s_mul_i32 s3, s2, 3
-		s_xor_b32 s3, s3, -1
-		s_add_i32 s3, s3, 1
-		s_add_i32 s3, s0, s3
+		s_sub_i32 s3, s0, s3
 		s_cmp_eq_u32 s3, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_7
 		s_add_i32 s3, s8, 1
 		v_mov_b64_e32 v[4:5], 0
 		v_mov_b64_e32 v[6:7], 0
-		s_lshl_b32 s4, 1, s0
-		s_cmp_eq_u32 s0, 0
-		s_mov_b32 s14, 1
-		s_mov_b32 s15, 0
-		s_cselect_b32 s0, 1, 0
-		s_lshl_b32 s5, s2, 13
+		s_lshl_b32 s4, s2, 13
 		v_and_b32_e32 v1, 63, v0
 		v_and_b32_e32 v0, 15, v1
 		v_lshlrev_b32_e32 v2, 6, v0
@@ -278,9 +271,14 @@ gfx950_persistent_f16_gemm:
 		v_lshrrev_b32_e32 v3, 1, v0
 		v_bitop3_b32 v3, v1, v3, 3 bitop3:0x78
 		v_lshlrev_b32_e32 v3, 4, v3
-		s_mov_b32 s8, s1
-		v_mov_b64_e32 v[8:9], 0
-		v_mov_b64_e32 v[10:11], 0
+		v_add3_u32 v8, s4, v2, v3
+		v_add_u32_e32 v2, 0xd000, v2
+		v_add_u32_e32 v9, v2, v3
+		s_lshl_b32 s4, 1, s0
+		s_cmp_eq_u32 s0, 0
+		s_mov_b32 s14, 1
+		s_mov_b32 s15, 0
+		s_mov_b32 s0, s1
 		v_mov_b64_e32 v[12:13], 0
 		v_mov_b64_e32 v[14:15], 0
 		v_mov_b64_e32 v[16:17], 0
@@ -325,202 +323,205 @@ gfx950_persistent_f16_gemm:
 		v_mov_b64_e32 v[94:95], 0
 		v_mov_b64_e32 v[96:97], 0
 		v_mov_b64_e32 v[98:99], 0
+		v_mov_b64_e32 v[100:101], 0
+		v_mov_b64_e32 v[102:103], 0
+		s_cselect_b32 s5, 1, 0
 .Lgfx950_persistent_f16_gemm.loop_head_3:
-		s_lshl_b32 s11, s8, 4
-		s_add_i32 s11, s11, 15
-		s_and_b32 s16, s8, 1
-		s_lshl_b32 s17, s16, 2
-		s_add_i32 s17, s17, 0x20000
-		v_mov_b32_e32 v100, s17
-		ds_read_b32 v101, v100
-		s_and_saveexec_b64 s[18:19], s[14:15]
+		s_lshl_b32 s8, s0, 4
+		s_add_i32 s8, s8, 15
+		s_and_b32 s11, s0, 1
+		s_lshl_b32 s11, s11, 2
+		s_add_i32 s11, s11, 0x20000
+		v_mov_b32_e32 v2, s11
+		ds_read_b32 v3, v2
+		s_and_saveexec_b64 s[16:17], s[14:15]
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s17, v101
-		s_cmp_lg_u32 s17, s11
+		v_readfirstlane_b32 s11, v3
+		s_cmp_lg_u32 s11, s8
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_8
 .Lgfx950_persistent_f16_gemm.loop_head_4:
-		ds_read_b32 v101, v100
+		ds_read_b32 v3, v2
 		s_sleep 1
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s17, v101
-		s_cmp_lg_u32 s17, s11
+		v_readfirstlane_b32 s11, v3
+		s_cmp_lg_u32 s11, s8
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_4
 .Lgfx950_persistent_f16_gemm.loop_exit_4:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_8
 .Lgfx950_persistent_f16_gemm.if_else_8:
 .Lgfx950_persistent_f16_gemm.if_end_8:
-		s_mov_b64 exec, s[18:19]
-		s_lshl_b32 s11, s16, 16
-		s_add_i32 s16, s5, s11
-		v_add3_u32 v101, s16, v2, v3
-		ds_read_b128 v[104:107], v101
-		ds_read_b128 v[108:111], v101 offset:2048
-		ds_read_b128 v[112:115], v101 offset:4096
-		ds_read_b128 v[116:119], v101 offset:6144
-		v_add3_u32 v102, s11, v2, v3
-		ds_read_b128 v[120:123], v102 offset:53248
-		ds_read_b128 v[124:127], v102 offset:55296
+		s_mov_b64 exec, s[16:17]
+		ds_read_b128 v[104:107], v8
+		ds_read_b128 v[108:111], v8 offset:2048
+		ds_read_b128 v[112:115], v8 offset:4096
+		ds_read_b128 v[116:119], v8 offset:6144
+		ds_read_b128 v[120:123], v9
+		ds_read_b128 v[124:127], v9 offset:2048
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[104:107], v[120:123], v[4:7]
-		v_mfma_f32_16x16x32_f16 v[28:31], v[108:111], v[120:123], v[28:31]
-		v_mfma_f32_16x16x32_f16 v[52:55], v[112:115], v[120:123], v[52:55]
-		v_mfma_f32_16x16x32_f16 v[76:79], v[116:119], v[120:123], v[76:79]
-		ds_read_b128 v[120:123], v102 offset:57344
+		v_mfma_f32_16x16x32_f16 v[32:35], v[108:111], v[120:123], v[32:35]
+		v_mfma_f32_16x16x32_f16 v[56:59], v[112:115], v[120:123], v[56:59]
+		v_mfma_f32_16x16x32_f16 v[80:83], v[116:119], v[120:123], v[80:83]
+		ds_read_b128 v[120:123], v9 offset:4096
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[8:11], v[104:107], v[124:127], v[8:11]
-		v_mfma_f32_16x16x32_f16 v[32:35], v[108:111], v[124:127], v[32:35]
-		v_mfma_f32_16x16x32_f16 v[56:59], v[112:115], v[124:127], v[56:59]
-		v_mfma_f32_16x16x32_f16 v[80:83], v[116:119], v[124:127], v[80:83]
-		ds_read_b128 v[124:127], v102 offset:59392
+		v_mfma_f32_16x16x32_f16 v[12:15], v[104:107], v[124:127], v[12:15]
+		v_mfma_f32_16x16x32_f16 v[36:39], v[108:111], v[124:127], v[36:39]
+		v_mfma_f32_16x16x32_f16 v[60:63], v[112:115], v[124:127], v[60:63]
+		v_mfma_f32_16x16x32_f16 v[84:87], v[116:119], v[124:127], v[84:87]
+		ds_read_b128 v[124:127], v9 offset:6144
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[12:15], v[104:107], v[120:123], v[12:15]
-		v_mfma_f32_16x16x32_f16 v[36:39], v[108:111], v[120:123], v[36:39]
-		v_mfma_f32_16x16x32_f16 v[60:63], v[112:115], v[120:123], v[60:63]
-		v_mfma_f32_16x16x32_f16 v[84:87], v[116:119], v[120:123], v[84:87]
-		ds_read_b128 v[120:123], v102 offset:61440
+		v_mfma_f32_16x16x32_f16 v[16:19], v[104:107], v[120:123], v[16:19]
+		v_mfma_f32_16x16x32_f16 v[40:43], v[108:111], v[120:123], v[40:43]
+		v_mfma_f32_16x16x32_f16 v[64:67], v[112:115], v[120:123], v[64:67]
+		v_mfma_f32_16x16x32_f16 v[88:91], v[116:119], v[120:123], v[88:91]
+		ds_read_b128 v[120:123], v9 offset:8192
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[16:19], v[104:107], v[124:127], v[16:19]
-		v_mfma_f32_16x16x32_f16 v[40:43], v[108:111], v[124:127], v[40:43]
-		v_mfma_f32_16x16x32_f16 v[64:67], v[112:115], v[124:127], v[64:67]
-		v_mfma_f32_16x16x32_f16 v[88:91], v[116:119], v[124:127], v[88:91]
-		ds_read_b128 v[124:127], v102 offset:63488
+		v_mfma_f32_16x16x32_f16 v[20:23], v[104:107], v[124:127], v[20:23]
+		v_mfma_f32_16x16x32_f16 v[44:47], v[108:111], v[124:127], v[44:47]
+		v_mfma_f32_16x16x32_f16 v[68:71], v[112:115], v[124:127], v[68:71]
+		v_mfma_f32_16x16x32_f16 v[92:95], v[116:119], v[124:127], v[92:95]
+		ds_read_b128 v[124:127], v9 offset:10240
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[20:23], v[104:107], v[120:123], v[20:23]
-		v_mfma_f32_16x16x32_f16 v[44:47], v[108:111], v[120:123], v[44:47]
-		v_mfma_f32_16x16x32_f16 v[68:71], v[112:115], v[120:123], v[68:71]
-		v_mfma_f32_16x16x32_f16 v[92:95], v[116:119], v[120:123], v[92:95]
+		v_mfma_f32_16x16x32_f16 v[24:27], v[104:107], v[120:123], v[24:27]
+		v_mfma_f32_16x16x32_f16 v[48:51], v[108:111], v[120:123], v[48:51]
+		v_mfma_f32_16x16x32_f16 v[72:75], v[112:115], v[120:123], v[72:75]
+		v_mfma_f32_16x16x32_f16 v[96:99], v[116:119], v[120:123], v[96:99]
 		s_waitcnt lgkmcnt(0)
-		v_mfma_f32_16x16x32_f16 v[96:99], v[116:119], v[124:127], v[96:99]
-		v_mfma_f32_16x16x32_f16 v[24:27], v[104:107], v[124:127], v[24:27]
-		v_mfma_f32_16x16x32_f16 v[48:51], v[108:111], v[124:127], v[48:51]
-		v_mfma_f32_16x16x32_f16 v[72:75], v[112:115], v[124:127], v[72:75]
-		ds_read_b128 v[104:107], v101 offset:1024
-		ds_read_b128 v[108:111], v101 offset:3072
-		ds_read_b128 v[112:115], v101 offset:5120
-		ds_read_b128 v[116:119], v101 offset:7168
-		ds_read_b128 v[120:123], v102 offset:54272
-		ds_read_b128 v[124:127], v102 offset:56320
-		s_cmp_lg_u32 s0, 0
+		v_mfma_f32_16x16x32_f16 v[100:103], v[116:119], v[124:127], v[100:103]
+		v_mfma_f32_16x16x32_f16 v[28:31], v[104:107], v[124:127], v[28:31]
+		v_mfma_f32_16x16x32_f16 v[52:55], v[108:111], v[124:127], v[52:55]
+		v_mfma_f32_16x16x32_f16 v[76:79], v[112:115], v[124:127], v[76:79]
+		ds_read_b128 v[104:107], v8 offset:1024
+		ds_read_b128 v[108:111], v8 offset:3072
+		ds_read_b128 v[112:115], v8 offset:5120
+		ds_read_b128 v[116:119], v8 offset:7168
+		ds_read_b128 v[120:123], v9 offset:1024
+		ds_read_b128 v[124:127], v9 offset:3072
+		s_cmp_lg_u32 s5, 0
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_9
-		s_cmp_lt_u32 s8, 2
+		s_cmp_lt_u32 s0, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_10
-		s_lshl_b32 s11, s8, 12
+		s_lshl_b32 s8, s0, 12
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_10
 .Lgfx950_persistent_f16_gemm.if_else_10:
-		s_mov_b32 s11, 0x1001
+		s_mov_b32 s8, 0x1001
 .Lgfx950_persistent_f16_gemm.if_end_10:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_9
 .Lgfx950_persistent_f16_gemm.if_else_9:
-		s_mov_b32 s11, s1
+		s_mov_b32 s8, s1
 .Lgfx950_persistent_f16_gemm.if_end_9:
-		s_add_i32 s11, s4, s11
-		s_lshl_b32 s16, s8, 12
-		s_add_i32 s16, s16, 0xfff
+		s_add_i32 s8, s4, s8
+		s_lshl_b32 s11, s0, 12
+		s_add_i32 s11, s11, 0xfff
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[104:107], v[120:123], v[4:7]
-		v_mfma_f32_16x16x32_f16 v[28:31], v[108:111], v[120:123], v[28:31]
-		v_mfma_f32_16x16x32_f16 v[52:55], v[112:115], v[120:123], v[52:55]
-		v_mfma_f32_16x16x32_f16 v[76:79], v[116:119], v[120:123], v[76:79]
-		ds_read_b128 v[120:123], v102 offset:58368
+		v_mfma_f32_16x16x32_f16 v[32:35], v[108:111], v[120:123], v[32:35]
+		v_mfma_f32_16x16x32_f16 v[56:59], v[112:115], v[120:123], v[56:59]
+		v_mfma_f32_16x16x32_f16 v[80:83], v[116:119], v[120:123], v[80:83]
+		ds_read_b128 v[120:123], v9 offset:5120
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[8:11], v[104:107], v[124:127], v[8:11]
-		v_mfma_f32_16x16x32_f16 v[32:35], v[108:111], v[124:127], v[32:35]
-		v_mfma_f32_16x16x32_f16 v[56:59], v[112:115], v[124:127], v[56:59]
-		v_mfma_f32_16x16x32_f16 v[80:83], v[116:119], v[124:127], v[80:83]
-		ds_read_b128 v[124:127], v102 offset:60416
+		v_mfma_f32_16x16x32_f16 v[12:15], v[104:107], v[124:127], v[12:15]
+		v_mfma_f32_16x16x32_f16 v[36:39], v[108:111], v[124:127], v[36:39]
+		v_mfma_f32_16x16x32_f16 v[60:63], v[112:115], v[124:127], v[60:63]
+		v_mfma_f32_16x16x32_f16 v[84:87], v[116:119], v[124:127], v[84:87]
+		ds_read_b128 v[124:127], v9 offset:7168
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[12:15], v[104:107], v[120:123], v[12:15]
-		v_mfma_f32_16x16x32_f16 v[36:39], v[108:111], v[120:123], v[36:39]
-		v_mfma_f32_16x16x32_f16 v[60:63], v[112:115], v[120:123], v[60:63]
-		v_mfma_f32_16x16x32_f16 v[84:87], v[116:119], v[120:123], v[84:87]
-		ds_read_b128 v[120:123], v102 offset:62464
+		v_mfma_f32_16x16x32_f16 v[16:19], v[104:107], v[120:123], v[16:19]
+		v_mfma_f32_16x16x32_f16 v[40:43], v[108:111], v[120:123], v[40:43]
+		v_mfma_f32_16x16x32_f16 v[64:67], v[112:115], v[120:123], v[64:67]
+		v_mfma_f32_16x16x32_f16 v[88:91], v[116:119], v[120:123], v[88:91]
+		ds_read_b128 v[120:123], v9 offset:9216
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[16:19], v[104:107], v[124:127], v[16:19]
-		v_mfma_f32_16x16x32_f16 v[40:43], v[108:111], v[124:127], v[40:43]
-		v_mfma_f32_16x16x32_f16 v[64:67], v[112:115], v[124:127], v[64:67]
-		v_mfma_f32_16x16x32_f16 v[88:91], v[116:119], v[124:127], v[88:91]
-		ds_read_b128 v[124:127], v102 offset:64512
+		v_mfma_f32_16x16x32_f16 v[20:23], v[104:107], v[124:127], v[20:23]
+		v_mfma_f32_16x16x32_f16 v[44:47], v[108:111], v[124:127], v[44:47]
+		v_mfma_f32_16x16x32_f16 v[68:71], v[112:115], v[124:127], v[68:71]
+		v_mfma_f32_16x16x32_f16 v[92:95], v[116:119], v[124:127], v[92:95]
+		ds_read_b128 v[124:127], v9 offset:11264
 		s_waitcnt lgkmcnt(1)
-		v_mfma_f32_16x16x32_f16 v[20:23], v[104:107], v[120:123], v[20:23]
-		v_mfma_f32_16x16x32_f16 v[44:47], v[108:111], v[120:123], v[44:47]
-		v_mfma_f32_16x16x32_f16 v[68:71], v[112:115], v[120:123], v[68:71]
-		v_mfma_f32_16x16x32_f16 v[92:95], v[116:119], v[120:123], v[92:95]
-		v_mov_b32_e32 v101, s11
+		v_mfma_f32_16x16x32_f16 v[24:27], v[104:107], v[120:123], v[24:27]
+		v_mfma_f32_16x16x32_f16 v[48:51], v[108:111], v[120:123], v[48:51]
+		v_mfma_f32_16x16x32_f16 v[72:75], v[112:115], v[120:123], v[72:75]
+		v_mfma_f32_16x16x32_f16 v[96:99], v[116:119], v[120:123], v[96:99]
+		v_mov_b32_e32 v3, s8
 		s_and_saveexec_b64 s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_else_2
 		s_waitcnt lgkmcnt(0)
-		ds_add_rtn_u32 v102, v100, v101 offset:8
+		ds_add_rtn_u32 v10, v2, v3 offset:8
 .Lgfx950_persistent_f16_gemm.exec_else_2:
 		s_andn2_b64 exec, s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_endif_2
-		v_mov_b32_e32 v102, 0
+		v_mov_b32_e32 v10, 0
 .Lgfx950_persistent_f16_gemm.exec_endif_2:
 		s_mov_b64 exec, s[24:25]
 		s_waitcnt lgkmcnt(0)
-		v_mfma_f32_16x16x32_f16 v[24:27], v[104:107], v[124:127], v[24:27]
-		v_mfma_f32_16x16x32_f16 v[48:51], v[108:111], v[124:127], v[48:51]
-		v_mfma_f32_16x16x32_f16 v[72:75], v[112:115], v[124:127], v[72:75]
-		v_mfma_f32_16x16x32_f16 v[96:99], v[116:119], v[124:127], v[96:99]
-		v_readfirstlane_b32 s17, v102
-		s_add_i32 s11, s17, s11
-		s_cmp_eq_u32 s11, s16
+		v_mfma_f32_16x16x32_f16 v[28:31], v[104:107], v[124:127], v[28:31]
+		v_mfma_f32_16x16x32_f16 v[52:55], v[108:111], v[124:127], v[52:55]
+		v_mfma_f32_16x16x32_f16 v[76:79], v[112:115], v[124:127], v[76:79]
+		v_mfma_f32_16x16x32_f16 v[100:103], v[116:119], v[124:127], v[100:103]
+		v_readfirstlane_b32 s16, v10
+		s_add_i32 s8, s16, s8
+		s_cmp_eq_u32 s8, s11
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_11
 		s_wakeup
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_11
 .Lgfx950_persistent_f16_gemm.if_else_11:
 .Lgfx950_persistent_f16_gemm.if_end_11:
-		s_add_i32 s8, s8, 1
-		s_cmp_lt_i32 s8, s3
+		v_add_u32_e32 v2, 0x10000, v8
+		v_and_b32_e32 v8, 0x1ffff, v2
+		v_add_u32_e32 v2, 0x10000, v9
+		v_and_b32_e32 v9, 0x1ffff, v2
+		s_add_i32 s0, s0, 1
+		s_cmp_lt_i32 s0, s3
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_3
 .Lgfx950_persistent_f16_gemm.loop_exit_3:
 		v_cvt_pk_f16_f32 v2, v4, v5
 		v_cvt_pk_f16_f32 v3, v6, v7
-		v_cvt_pk_f16_f32 v4, v8, v9
-		v_cvt_pk_f16_f32 v5, v10, v11
-		v_cvt_pk_f16_f32 v6, v12, v13
-		v_cvt_pk_f16_f32 v7, v14, v15
-		v_cvt_pk_f16_f32 v8, v16, v17
-		v_cvt_pk_f16_f32 v9, v18, v19
-		v_cvt_pk_f16_f32 v10, v20, v21
-		v_cvt_pk_f16_f32 v11, v22, v23
-		v_cvt_pk_f16_f32 v12, v24, v25
-		v_cvt_pk_f16_f32 v13, v26, v27
-		v_cvt_pk_f16_f32 v14, v28, v29
-		v_cvt_pk_f16_f32 v15, v30, v31
-		v_cvt_pk_f16_f32 v16, v32, v33
-		v_cvt_pk_f16_f32 v17, v34, v35
-		v_cvt_pk_f16_f32 v18, v36, v37
-		v_cvt_pk_f16_f32 v19, v38, v39
-		v_cvt_pk_f16_f32 v20, v40, v41
-		v_cvt_pk_f16_f32 v21, v42, v43
-		v_cvt_pk_f16_f32 v22, v44, v45
-		v_cvt_pk_f16_f32 v23, v46, v47
-		v_cvt_pk_f16_f32 v24, v48, v49
-		v_cvt_pk_f16_f32 v25, v50, v51
-		v_cvt_pk_f16_f32 v26, v52, v53
-		v_cvt_pk_f16_f32 v27, v54, v55
-		v_cvt_pk_f16_f32 v28, v56, v57
-		v_cvt_pk_f16_f32 v29, v58, v59
-		v_cvt_pk_f16_f32 v30, v60, v61
-		v_cvt_pk_f16_f32 v31, v62, v63
-		v_cvt_pk_f16_f32 v32, v64, v65
-		v_cvt_pk_f16_f32 v33, v66, v67
-		v_cvt_pk_f16_f32 v34, v68, v69
-		v_cvt_pk_f16_f32 v35, v70, v71
-		v_cvt_pk_f16_f32 v36, v72, v73
-		v_cvt_pk_f16_f32 v37, v74, v75
-		v_cvt_pk_f16_f32 v38, v76, v77
-		v_cvt_pk_f16_f32 v39, v78, v79
-		v_cvt_pk_f16_f32 v40, v80, v81
-		v_cvt_pk_f16_f32 v41, v82, v83
-		v_cvt_pk_f16_f32 v42, v84, v85
-		v_cvt_pk_f16_f32 v43, v86, v87
-		v_cvt_pk_f16_f32 v44, v88, v89
-		v_cvt_pk_f16_f32 v45, v90, v91
-		v_cvt_pk_f16_f32 v46, v92, v93
-		v_cvt_pk_f16_f32 v47, v94, v95
-		v_cvt_pk_f16_f32 v48, v96, v97
-		v_cvt_pk_f16_f32 v49, v98, v99
+		v_cvt_pk_f16_f32 v4, v12, v13
+		v_cvt_pk_f16_f32 v5, v14, v15
+		v_cvt_pk_f16_f32 v6, v16, v17
+		v_cvt_pk_f16_f32 v7, v18, v19
+		v_cvt_pk_f16_f32 v8, v20, v21
+		v_cvt_pk_f16_f32 v9, v22, v23
+		v_cvt_pk_f16_f32 v10, v24, v25
+		v_cvt_pk_f16_f32 v11, v26, v27
+		v_cvt_pk_f16_f32 v12, v28, v29
+		v_cvt_pk_f16_f32 v13, v30, v31
+		v_cvt_pk_f16_f32 v14, v32, v33
+		v_cvt_pk_f16_f32 v15, v34, v35
+		v_cvt_pk_f16_f32 v16, v36, v37
+		v_cvt_pk_f16_f32 v17, v38, v39
+		v_cvt_pk_f16_f32 v18, v40, v41
+		v_cvt_pk_f16_f32 v19, v42, v43
+		v_cvt_pk_f16_f32 v20, v44, v45
+		v_cvt_pk_f16_f32 v21, v46, v47
+		v_cvt_pk_f16_f32 v22, v48, v49
+		v_cvt_pk_f16_f32 v23, v50, v51
+		v_cvt_pk_f16_f32 v24, v52, v53
+		v_cvt_pk_f16_f32 v25, v54, v55
+		v_cvt_pk_f16_f32 v26, v56, v57
+		v_cvt_pk_f16_f32 v27, v58, v59
+		v_cvt_pk_f16_f32 v28, v60, v61
+		v_cvt_pk_f16_f32 v29, v62, v63
+		v_cvt_pk_f16_f32 v30, v64, v65
+		v_cvt_pk_f16_f32 v31, v66, v67
+		v_cvt_pk_f16_f32 v32, v68, v69
+		v_cvt_pk_f16_f32 v33, v70, v71
+		v_cvt_pk_f16_f32 v34, v72, v73
+		v_cvt_pk_f16_f32 v35, v74, v75
+		v_cvt_pk_f16_f32 v36, v76, v77
+		v_cvt_pk_f16_f32 v37, v78, v79
+		v_cvt_pk_f16_f32 v38, v80, v81
+		v_cvt_pk_f16_f32 v39, v82, v83
+		v_cvt_pk_f16_f32 v40, v84, v85
+		v_cvt_pk_f16_f32 v41, v86, v87
+		v_cvt_pk_f16_f32 v42, v88, v89
+		v_cvt_pk_f16_f32 v43, v90, v91
+		v_cvt_pk_f16_f32 v44, v92, v93
+		v_cvt_pk_f16_f32 v45, v94, v95
+		v_cvt_pk_f16_f32 v46, v96, v97
+		v_cvt_pk_f16_f32 v47, v98, v99
+		v_cvt_pk_f16_f32 v48, v100, v101
+		v_cvt_pk_f16_f32 v49, v102, v103
 		s_mov_b32 s14, 0x8000000
 		s_mov_b32 s15, 0x31016000
 		v_lshlrev_b32_e32 v0, 14, v0
@@ -586,12 +587,7 @@ gfx950_persistent_f16_gemm:
 		s_add_i32 s3, s8, 1
 		v_mov_b64_e32 v[4:5], 0
 		v_mov_b64_e32 v[6:7], 0
-		s_lshl_b32 s4, 1, s0
-		s_cmp_eq_u32 s0, 0
-		s_mov_b32 s14, 1
-		s_mov_b32 s15, 0
-		s_cselect_b32 s5, 1, 0
-		s_lshl_b32 s8, s2, 13
+		s_lshl_b32 s4, s2, 13
 		v_and_b32_e32 v0, 63, v0
 		v_and_b32_e32 v1, 15, v0
 		v_lshlrev_b32_e32 v2, 6, v1
@@ -599,11 +595,17 @@ gfx950_persistent_f16_gemm:
 		v_lshrrev_b32_e32 v3, 1, v1
 		v_bitop3_b32 v3, v0, v3, 3 bitop3:0x78
 		v_lshlrev_b32_e32 v3, 4, v3
-		v_add_u32_e32 v8, v2, v3
-		s_mul_i32 s11, 0xffff8800, s2
-		s_mul_i32 s16, 0x2800, s0
-		s_add_i32 s11, s11, s16
-		s_mov_b32 s16, s1
+		v_add3_u32 v8, s4, v2, v3
+		s_lshl_b32 s4, 1, s0
+		s_cmp_eq_u32 s0, 0
+		s_mov_b32 s14, 1
+		s_mov_b32 s15, 0
+		v_add_u32_e32 v2, v2, v3
+		s_mul_i32 s5, 0xffff8800, s2
+		s_mul_i32 s8, 0x2800, s0
+		s_cselect_b32 s11, 1, 0
+		s_add_i32 s5, s5, s8
+		s_mov_b32 s8, s1
 		v_mov_b64_e32 v[12:13], 0
 		v_mov_b64_e32 v[14:15], 0
 		v_mov_b64_e32 v[16:17], 0
@@ -643,49 +645,47 @@ gfx950_persistent_f16_gemm:
 		v_mov_b64_e32 v[84:85], 0
 		v_mov_b64_e32 v[86:87], 0
 .Lgfx950_persistent_f16_gemm.loop_head_5:
-		s_lshl_b32 s17, s16, 4
-		s_add_i32 s17, s17, 15
-		s_and_b32 s18, s16, 1
-		s_lshl_b32 s19, s18, 2
-		s_add_i32 s19, s19, 0x20000
-		v_mov_b32_e32 v9, s19
-		ds_read_b32 v10, v9
-		s_and_saveexec_b64 s[20:21], s[14:15]
+		s_lshl_b32 s16, s8, 4
+		s_add_i32 s16, s16, 15
+		s_and_b32 s17, s8, 1
+		s_lshl_b32 s18, s17, 2
+		s_add_i32 s18, s18, 0x20000
+		v_mov_b32_e32 v3, s18
+		ds_read_b32 v9, v3
+		s_and_saveexec_b64 s[18:19], s[14:15]
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s19, v10
-		s_cmp_lg_u32 s19, s17
+		v_readfirstlane_b32 s20, v9
+		s_cmp_lg_u32 s20, s16
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_12
 .Lgfx950_persistent_f16_gemm.loop_head_6:
-		ds_read_b32 v10, v9
+		ds_read_b32 v9, v3
 		s_sleep 1
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s19, v10
-		s_cmp_lg_u32 s19, s17
+		v_readfirstlane_b32 s20, v9
+		s_cmp_lg_u32 s20, s16
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_6
 .Lgfx950_persistent_f16_gemm.loop_exit_6:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_12
 .Lgfx950_persistent_f16_gemm.if_else_12:
 .Lgfx950_persistent_f16_gemm.if_end_12:
-		s_mov_b64 exec, s[20:21]
-		s_lshl_b32 s17, s18, 16
-		s_add_i32 s18, s8, s17
-		v_add3_u32 v10, s18, v2, v3
-		ds_read_b128 v[88:91], v10
-		ds_read_b128 v[92:95], v10 offset:2048
-		ds_read_b128 v[96:99], v10 offset:4096
-		ds_read_b128 v[100:103], v10 offset:6144
-		s_add_i32 s17, s11, s17
-		v_add_u32_e32 v11, s17, v8
-		ds_read_b128 v[104:107], v11 offset:32768
-		ds_read_b128 v[108:111], v11 offset:34816
-		ds_read_b128 v[112:115], v11 offset:36864
-		ds_read_b128 v[116:119], v11 offset:38912
+		s_mov_b64 exec, s[18:19]
+		ds_read_b128 v[88:91], v8
+		ds_read_b128 v[92:95], v8 offset:2048
+		ds_read_b128 v[96:99], v8 offset:4096
+		ds_read_b128 v[100:103], v8 offset:6144
+		s_lshl_b32 s16, s17, 16
+		s_add_i32 s16, s5, s16
+		v_add_u32_e32 v9, s16, v2
+		ds_read_b128 v[104:107], v9 offset:32768
+		ds_read_b128 v[108:111], v9 offset:34816
+		ds_read_b128 v[112:115], v9 offset:36864
+		ds_read_b128 v[116:119], v9 offset:38912
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[88:91], v[104:107], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[28:31], v[92:95], v[104:107], v[28:31]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[96:99], v[104:107], v[48:51]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[100:103], v[104:107], v[68:71]
-		ds_read_b128 v[104:107], v11 offset:40960
+		ds_read_b128 v[104:107], v9 offset:40960
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[12:15], v[88:91], v[108:111], v[12:15]
 		v_mfma_f32_16x16x32_f16 v[32:35], v[92:95], v[108:111], v[32:35]
@@ -706,36 +706,36 @@ gfx950_persistent_f16_gemm:
 		v_mfma_f32_16x16x32_f16 v[80:83], v[100:103], v[116:119], v[80:83]
 		v_mfma_f32_16x16x32_f16 v[84:87], v[100:103], v[104:107], v[84:87]
 		v_mfma_f32_16x16x32_f16 v[44:47], v[92:95], v[104:107], v[44:47]
-		ds_read_b128 v[88:91], v10 offset:1024
-		ds_read_b128 v[92:95], v10 offset:3072
-		ds_read_b128 v[96:99], v10 offset:5120
-		ds_read_b128 v[100:103], v10 offset:7168
-		ds_read_b128 v[104:107], v11 offset:33792
-		ds_read_b128 v[108:111], v11 offset:35840
-		ds_read_b128 v[112:115], v11 offset:37888
-		ds_read_b128 v[116:119], v11 offset:39936
-		s_cmp_lg_u32 s5, 0
+		ds_read_b128 v[88:91], v8 offset:1024
+		ds_read_b128 v[92:95], v8 offset:3072
+		ds_read_b128 v[96:99], v8 offset:5120
+		ds_read_b128 v[100:103], v8 offset:7168
+		ds_read_b128 v[104:107], v9 offset:33792
+		ds_read_b128 v[108:111], v9 offset:35840
+		ds_read_b128 v[112:115], v9 offset:37888
+		ds_read_b128 v[116:119], v9 offset:39936
+		s_cmp_lg_u32 s11, 0
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_13
-		s_cmp_lt_u32 s16, 2
+		s_cmp_lt_u32 s8, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_14
-		s_lshl_b32 s17, s16, 12
+		s_lshl_b32 s16, s8, 12
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_14
 .Lgfx950_persistent_f16_gemm.if_else_14:
-		s_mov_b32 s17, 0x1001
+		s_mov_b32 s16, 0x1001
 .Lgfx950_persistent_f16_gemm.if_end_14:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_13
 .Lgfx950_persistent_f16_gemm.if_else_13:
-		s_mov_b32 s17, s1
+		s_mov_b32 s16, s1
 .Lgfx950_persistent_f16_gemm.if_end_13:
-		s_add_i32 s17, s4, s17
-		s_lshl_b32 s18, s16, 12
-		s_add_i32 s18, s18, 0xfff
+		s_add_i32 s16, s4, s16
+		s_lshl_b32 s17, s8, 12
+		s_add_i32 s17, s17, 0xfff
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[88:91], v[104:107], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[28:31], v[92:95], v[104:107], v[28:31]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[96:99], v[104:107], v[48:51]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[100:103], v[104:107], v[68:71]
-		ds_read_b128 v[104:107], v11 offset:41984
+		ds_read_b128 v[104:107], v9 offset:41984
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[12:15], v[88:91], v[108:111], v[12:15]
 		v_mfma_f32_16x16x32_f16 v[32:35], v[92:95], v[108:111], v[32:35]
@@ -751,15 +751,15 @@ gfx950_persistent_f16_gemm:
 		v_mfma_f32_16x16x32_f16 v[20:23], v[88:91], v[116:119], v[20:23]
 		v_mfma_f32_16x16x32_f16 v[40:43], v[92:95], v[116:119], v[40:43]
 		v_mfma_f32_16x16x32_f16 v[80:83], v[100:103], v[116:119], v[80:83]
-		v_mov_b32_e32 v10, s17
+		v_mov_b32_e32 v9, s16
 		s_and_saveexec_b64 s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_else_3
 		s_waitcnt lgkmcnt(0)
-		ds_add_rtn_u32 v11, v9, v10 offset:8
+		ds_add_rtn_u32 v10, v3, v9 offset:8
 .Lgfx950_persistent_f16_gemm.exec_else_3:
 		s_andn2_b64 exec, s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_endif_3
-		v_mov_b32_e32 v11, 0
+		v_mov_b32_e32 v10, 0
 .Lgfx950_persistent_f16_gemm.exec_endif_3:
 		s_mov_b64 exec, s[24:25]
 		s_waitcnt lgkmcnt(0)
@@ -767,16 +767,18 @@ gfx950_persistent_f16_gemm:
 		v_mfma_f32_16x16x32_f16 v[44:47], v[92:95], v[104:107], v[44:47]
 		v_mfma_f32_16x16x32_f16 v[64:67], v[96:99], v[104:107], v[64:67]
 		v_mfma_f32_16x16x32_f16 v[84:87], v[100:103], v[104:107], v[84:87]
-		v_readfirstlane_b32 s19, v11
-		s_add_i32 s17, s19, s17
-		s_cmp_eq_u32 s17, s18
+		v_readfirstlane_b32 s18, v10
+		s_add_i32 s16, s18, s16
+		s_cmp_eq_u32 s16, s17
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_15
 		s_wakeup
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_15
 .Lgfx950_persistent_f16_gemm.if_else_15:
 .Lgfx950_persistent_f16_gemm.if_end_15:
-		s_add_i32 s16, s16, 1
-		s_cmp_lt_i32 s16, s3
+		v_add_u32_e32 v3, 0x10000, v8
+		v_and_b32_e32 v8, 0x1ffff, v3
+		s_add_i32 s8, s8, 1
+		s_cmp_lt_i32 s8, s3
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_5
 .Lgfx950_persistent_f16_gemm.loop_exit_5:
 		v_cvt_pk_f16_f32 v2, v4, v5
