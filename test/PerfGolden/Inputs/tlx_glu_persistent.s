@@ -388,20 +388,14 @@ tlx_addmm_glu_kernel_persistent:
 		s_mul_hi_u32 s66, s65, s66
 		s_mul_i32 s70, s66, s1
 		s_sub_i32 s65, s65, s70
-		s_cmp_ge_u32 s65, s1
-		s_cselect_b32 s70, 1, 0
-		s_add_i32 s71, s66, 1
-		s_cmp_lg_u32 s70, 0
-		s_cselect_b32 s66, s71, s66
-		s_cselect_b32 s70, 1, 0
+		s_add_i32 s70, s66, 1
 		s_sub_i32 s71, s65, s1
-		s_cmp_lg_u32 s70, 0
-		s_cselect_b32 s65, s71, s65
 		s_cmp_ge_u32 s65, s1
-		s_cselect_b32 s70, 1, 0
-		s_add_i32 s71, s66, 1
-		s_cmp_lg_u32 s70, 0
-		s_cselect_b32 s66, s71, s66
+		s_cselect_b32 s66, s70, s66
+		s_cselect_b32 s65, s71, s65
+		s_add_i32 s70, s66, 1
+		s_cmp_ge_u32 s65, s1
+		s_cselect_b32 s66, s70, s66
 		s_cselect_b32 s70, 1, 0
 		s_xor_b32 s66, s66, s69
 		s_sub_i32 s66, s66, s69
@@ -434,17 +428,13 @@ tlx_addmm_glu_kernel_persistent:
 		s_mul_hi_u32 s72, s65, s72
 		s_mul_i32 s73, s72, s71
 		s_sub_i32 s65, s65, s73
+		s_sub_i32 s73, s65, s71
 		s_cmp_ge_u32 s65, s71
+		s_cselect_b32 s65, s73, s65
 		s_cselect_b32 s73, 1, 0
 		s_sub_i32 s74, s65, s71
-		s_cmp_lg_u32 s73, 0
-		s_cselect_b32 s65, s74, s65
-		s_cselect_b32 s73, 1, 0
 		s_cmp_ge_u32 s65, s71
-		s_cselect_b32 s74, 1, 0
-		s_sub_i32 s71, s65, s71
-		s_cmp_lg_u32 s74, 0
-		s_cselect_b32 s65, s71, s65
+		s_cselect_b32 s65, s74, s65
 		s_cselect_b32 s71, 1, 0
 		s_xor_b32 s65, s65, s67
 		s_sub_i32 s65, s65, s67
@@ -846,19 +836,17 @@ tlx_addmm_glu_kernel_persistent:
 		v_mfma_f32_16x16x32_f16 v[176:179], v[112:115], v[100:103], v[176:179]
 		s_setprio 1
 		s_barrier
-		s_sub_i32 s75, s14, s75
-		v_cmp_lt_i32_e64 vcc, v31, s75
-		s_mul_i32 s76, -1, s73
-		v_cmp_lt_i32_e64 s[78:79], v33, s75
-		s_add_i32 s76, s76, 0x80000000
-		v_mov_b32_e32 v76, s76
-		v_cndmask_b32_e64 v86, v42, v84, s[78:79]
-		v_cndmask_b32_e32 v76, v76, v62, vcc
-		v_cmp_lt_i32_e64 vcc, v10, s75
+		v_add_u32_e32 v76, s73, v62
+		s_sub_i32 s73, s14, s75
+		v_cmp_lt_i32_e64 vcc, v31, s73
+		v_cmp_lt_i32_e64 s[76:77], v33, s73
 		s_mul_i32 s75, 0x2100, s71
+		v_cndmask_b32_e32 v76, v42, v76, vcc
+		v_cndmask_b32_e64 v86, v42, v84, s[76:77]
+		v_cmp_lt_i32_e64 vcc, v10, s73
 		s_add_i32 m0, s68, s75
 		s_mul_i32 s71, 0x4200, s71
-		buffer_load_dwordx4 v76, s[40:43], s73 offen lds
+		buffer_load_dwordx4 v76, s[40:43], 0 offen lds
 		v_cndmask_b32_e32 v76, v42, v83, vcc
 		s_add_i32 s71, s68, s71
 		s_add_i32 m0, s71, 0x62e0

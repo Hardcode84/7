@@ -64,20 +64,14 @@ v9_beyond_hotloop:
 		s_mul_hi_u32 s17, s14, s17
 		s_mul_i32 s18, s17, s1
 		s_sub_i32 s14, s14, s18
-		s_cmp_ge_u32 s14, s1
-		s_cselect_b32 s18, 1, 0
-		s_add_i32 s19, s17, 1
-		s_cmp_lg_u32 s18, 0
-		s_cselect_b32 s17, s19, s17
-		s_cselect_b32 s18, 1, 0
+		s_add_i32 s18, s17, 1
 		s_sub_i32 s19, s14, s1
-		s_cmp_lg_u32 s18, 0
-		s_cselect_b32 s14, s19, s14
 		s_cmp_ge_u32 s14, s1
-		s_cselect_b32 s18, 1, 0
-		s_add_i32 s19, s17, 1
-		s_cmp_lg_u32 s18, 0
-		s_cselect_b32 s17, s19, s17
+		s_cselect_b32 s17, s18, s17
+		s_cselect_b32 s14, s19, s14
+		s_add_i32 s18, s17, 1
+		s_cmp_ge_u32 s14, s1
+		s_cselect_b32 s17, s18, s17
 		s_cselect_b32 s18, 1, 0
 		s_xor_b32 s17, s17, s15
 		s_sub_i32 s15, s17, s15
@@ -110,17 +104,13 @@ v9_beyond_hotloop:
 		s_mul_hi_u32 s18, s1, s18
 		s_mul_i32 s20, s18, s0
 		s_sub_i32 s1, s1, s20
+		s_sub_i32 s20, s1, s0
 		s_cmp_ge_u32 s1, s0
+		s_cselect_b32 s1, s20, s1
 		s_cselect_b32 s20, 1, 0
 		s_sub_i32 s21, s1, s0
-		s_cmp_lg_u32 s20, 0
-		s_cselect_b32 s1, s21, s1
-		s_cselect_b32 s20, 1, 0
 		s_cmp_ge_u32 s1, s0
-		s_cselect_b32 s21, 1, 0
-		s_sub_i32 s0, s1, s0
-		s_cmp_lg_u32 s21, 0
-		s_cselect_b32 s0, s0, s1
+		s_cselect_b32 s0, s21, s1
 		s_cselect_b32 s1, 1, 0
 		s_xor_b32 s0, s0, s13
 		s_sub_i32 s0, s0, s13

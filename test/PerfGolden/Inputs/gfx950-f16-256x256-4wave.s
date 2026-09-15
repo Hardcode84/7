@@ -773,8 +773,8 @@ wmma_f16_matmul_tiled:
 		s_waitcnt vmcnt(0)
 		s_barrier
 		s_mul_i32 s0, -4, s0
-		s_add_i32 s0, s0, 0x10000
-		v_add_u32_e32 v0, s0, v4
+		s_add_i32 s1, s0, 0x10000
+		v_add_u32_e32 v0, s1, v4
 		ds_read_b128 v[8:11], v0 offset:1024
 		ds_read_b128 v[16:19], v0 offset:1152
 		ds_read_b128 v[20:23], v0 offset:1280
@@ -783,7 +783,8 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 a[8:11], v0 offset:1664
 		ds_read_b128 a[12:15], v0 offset:1792
 		ds_read_b128 a[16:19], v0 offset:1920
-		v_add_u32_e32 v1, s0, v5
+		v_add_u32_e32 v1, 0x10000, v5
+		v_add_u32_e32 v1, s0, v1
 		ds_read_b128 a[20:23], v1 offset:1024
 		ds_read_b128 a[24:27], v1 offset:1152
 		ds_read_b128 a[28:31], v1 offset:1280
