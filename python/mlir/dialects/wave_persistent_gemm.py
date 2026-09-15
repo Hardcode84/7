@@ -500,7 +500,7 @@ def _emit_producer(
     trip_count: dsl.Value,
     poll_vmem: bool,
     poll_sleep_cycles: int,
-) -> None:
+) -> dsl.Value:
     a = _buffer(bld, bld.args[0], M * K)
     b = _buffer(bld, bld.args[1], N * K)
     producer = bld.assume_range(bld.subi(wave_id, bld.constant(dsl.i32(), 12)), 0, 3)
@@ -549,6 +549,7 @@ def _emit_producer(
         contribution, target = _producer_contribution(bld, generation, producer, config)
         published = _publish(bld, ready_ptr, complete, contribution, target, lane_zero)
         bld.yield_([published])
+    return loop.results[0]
 
 
 def _consumer_read_ptr(
@@ -984,7 +985,7 @@ def _store_consumer_tiles(
     wg_n: dsl.Value,
     wi: dsl.Value,
     accs: tuple[dsl.Value, ...],
-) -> None:
+) -> dsl.Value:
     c = _buffer(bld, bld.args[2], M * N)
     unpack_type = dsl.simd_type(
         dsl.vector_type(_ACC_REGISTERS, dsl.f32()), width=_WAVE_SIZE
@@ -994,6 +995,7 @@ def _store_consumer_tiles(
     packed_type = dsl.simd_type(dsl.vector_type(4, dsl.f16()), width=_WAVE_SIZE)
     unpacked = tuple(bld.fragment_unpack(fragment, unpack_type) for fragment in accs)
     cache = dsl.store_cache(dsl.StoreCacheAttr.CS)
+    stores: list[dsl.Value] = []
 
     gm = dsl.sym("persistent_store_wg_m")
     gn = dsl.sym("persistent_store_wg_n")
@@ -1024,11 +1026,14 @@ def _store_consumer_tiles(
             store_offset = bld.assume_range(
                 bld.index_expr(offset, bindings), 0, M * N - 1
             )
-            bld.store(
-                bld.pack(values, packed_type),
-                bld.ptr_add(c, store_offset),
-                cache=cache,
+            stores.append(
+                bld.store(
+                    bld.pack(values, packed_type),
+                    bld.ptr_add(c, store_offset),
+                    cache=cache,
+                )
             )
+    return bld.join(*stores)
 
 
 def _emit_consumer_width(
@@ -1051,7 +1056,7 @@ def _emit_consumer_width(
     trip_count: dsl.Value,
     poll_sleep_cycles: int,
     consumer_pipeline: bool,
-) -> None:
+) -> dsl.Value:
     a_type = dsl.fragment_type(
         _A_FRAGMENT_ROLE,
         dsl.f16(),
@@ -1112,7 +1117,7 @@ def _emit_consumer_width(
         )
         bld.yield_([*accs, published])
 
-    _store_consumer_tiles(
+    stores = _store_consumer_tiles(
         bld,
         M=M,
         N=N,
@@ -1124,6 +1129,7 @@ def _emit_consumer_width(
         wi=wi,
         accs=tuple(loop.results[:-1]),
     )
+    return bld.join(loop.results[-1], stores)
 
 
 def _emit_consumer(
@@ -1143,7 +1149,7 @@ def _emit_consumer(
     trip_count: dsl.Value,
     poll_sleep_cycles: int,
     consumer_pipeline: bool,
-) -> None:
+) -> dsl.Value:
     consumer = wave_id
     quotient_hi = bld.binary(
         dsl.BinaryKind.MulHUI,
@@ -1168,8 +1174,8 @@ def _emit_consumer(
         2,
     )
     last = bld.scalar_cmpi("eq", col_group, bld.constant(dsl.i32(), 2))
-    with bld.if_(last, otherwise=True) as branch:
-        _emit_consumer_width(
+    with bld.if_(last, [dsl.mem_token_type()], otherwise=True) as branch:
+        done = _emit_consumer_width(
             bld,
             config,
             M=M,
@@ -1189,8 +1195,9 @@ def _emit_consumer(
             poll_sleep_cycles=poll_sleep_cycles,
             consumer_pipeline=consumer_pipeline,
         )
+        bld.yield_([done])
         with branch.otherwise():
-            _emit_consumer_width(
+            done = _emit_consumer_width(
                 bld,
                 config,
                 M=M,
@@ -1210,6 +1217,8 @@ def _emit_consumer(
                 poll_sleep_cycles=poll_sleep_cycles,
                 consumer_pipeline=consumer_pipeline,
             )
+            bld.yield_([done])
+    return branch.results[0]
 
 
 def _emit_kernel(
@@ -1244,8 +1253,8 @@ def _emit_kernel(
     startup = _initialize_mailboxes(bld, lds, wi, config)
     producer = bld.scalar_cmpi("uge", wave_id, bld.constant(dsl.i32(), _CONSUMER_WAVES))
 
-    with bld.if_(producer, otherwise=True) as role:
-        _emit_producer(
+    with bld.if_(producer, [dsl.mem_token_type()], otherwise=True) as role:
+        done = _emit_producer(
             bld,
             config,
             M=M,
@@ -1262,8 +1271,9 @@ def _emit_kernel(
             poll_vmem=poll_vmem,
             poll_sleep_cycles=poll_sleep_cycles,
         )
+        bld.yield_([done])
         with role.otherwise():
-            _emit_consumer(
+            done = _emit_consumer(
                 bld,
                 config,
                 M=M,
@@ -1280,6 +1290,8 @@ def _emit_kernel(
                 poll_sleep_cycles=poll_sleep_cycles,
                 consumer_pipeline=consumer_pipeline,
             )
+            bld.yield_([done])
+    bld.observe(role.results[0])
 
 
 def build_gfx950_persistent_f16_gemm_module(
