@@ -125,11 +125,11 @@ func.func @gfx1250_dealloc_omits_nop() attributes {wave.kernel} {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_1 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 
@@ -293,8 +293,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK-NOT: waveamdmachine.s_waitcnt
 // CHECK-NEXT: waveamdmachine.s_endpgm
 func.func @store_drains_at_endpgm(%offset: !waveamdmachine.reg<vgpr, 1>, %value: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 2>) {
-  waveamdmachine.global_store_b32 %offset, %value, %base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> ()
-  waveamdmachine.s_endpgm
+  %observed_store_2 = waveamdmachine.global_store_b32 %offset, %value, %base : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_2 : !waveamdmachine.mem.token
   return
 }
 
@@ -343,7 +343,7 @@ func.func @overlap_two_chunked_loads(%a_off: !waveamdmachine.reg<vgpr, 1>,
                                      %b_off: !waveamdmachine.reg<vgpr, 1>,
                                      %b_base: !waveamdmachine.reg<sgpr, 2>,
                                      %lds_a: !waveamdmachine.reg<vgpr, 1>,
-                                     %lds_b: !waveamdmachine.reg<vgpr, 1>) {
+                                     %lds_b: !waveamdmachine.reg<vgpr, 1>) -> (!waveamdmachine.mem.token, !waveamdmachine.mem.token, !waveamdmachine.mem.token, !waveamdmachine.mem.token) {
   %a0, %a_t0 = waveamdmachine.global_load_b128 %a_off, %a_base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>)
         -> (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.mem.token)
@@ -374,7 +374,7 @@ func.func @overlap_two_chunked_loads(%a_off: !waveamdmachine.reg<vgpr, 1>,
   %b_s1 = waveamdmachine.ds_store_b128 %lds_b, %b1 after %b_tok offset 16
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  return
+  return %a_s0, %a_s1, %b_s0, %b_s1 : !waveamdmachine.mem.token, !waveamdmachine.mem.token, !waveamdmachine.mem.token, !waveamdmachine.mem.token
 }
 
 }
@@ -452,11 +452,11 @@ func.func @vgpr_limited_store_deallocates() attributes {wave.kernel} {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_3 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_3 : !waveamdmachine.mem.token
   return
 }
 
@@ -469,11 +469,11 @@ func.func @max_occupancy_store_skips_dealloc() attributes {wave.kernel} {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 95>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_4 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 95>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_4 : !waveamdmachine.mem.token
   return
 }
 
@@ -486,12 +486,12 @@ func.func @drained_store_skips_dealloc() attributes {wave.kernel} {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_5 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   waveamdmachine.s_waitcnt_vscnt vscnt(0)
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %observed_store_5 : !waveamdmachine.mem.token
   return
 }
 
@@ -506,14 +506,14 @@ func.func @scratch_store_blocks_dealloc() attributes {wave.kernel} {
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
-  waveamdmachine.scratch_store_b32 %zero, %value, %zero
+  %observed_store_6 = waveamdmachine.scratch_store_b32 %zero, %value, %zero
       : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.imm) -> ()
-  waveamdmachine.global_store_b32 %off, %value, %base
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
+  %observed_store_7 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_6, %observed_store_7 : !waveamdmachine.mem.token, !waveamdmachine.mem.token
   return
 }
 
@@ -532,11 +532,11 @@ func.func @unsupported_dealloc_target() attributes {wave.kernel} {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_8 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_8 : !waveamdmachine.mem.token
   return
 }
 

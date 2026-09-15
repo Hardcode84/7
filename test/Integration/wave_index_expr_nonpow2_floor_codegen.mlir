@@ -13,7 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: global_store_dword
 // ASM: s_endpgm
 func.func @floor_div_3(%input: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %input, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -32,7 +32,7 @@ func.func @floor_div_3(%input: !wave.ptr<#wave.global, i32>,
   %stored = wave.store %raw -> %dest after %loaded
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: floor_div_7:
@@ -44,7 +44,7 @@ func.func @floor_div_3(%input: !wave.ptr<#wave.global, i32>,
 // ASM: buffer_store_dword
 // ASM: s_endpgm
 func.func @floor_div_7(%input: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %input, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -63,7 +63,7 @@ func.func @floor_div_7(%input: !wave.ptr<#wave.global, i32>,
   %stored = wave.store %raw -> %dest after %loaded
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: floor_div_14:
@@ -74,7 +74,7 @@ func.func @floor_div_7(%input: !wave.ptr<#wave.global, i32>,
 // ASM: buffer_store_dword
 // ASM: s_endpgm
 func.func @floor_div_14(%input: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %ptrs = wave.ptr_add %input, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -93,6 +93,6 @@ func.func @floor_div_14(%input: !wave.ptr<#wave.global, i32>,
   %stored = wave.store %raw -> %dest after %loaded
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 }

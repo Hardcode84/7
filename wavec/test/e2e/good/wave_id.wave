@@ -1,6 +1,8 @@
 kernel [[amdgpu_wave_size(32)]]
 void wid(uint32_t *out) {
+  token output_done = token();
   uint32_t w = wave_id_in_grid();
   simd<uint32_t,32> lane = lane_id<32>();
-  store(lane, out + lane);
+  output_done = join(output_done, store(lane, out + lane));
+  observe(output_done);
 }

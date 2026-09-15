@@ -103,8 +103,7 @@
 // WINNER: waveamdmachine.s_endpgm
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @dependent_memory_choices(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 32, 1, 1>,
+func.func @dependent_memory_choices(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %zero = arith.constant 0 : i32
   %one = arith.constant 1 : i32
@@ -159,6 +158,6 @@ func.func @dependent_memory_choices(%out: !wave.ptr<#wave.global, i32>)
         : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>, !wave.mem.token) -> !wave.mem.token
     scf.yield %written : !wave.mem.token
   }
-  return
+  return %done : !wave.mem.token
 }
 }

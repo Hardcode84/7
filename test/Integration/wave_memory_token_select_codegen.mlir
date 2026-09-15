@@ -10,8 +10,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: buffer_load_b32
 // ASM: buffer_store_b32
 func.func @memory_token_select_codegen(
-    %dst: !wave.ptr<#wave.global, i32>, %pred: i1)
-    attributes {wave.kernel} {
+    %dst: !wave.ptr<#wave.global, i32>, %pred: i1) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %dst, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -30,7 +29,7 @@ func.func @memory_token_select_codegen(
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

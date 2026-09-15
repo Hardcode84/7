@@ -21,8 +21,7 @@ module {
 // CHECK-SAME: (!wave.simd<vector<2xf16>, 32>, !wave.ptr<#wave.global, f16>, !wave.mem.token)
 // CHECK-NEXT: return
 func.func @coalesce_feeds_packed_cast(%src: !wave.ptr<#wave.global, f32>,
-                                      %dst: !wave.ptr<#wave.global, f16>)
-    attributes {wave.kernel} {
+                                      %dst: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel} {
   %c1 = arith.constant 1 : i32
   %src1 = wave.ptr_add %src, %c1
       : !wave.ptr<#wave.global, f32>, i32 -> !wave.ptr<#wave.global, f32>
@@ -44,7 +43,7 @@ func.func @coalesce_feeds_packed_cast(%src: !wave.ptr<#wave.global, f32>,
   %s1 = wave.store %h1 -> %dst1 after %s0
       : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %s1 : !wave.mem.token
 }
 
 }

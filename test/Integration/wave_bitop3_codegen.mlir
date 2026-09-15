@@ -13,8 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-NOT: v_xor_b32
 // ASM: v_bitop3_b32 {{.*}} bitop3:0x9a
 // ASM: global_store_dword
-func.func @bitop3_codegen(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @bitop3_codegen(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %c1 = arith.constant 1 : i32
   %c3 = arith.constant 3 : i32
@@ -36,7 +35,7 @@ func.func @bitop3_codegen(%out: !wave.ptr<#wave.global, i32>)
   %tok = wave.store %bits -> %ptrs
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 }

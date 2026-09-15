@@ -78,7 +78,7 @@ func.func @mixed_bank_ds_store2_b32() attributes {wave.kernel} {
          !waveamdmachine.reg<vgpr, 1, 1>,
          !waveamdmachine.reg<agpr, 1, 0>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %token : !waveamdmachine.mem.token
   return
 }
 
@@ -100,7 +100,7 @@ func.func @unsupported_agpr_ds_store2_b32() attributes {wave.kernel} {
          !waveamdmachine.reg<agpr, 1, 0>,
          !waveamdmachine.reg<agpr, 1, 1>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %token : !waveamdmachine.mem.token
   return
 }
 

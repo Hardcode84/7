@@ -38,7 +38,7 @@ func.func @scalar_subtraction(%out: !wave.ptr<#wave.global, i32>, %a: i32, %b: i
   %off = waveamdmachine.v_lshlrev_b32 %lane, %two : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
   %token = waveamdmachine.token : !waveamdmachine.mem.token
   %done = waveamdmachine.global_store_b32 %off, %value, %base after %token : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %done : !waveamdmachine.mem.token
   return
 }
 }

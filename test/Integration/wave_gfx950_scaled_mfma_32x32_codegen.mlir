@@ -11,7 +11,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: v_mfma_scale_f32_32x32x64_f8f6f4
 // ASM: .amdhsa_kernel scaled_mfma_32x32_codegen
 func.func @scaled_mfma_32x32_codegen(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %scale_bits = arith.constant 2139062143 : i32
   %scale = wave.splat %scale_bits : i32 -> !wave.simd<i32, 64>
@@ -44,7 +44,7 @@ func.func @scaled_mfma_32x32_codegen(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<16xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 }

@@ -35,7 +35,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, [[OUT]] offset:16
 // ASM-NOT: s_waitcnt
 // ASM: s_endpgm
-func.func @matrix_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+func.func @matrix_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %seven = arith.constant 7 : i32
   %base = arith.constant 0 : i32
@@ -51,7 +51,7 @@ func.func @matrix_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.ke
   %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, i32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @matrix_f16_kernel
@@ -69,7 +69,7 @@ func.func @matrix_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.ke
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}}{{$}}
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}} offset:16
 // ASM: s_endpgm
-func.func @matrix_f16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+func.func @matrix_f16_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %seven_as_f32_bits = arith.constant 1088421888 : i32
   %base = arith.constant 0 : i32
@@ -85,7 +85,7 @@ func.func @matrix_f16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wav
   %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @matrix_f16_zero_acc_kernel
@@ -99,7 +99,7 @@ func.func @matrix_f16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wav
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}}{{$}}
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}} offset:16
 // ASM: s_endpgm
-func.func @matrix_f16_zero_acc_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+func.func @matrix_f16_zero_acc_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %base = arith.constant 0 : i32
   %ptr = wave.ptr_add %out, %base : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#wave.global, i32>
@@ -114,7 +114,7 @@ func.func @matrix_f16_zero_acc_kernel(%out: !wave.ptr<#wave.global, i32>) attrib
   %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @matrix_bf16_kernel
@@ -132,7 +132,7 @@ func.func @matrix_f16_zero_acc_kernel(%out: !wave.ptr<#wave.global, i32>) attrib
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}}{{$}}
 // ASM: global_store_b128 {{v[0-9]+}}, {{v\[[0-9]+:[0-9]+\]}}, {{s\[[0-9]+:[0-9]+\]}} offset:16
 // ASM: s_endpgm
-func.func @matrix_bf16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+func.func @matrix_bf16_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %seven_as_f32_bits = arith.constant 1088421888 : i32
   %base = arith.constant 0 : i32
@@ -148,7 +148,7 @@ func.func @matrix_bf16_kernel(%out: !wave.ptr<#wave.global, i32>) attributes {wa
   %tuple_ptr = wave.ptr_add %ptr, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %result : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %store_token = wave.store %regs -> %tuple_ptr : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 }

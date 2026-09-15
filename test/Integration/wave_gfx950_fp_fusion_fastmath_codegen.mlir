@@ -17,8 +17,7 @@ module attributes {
 // ASM: s_endpgm
 func.func @fp_fusion_fastmath(
     %dst: !wave.ptr<#wave.global, f32>,
-    %a: f32, %b: f32, %c: f32)
-    attributes {
+    %a: f32, %b: f32, %c: f32) -> !wave.mem.token attributes {
       wave.kernel,
       wave.workgroup_size = array<i32: 64, 1, 1>
     } {
@@ -41,7 +40,7 @@ func.func @fp_fusion_fastmath(
       : (!wave.simd<f32, 64>,
          !wave.simd<!wave.ptr<#waveamd.buffer, f32>, 64>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 }

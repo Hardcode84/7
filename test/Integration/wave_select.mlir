@@ -13,8 +13,7 @@ module attributes {gpu.container_module} {
 
 gpu.module @kernels {
   func.func @select_values(%dst: !wave.ptr<#wave.global, i32>,
-                           %flag: i1)
-      attributes {gpu.kernel, wave.kernel} {
+                           %flag: i1) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %c8 = arith.constant 8 : i32
     %c16 = arith.constant 16 : i32
     %c100 = arith.constant 100 : i32
@@ -85,7 +84,7 @@ gpu.module @kernels {
       wave.yield %tok : !wave.mem.token
     } : !wave.mask<@W@> -> !wave.mem.token
     %joined = wave.join %t0, %t1 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
-    return
+    return %joined : !wave.mem.token
   }
 }
 

@@ -2,15 +2,13 @@
 
 ## Status and purpose
 
-This document specifies a proposed change. It does not describe an implemented
-compiler contract. The change makes unused stores and direct memory access (DMA)
-operations removable. Explicit memory tokens identify the effects that must
-remain observable. Kernel completion must consume the tokens for required output
-writes.
+Unused stores and direct memory access (DMA) operations are removable.
+Explicit memory tokens identify the effects that must remain observable.
+Kernel completion consumes the tokens for required output writes.
 
-The current compiler removes unused loads but retains unused stores and DMA
-operations through their memory write effects. Kernel return selection requires
-a void return and creates `waveamdmachine.s_endpgm` without operands.
+Plain `--canonicalize` removes unused covered operations and dead token
+recurrences. There is no separate memory-elimination pass. Operations retain
+their physical memory effects.
 
 This change affects source semantics. A program must not depend on a write that
 has no explicit path to a live observer. No compatibility mode shall attach
@@ -132,7 +130,7 @@ physical results. Tokens do not occupy return registers, kernel arguments, or
 host result buffers. Preserve each return dependency on the selected
 `waveamdmachine.s_endpgm` before removing logical token results from the physical
 function signature. The transfer must not leave an interval in which cleanup can
-erase the required effects. Use dialect conversion for signature changes.
+erase the required effects. Dialect conversion removes logical results from the physical signature.
 
 Selection must create one terminal machine operation per supported exit. Repeat
 selection must not duplicate it. Unsupported control flow must fail explicitly.
@@ -141,10 +139,17 @@ Callable functions carry memory dependencies through explicit token arguments
 and results. A logical token result connects callee effects to the caller; it
 does not by itself require a register in the ABI. Physical calls and returns
 must retain the corresponding dependency relation when logical types disappear.
+Source `func.call` operations retain logical token arguments and results.
+Machine selection has no call instruction lowering. Inline calls before machine
+selection; residual calls and token arguments produce an error. Selected callable
+returns attach their dependencies to `s_setpc_b64`.
 Unknown calls remain effectful. Removing such calls requires a separate effect
 contract. Do not extend call DCE as part of ordinary store removal.
 
-The Python DSL must accept explicit return tokens. An empty return means that
+The Python DSL accepts explicit return tokens. `observe(*tokens)` adds tokens
+to the function return. `return_(values)` returns explicit values and registered
+observations. Observe a region result at function scope; do not observe a token
+inside its region. The C frontend uses `observe(tokens...)` with the same rule. An empty return means that
 kernel completion observes no memory effects. Builders must not infer return
 tokens from the set of stores in a function.
 
@@ -345,3 +350,23 @@ production witness. Check compile-time complexity separately from runtime speed.
 - [Default pipelines](../lib/Target/Wave/pipelines/pipelines.mlir)
 - [Python DSL](../python/mlir/dialects/wave_dsl.py)
 - [Materialization contract](WaveMaterializationVariantsDesign.md)
+
+## Implementation evidence
+
+[`wave_token_observed_matmul.py`](../test/Integration/wave_token_observed_matmul.py)
+uses the gfx950 256-by-256 DMA matmul generator with K=256. It adds a second
+output buffer through the same pointer and store operations. The two cases differ
+only in the return observation set. Both cases retain shared DMA and the K loop.
+The second case emits half as many output stores.
+
+[`wave_token_observed_matmul_runtime.mlir`](../test/Integration/wave_token_observed_matmul_runtime.mlir)
+checks both observation sets. The gfx950 simulator produces both correct outputs
+when both are observed. With one observation, the first output remains correct
+and the second buffer retains its sentinel values. These checks establish
+correctness and code removal; they do not measure hardware performance.
+
+[`wave_token_observed_dma.py`](../test/Integration/wave_token_observed_dma.py)
+copies two independent inputs through LDS in a loop. Removing the second output
+observation removes its DMA, LDS read, and global store. The gfx950 simulator
+checks both complete outputs, then checks the retained output and the untouched
+second buffer with one observation.

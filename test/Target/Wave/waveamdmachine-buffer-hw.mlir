@@ -7,7 +7,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--@CHIP@"} {
 
 // HW: buffer_store_kernel ok
-func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
+func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant @BYTES@ : i32
   %buffer = waveamd.make_buffer %out, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, @W@>
@@ -15,7 +15,7 @@ func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attr
   %sum = wave.binary addi %lane, %vx : !wave.simd<i32, @W@>, !wave.simd<i32, @W@> -> !wave.simd<i32, @W@>
   %ptrs = wave.ptr_add %buffer, %lane : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, @W@> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>
   %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, @W@>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 }

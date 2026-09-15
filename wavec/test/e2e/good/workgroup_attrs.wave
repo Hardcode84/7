@@ -1,10 +1,12 @@
 kernel [[amdgpu_wave_size(32)]]
        [[amdgpu_waves_per_workgroup(2)]]
 void workgroup_attrs(uint32_t *out) {
+  token output_done = token();
   uint32_t wave = wave_id_in_grid();
   simd<uint32_t, 32> lane = lane_id<32>();
   simd<uint32_t, 32> idx = wave * 32 + lane;
-  store(idx, out + idx);
+  output_done = join(output_done, store(idx, out + idx));
+  observe(output_done);
 }
 
 kernel [[amdgpu_wave_size(32)]]

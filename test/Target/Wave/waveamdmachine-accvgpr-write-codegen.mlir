@@ -24,7 +24,7 @@ func.func @accvgpr_write_inline_zero(%off: !waveamdmachine.reg<vgpr, 1, 4>,
   %token = waveamdmachine.global_store_b128 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 4>, !waveamdmachine.reg<vgpr, 4, 8>,
          !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %token : !waveamdmachine.mem.token
   return
 }
 

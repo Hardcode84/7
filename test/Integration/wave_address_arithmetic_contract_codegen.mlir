@@ -11,8 +11,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @def_local_address_arithmetic_codegen(
     %src: !wave.ptr<#wave.global, i32>,
-    %dst: !wave.ptr<#wave.global, i32>, %base: i32)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 32, 1, 1>,
+    %dst: !wave.ptr<#wave.global, i32>, %base: i32) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %lane = wave.workitem_id 0 : !wave.simd<i32, 32>
   %base_splat = wave.splat %base : i32 -> !wave.simd<i32, 32>
@@ -42,6 +41,6 @@ func.func @def_local_address_arithmetic_codegen(
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 }

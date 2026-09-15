@@ -14,11 +14,11 @@ func.func @disabled_by_default() attributes {wave.kernel} {
   %value = waveamdmachine.v_exp_f32 %x
       : (!waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 300>
-  waveamdmachine.global_store_b32 %x, %value, %base
+  %observed_store_1 = waveamdmachine.global_store_b32 %x, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 300>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 
@@ -49,11 +49,11 @@ func.func @partial_va() attributes {
   %new = waveamdmachine.v_exp_f32 %y
       : (!waveamdmachine.reg<vgpr, 1, 1>)
         -> !waveamdmachine.reg<vgpr, 1, 301>
-  waveamdmachine.global_store_b32 %x, %old, %base
+  %observed_store_2 = waveamdmachine.global_store_b32 %x, %old, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 300>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_2 : !waveamdmachine.mem.token
   return
 }
 
@@ -76,11 +76,11 @@ func.func @mixed_va_families_drain() attributes {
       : (!waveamdmachine.reg<vgpr, 1, 1>,
          !waveamdmachine.reg<vgpr, 1, 1>)
         -> !waveamdmachine.reg<vgpr, 1, 301>
-  waveamdmachine.global_store_b32 %x, %old, %base
+  %observed_store_3 = waveamdmachine.global_store_b32 %x, %old, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 300>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_3 : !waveamdmachine.mem.token
   return
 }
 
@@ -108,11 +108,11 @@ func.func @expanded_valu_issue_count() attributes {
          !waveamdmachine.reg<vgpr, 2, 4>)
         -> (!waveamdmachine.reg<vgpr, 2, 302>,
             !waveamdmachine.reg<vcc, 1>)
-  waveamdmachine.global_store_b64 %offset, %old, %base
+  %observed_store_4 = waveamdmachine.global_store_b64 %offset, %old, %base
       : (!waveamdmachine.reg<vgpr, 1, 6>,
          !waveamdmachine.reg<vgpr, 2, 300>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_4 : !waveamdmachine.mem.token
   return
 }
 
@@ -171,7 +171,7 @@ func.func @partial_prefetch_source() attributes {
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 512>
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %first, %second : !waveamdmachine.mem.token, !waveamdmachine.mem.token
   return
 }
 
@@ -233,16 +233,16 @@ func.func @mixed_vm_families_drain() attributes {
       : (!waveamdmachine.reg<sgpr, 2, 0>,
          !waveamdmachine.reg<vgpr, 1, 512>,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.buffer_store_b32 %x, %newer, %desc, %zero
+  %observed_store_5 = waveamdmachine.buffer_store_b32 %x, %newer, %desc, %zero
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 513>,
          !waveamdmachine.reg<sgpr, 4, 4>,
-         !waveamdmachine.imm) -> ()
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
   %overwrite = waveamdmachine.v_add_u32 %x, %x
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 512>
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %prefetch : !waveamdmachine.mem.token
   return
 }
 
@@ -275,7 +275,7 @@ func.func @cfg_join_uses_oldest_position(%condition: i1) attributes {
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 512>
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %first : !waveamdmachine.mem.token
   return
 }
 
@@ -303,11 +303,11 @@ func.func @tdm_does_not_shift_vm_source() attributes {
   %d1 = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 8, 8>
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %root = waveamdmachine.token : !waveamdmachine.mem.token
-  waveamdmachine.buffer_store_b32 %x, %old, %desc, %zero
+  %observed_store_6 = waveamdmachine.buffer_store_b32 %x, %old, %desc, %zero
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 768>,
          !waveamdmachine.reg<sgpr, 4, 0>,
-         !waveamdmachine.imm) -> ()
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
   %tensor = waveamdmachine.tdm_load %d0, %d1 after %root
       : (!waveamdmachine.reg<sgpr, 4, 4>,
          !waveamdmachine.reg<sgpr, 8, 8>,
@@ -316,7 +316,7 @@ func.func @tdm_does_not_shift_vm_source() attributes {
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 768>
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tensor : !waveamdmachine.mem.token
   return
 }
 
@@ -351,7 +351,7 @@ func.func @synchronous_atomic_does_not_shift_vm_source() attributes {
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 512>
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %prefetch : !waveamdmachine.mem.token
   return
 }
 
@@ -380,16 +380,16 @@ func.func @caller_protocol() attributes {
   %old = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 512>
   %desc = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4, 0>
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  waveamdmachine.buffer_store_b32 %x, %old, %desc, %zero
+  %observed_store_7 = waveamdmachine.buffer_store_b32 %x, %old, %desc, %zero
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 512>,
          !waveamdmachine.reg<sgpr, 4, 0>,
-         !waveamdmachine.imm) -> ()
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
   %value = waveamdmachine.v_exp_f32 %x
       : (!waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 300>
   func.call @callee() : () -> ()
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %observed_store_7 : !waveamdmachine.mem.token
   return
 }
 
@@ -419,7 +419,7 @@ func.func @callable_protocol() attributes {
 // CHECK-NOT: tensorcnt
 // CHECK-NEXT: waveamdmachine.s_set_sched_mode normal
 // CHECK-NEXT: waveamdmachine.s_setpc_b64
-func.func @callable_tdm_return() attributes {
+func.func @callable_tdm_return() -> !waveamdmachine.mem.token attributes {
     waveamdmachine.expert_scheduling_mode
   } {
   %d0 = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 4, 0>
@@ -430,7 +430,7 @@ func.func @callable_tdm_return() attributes {
          !waveamdmachine.reg<sgpr, 8, 8>,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   waveamdmachine.s_setpc_b64
-  return
+  return %tensor : !waveamdmachine.mem.token
 }
 
 }

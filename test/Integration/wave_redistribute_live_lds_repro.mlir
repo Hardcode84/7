@@ -14,8 +14,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @redistribute_with_live_unresolved_lds(
     %src0: !wave.ptr<#wave.global, bf16>,
     %src1: !wave.ptr<#wave.global, bf16>,
-    %dst: !wave.ptr<#wave.global, bf16>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, bf16>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
                 wave.waves_per_workgroup = 4 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
@@ -76,6 +75,6 @@ func.func @redistribute_with_live_unresolved_lds(
   %done = wave.store %fixed_loaded -> %ptr after %token1
       : (!wave.simd<bf16, 64>, !wave.simd<!wave.ptr<#wave.global, bf16>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %done : !wave.mem.token
 }
 }

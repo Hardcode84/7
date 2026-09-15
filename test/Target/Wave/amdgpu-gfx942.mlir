@@ -14,8 +14,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // CHECK: buffer_store_dword
 // CHECK-NOT: s_waitcnt
 // CHECK: s_endpgm
-func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -27,7 +26,7 @@ func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
   %store_token = wave.store %wi -> %ptrs
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
       -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 // CHECK: .amdhsa_kernel buffer_store_kernel
 // CHECK: .amdhsa_user_sgpr_kernarg_preload_length 2

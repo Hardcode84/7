@@ -35,8 +35,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @symbolic_memory_dma_plan_codegen(
-      %source: !wave.ptr<#wave.global, i32>)
-      attributes {wave.kernel, wave.lds_size = 1024 : i64,
+      %source: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 1024 : i64,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 1 : i64} {
     %destination = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
@@ -58,12 +57,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         bindings ["item"](%bounded_item) after %loaded
         : (!wave.simd<vector<4xi32>, 64>, !wave.ptr<#wave.shared, i32>,
            !wave.simd<index, 64>, !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_multiwave_dma_plan_codegen(
-      %source: !wave.ptr<#wave.global, i32>)
-      attributes {wave.kernel, wave.lds_size = 4096 : i64,
+      %source: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 4096 : i64,
                   wave.workgroup_size = array<i32: 256, 1, 1>,
                   wave.waves_per_workgroup = 4 : i64} {
     %destination = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
@@ -85,6 +83,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
         bindings ["item"](%bounded_item) after %loaded
         : (!wave.simd<vector<4xi32>, 64>, !wave.ptr<#wave.shared, i32>,
            !wave.simd<index, 64>, !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 }

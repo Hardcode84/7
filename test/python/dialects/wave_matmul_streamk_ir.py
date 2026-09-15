@@ -84,7 +84,7 @@ assert len(final_stores) == 32
 assert (
     sum(operation.name == "waveamd.fragment_fill" for operation in transition_ops) == 1
 )
-assert sum(str(result.type) == "!wave.mem.token" for result in transition.results) == 7
+assert sum(str(result.type) == "!wave.mem.token" for result in transition.results) == 8
 transition_yield = transition.regions[0].blocks[0].operations[-1].operation
 assert transition_yield.name == "scf.yield"
 assert len(transition_yield.operands) == len(transition.results)

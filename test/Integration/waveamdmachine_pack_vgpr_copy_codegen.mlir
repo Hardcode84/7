@@ -45,7 +45,7 @@ func.func @pack_vgpr_copy_codegen(
   %tok = waveamdmachine.global_store_b128_addr64 %addr, %wide
       : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 4, 8>)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok : !waveamdmachine.mem.token
   return
 }
 
@@ -60,7 +60,7 @@ func.func @addr64_wide_load_codegen(
       : (!waveamdmachine.reg<vgpr, 2, 0>,
          !waveamdmachine.reg<vgpr, 4, 8>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %stored : !waveamdmachine.mem.token
   return
 }
 
@@ -85,7 +85,7 @@ func.func @same_phys_vgpr_copy_codegen(
   %tok = waveamdmachine.global_store_b128_addr64 %addr, %read
       : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 4, 8>)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok : !waveamdmachine.mem.token
   return
 }
 
@@ -123,7 +123,7 @@ func.func @fold_agpr_zero_fill_codegen(
   %tok1 = waveamdmachine.global_store_b64_addr64 %addr, %read1
       : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 10>)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok0, %tok1 : !waveamdmachine.mem.token, !waveamdmachine.mem.token
   return
 }
 

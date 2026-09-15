@@ -24,7 +24,7 @@ func.func @halfword_permute(
     %src0: !wave.ptr<#wave.global, i32>,
     %src1: !wave.ptr<#wave.global, i32>,
     %dst_lo: !wave.ptr<#wave.global, i32>,
-    %dst_hi: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %dst_hi: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %src0_ptr = wave.ptr_add %src0, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -78,7 +78,7 @@ func.func @halfword_permute(
   %hi_token = wave.store %packed_hi -> %dst_hi_ptr after %lo_token
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %hi_token : !wave.mem.token
 }
 
 }

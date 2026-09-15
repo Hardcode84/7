@@ -30,8 +30,7 @@
 // EXPAND-CANDIDATES-COUNT-4: waveamdmachine.candidate_yield
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @independent_address_dependencies(
-    %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32
@@ -62,6 +61,6 @@ func.func @independent_address_dependencies(
   %second = wave.store %lane -> %second_ptr after %first
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %second : !wave.mem.token
 }
 }

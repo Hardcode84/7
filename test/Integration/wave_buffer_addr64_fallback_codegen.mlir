@@ -9,8 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_waitcnt vmcnt(0)
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @buffer_addr64_fallback(
-    %out: !wave.ptr<#wave.global, i32>, %raw: i32)
-    attributes {wave.kernel,
+    %out: !wave.ptr<#wave.global, i32>, %raw: i32) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %range = arith.constant 4096 : i32
@@ -30,7 +29,7 @@ func.func @buffer_addr64_fallback(
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

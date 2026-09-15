@@ -11,8 +11,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
   func.func @redistribute_before_aligned_alloc(
       %src: !wave.ptr<#wave.global, i8>,
-      %dst: !wave.ptr<#wave.global, i8>)
-      attributes {wave.kernel, wave.lds_size = 65248 : i64,
+      %dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 65248 : i64,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 2 : i64} {
     %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -48,6 +47,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
     %done = wave.store %future_value -> %dst_ptr after %future_loaded
         : (!wave.simd<i8, 32>, !wave.simd<!wave.ptr<#wave.global, i8>, 32>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %done : !wave.mem.token
   }
 }

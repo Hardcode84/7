@@ -79,7 +79,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 
-func.func @cluster_ids(%out: !wave.ptr<#wave.global, i32>) attributes {
+func.func @cluster_ids(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {
     wave.kernel,
     gpu.known_cluster_size = array<i32: 2, 2, 1>,
     wave.cluster_dims = array<i32: 2, 2, 1>
@@ -112,11 +112,10 @@ func.func @cluster_ids(%out: !wave.ptr<#wave.global, i32>) attributes {
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
-func.func @runtime_cluster_ids(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @runtime_cluster_ids(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %local_z = wave.cluster_workgroup_id z
   %max_z = wave.cluster_workgroup_max_id z
   %sum = wave.binary addi %local_z, %max_z : i32, i32 -> i32
@@ -129,7 +128,7 @@ func.func @runtime_cluster_ids(%out: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

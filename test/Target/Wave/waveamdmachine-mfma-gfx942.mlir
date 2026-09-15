@@ -19,7 +19,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // ASM-LABEL: mfma_gfx942_f16_16x16x16_kernel:
 // ASM: v_mfma_f32_16x16x16{{.*}}f16 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, 0
 func.func @mfma_gfx942_f16_16x16x16_kernel(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, f16, 16, 16, 64, 2>
@@ -46,7 +46,7 @@ func.func @mfma_gfx942_f16_16x16x16_kernel(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx942_bf16_16x16x16_kernel
@@ -61,7 +61,7 @@ func.func @mfma_gfx942_f16_16x16x16_kernel(
 // ASM-LABEL: mfma_gfx942_bf16_16x16x16_kernel:
 // ASM: v_mfma_f32_16x16x16{{.*}}bf16 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, 0
 func.func @mfma_gfx942_bf16_16x16x16_kernel(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, bf16, 16, 16, 64, 2>
@@ -88,7 +88,7 @@ func.func @mfma_gfx942_bf16_16x16x16_kernel(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 }

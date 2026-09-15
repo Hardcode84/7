@@ -33,6 +33,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/InferIntRangeInterface.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -658,6 +659,21 @@ static void eraseDeadFoldedMmaAccumulatorMaterializations(
   }
 }
 
+struct ConvertPhysicalReturnSignature : OpConversionPattern<func::FuncOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(func::FuncOp op, OpAdaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.modifyOpInPlace(op, [&] {
+      op.setFunctionType(FunctionType::get(op.getContext(),
+                                           op.getArgumentTypes(), TypeRange{}));
+      op.removeResAttrsAttr();
+    });
+    return success();
+  }
+};
+
 LogicalResult WaveAMDMachineSelector::run() {
   if (failed(validateMachineSelectionTarget(*this)))
     return failure();
@@ -689,10 +705,13 @@ LogicalResult WaveAMDMachineSelector::run() {
   eraseDeadFoldedMmaAccumulatorMaterializations(
       foldedMmaAccumulatorMaterializations);
 
-  auto oldType = func.getFunctionType();
-  func.setType(
-      FunctionType::get(func.getContext(), oldType.getInputs(), TypeRange{}));
-  return success();
+  ConversionTarget target(*func.getContext());
+  target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
+  target.addDynamicallyLegalOp<func::FuncOp>(
+      [](func::FuncOp op) { return op.getNumResults() == 0; });
+  RewritePatternSet patterns(func.getContext());
+  patterns.add<ConvertPhysicalReturnSignature>(func.getContext());
+  return applyPartialConversion(func, target, std::move(patterns));
 }
 
 struct IntRange64 {
@@ -8518,7 +8537,7 @@ static FailureOr<Value> materializeDmaFallbackLdsStore(
     return waveamdmachine::DsStoreB32Op::create(S.builder, op.getLoc(),
                                                 tokenType, dst.addr, value, dep,
                                                 dst.instOffset)
-        .getResult(0);
+        .getToken();
   }
   Type tupleType = getRegType(op.getContext(), waveamdmachine::RegClass::VGPR,
                               values.size());
@@ -8528,7 +8547,7 @@ static FailureOr<Value> materializeDmaFallbackLdsStore(
   return waveamdmachine::DsStoreTupleB32Op::create(S.builder, op.getLoc(),
                                                    tokenType, dst.addr, tuple,
                                                    dep, dst.instOffset)
-      .getResult(0);
+      .getToken();
 }
 
 static bool isZeroImm(WaveAMDMachineSelector &S, Value value) {
@@ -10081,36 +10100,64 @@ LogicalResult WaveAMDMachineSelector::selectRegion(Region &region) {
   return success();
 }
 
-LogicalResult WaveAMDMachineSelector::selectReturn(func::ReturnOp op) {
-  if (op.getNumOperands() > 1)
-    return op.emitError(
-        "WaveAMDMachine backend supports at most one return value");
-  if (func->hasAttr(wave::WaveDialect::getKernelAttrName())) {
-    if (op.getNumOperands() != 0)
-      return op.emitError("kernel functions must return void");
-    waveamdmachine::SEndpgmOp::create(builder, op.getLoc());
-    op.getOperandsMutable().clear();
+static LogicalResult materializeReturnValue(WaveAMDMachineSelector &selector,
+                                            func::ReturnOp op, Value value) {
+  Value ret = selector.expect(value, op);
+  FailureOr<unsigned> width = getRegisterPayloadWidth(
+      value.getType(), [&]() { return op.emitError(); });
+  if (failed(width))
+    return failure();
+  ret = readFirstLane(selector, op.getLoc(), ret);
+  if (*width == 2)
+    ret = ensureSGPR2(selector, op.getLoc(), ret);
+  FailureOr<SmallVector<Value, 2>> words =
+      splitSGPRWords(selector, op, ret, *width);
+  if (failed(words))
+    return failure();
+  for (auto [idx, word] : llvm::enumerate(*words))
+    waveamdmachine::SMovB32Op::create(selector.builder, op.getLoc(),
+                                      (Twine("s") + Twine(idx)).str(), word);
+  return success();
+}
+
+static LogicalResult selectKernelReturn(WaveAMDMachineSelector &selector,
+                                        func::ReturnOp op,
+                                        ValueRange dependencies, bool hasData) {
+  if (hasData)
+    return op.emitError("kernel functions may return only memory tokens");
+  if (Operation *previous = op->getPrevNode();
+      previous && isa<waveamdmachine::SEndpgmOp>(previous)) {
+    if (!dependencies.empty())
+      return op.emitError("kernel return already has a machine terminator");
     return success();
   }
+  waveamdmachine::SEndpgmOp::create(selector.builder, op.getLoc(),
+                                    dependencies);
+  op.getOperandsMutable().clear();
+  return success();
+}
 
-  if (op.getNumOperands() == 1) {
-    Value ret = expect(op.getOperand(0), op);
-    FailureOr<unsigned> width = getRegisterPayloadWidth(
-        op.getOperand(0).getType(), [&]() { return op.emitError(); });
-    if (failed(width))
-      return failure();
-    ret = readFirstLane(*this, op.getLoc(), ret);
-    if (*width == 2)
-      ret = ensureSGPR2(*this, op.getLoc(), ret);
-    FailureOr<SmallVector<Value, 2>> words =
-        splitSGPRWords(*this, op, ret, *width);
-    if (failed(words))
-      return failure();
-    for (auto [idx, word] : llvm::enumerate(*words))
-      waveamdmachine::SMovB32Op::create(builder, op.getLoc(),
-                                        (Twine("s") + Twine(idx)).str(), word);
+LogicalResult WaveAMDMachineSelector::selectReturn(func::ReturnOp op) {
+  SmallVector<Value> dependencies;
+  SmallVector<Value> data;
+  for (Value value : op.getOperands()) {
+    if (isa<waveamdmachine::MemTokenType>(value.getType()))
+      dependencies.push_back(value);
+    else if (isa<MemTokenType>(value.getType()))
+      dependencies.push_back(expect(value, op));
+    else
+      data.push_back(value);
   }
-  waveamdmachine::SSetpcB64Op::create(builder, op.getLoc());
+  if (func->hasAttr(wave::WaveDialect::getKernelAttrName()))
+    return selectKernelReturn(*this, op, dependencies, !data.empty());
+  if (data.size() > 1)
+    return op.emitError(
+        "WaveAMDMachine backend supports at most one data return value");
+
+  if (data.size() == 1 &&
+      failed(materializeReturnValue(*this, op, data.front())))
+    return failure();
+  waveamdmachine::SSetpcB64Op::create(builder, op.getLoc(), dependencies);
   op.getOperandsMutable().clear();
   return success();
 }
@@ -10232,6 +10279,13 @@ static LogicalResult diagnoseFunctionResultTypes(func::FuncOp func) {
 
 static LogicalResult diagnoseWaveAMDMachineBoundary(func::FuncOp func) {
   bool foundUnsupported = failed(diagnoseFunctionResultTypes(func));
+  for (Type type : func.getArgumentTypes()) {
+    if (isa<MemTokenType, waveamdmachine::MemTokenType>(type)) {
+      func.emitError(
+          "memory token arguments require inlining before machine selection");
+      foundUnsupported = true;
+    }
+  }
   func.walk([&](Operation *op) {
     if (op->getDialect() && isa<wavemeta::WaveMetaDialect>(op->getDialect())) {
       op->emitOpError("WaveAMDMachine lowering requires wavemeta-specialize; "

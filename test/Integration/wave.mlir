@@ -17,8 +17,7 @@ module attributes {gpu.container_module} {
 gpu.module @kernels {
   // `gpu.kernel` is required by `gpu.launch_func`'s symbol verifier;
   // `wave.kernel` marks funcs consumed by `compile_kernels`.
-  func.func @write_lane_ids(%dst: !wave.ptr<#wave.global, i32>)
-      attributes {gpu.kernel, wave.kernel} {
+  func.func @write_lane_ids(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %range = arith.constant @BYTES@ : i32
     %buffer = waveamd.make_buffer %dst, %range
         : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -29,7 +28,7 @@ gpu.module @kernels {
     %tok = wave.store %lane -> %ptrs
         : (!wave.simd<i32, @W@>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>)
         -> !wave.mem.token
-    return
+    return %tok : !wave.mem.token
   }
 }
 

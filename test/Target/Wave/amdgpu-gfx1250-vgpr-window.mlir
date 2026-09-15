@@ -239,12 +239,12 @@ func.func @buffer_vgpr_window() {
   %desc = waveamdmachine.uninit
       : !waveamdmachine.reg<sgpr, 4, 8>
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  waveamdmachine.buffer_store_b32 %off, %value, %desc, %zero
+  %observed_store_1 = waveamdmachine.buffer_store_b32 %off, %value, %desc, %zero
       : (!waveamdmachine.reg<vgpr, 1, 256>,
          !waveamdmachine.reg<vgpr, 1, 512>,
          !waveamdmachine.reg<sgpr, 4, 8>,
-         !waveamdmachine.imm) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 

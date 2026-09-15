@@ -12,8 +12,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @mxfp_epilogue_redistribute_lds_overflow(
     %src0: !wave.ptr<#wave.global, bf16>,
     %src1: !wave.ptr<#wave.global, bf16>,
-    %dst: !wave.ptr<#wave.global, bf16>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, bf16>) -> !wave.mem.token attributes {wave.kernel,
                 wave.lds_size = 138144 : i64,
                 wave.workgroup_size = array<i32: 256, 1, 1>,
                 wave.waves_per_workgroup = 4 : i64} {
@@ -60,6 +59,6 @@ func.func @mxfp_epilogue_redistribute_lds_overflow(
   %token1 = wave.store %value1 -> %ptr after %token0
       : (!wave.simd<bf16, 64>, !wave.simd<!wave.ptr<#wave.global, bf16>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %token1 : !wave.mem.token
 }
 }

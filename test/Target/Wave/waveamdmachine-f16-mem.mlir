@@ -15,8 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: ds_load_u16
 // ASM: global_store_b16
 func.func @f16_global_shared(%in: !wave.ptr<#wave.global, f16>,
-                             %out: !wave.ptr<#wave.global, f16>)
-    attributes {wave.kernel, wave.lds_size = 64 : i64} {
+                             %out: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 64 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane
       : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 32>
@@ -43,7 +42,7 @@ func.func @f16_global_shared(%in: !wave.ptr<#wave.global, f16>,
       : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#wave.global, f16>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %final : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @f16_buffer
@@ -52,8 +51,7 @@ func.func @f16_global_shared(%in: !wave.ptr<#wave.global, f16>,
 // ASM-LABEL: f16_buffer:
 // ASM: buffer_load_u16
 // ASM: buffer_store_b16
-func.func @f16_buffer(%base: !wave.ptr<#wave.global, f16>)
-    attributes {wave.kernel} {
+func.func @f16_buffer(%base: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %base, %range
       : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#waveamd.buffer, f16>
@@ -68,7 +66,7 @@ func.func @f16_buffer(%base: !wave.ptr<#wave.global, f16>)
       : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %st : !wave.mem.token
 }
 
 }

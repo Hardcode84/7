@@ -1937,8 +1937,16 @@ def WaveAMDMachine_SSendmsgDeallocVgprsOp
   let archPredicate = "isa.Major >= 11";
   let summary = "release VGPRs before terminal s_endpgm";
 }
-def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_ZeroResult<"s_endpgm">;
-def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_ZeroResult<"s_setpc_b64">;
+def WaveAMDMachine_SEndpgmOp : WaveAMDMachine_Op<"s_endpgm"> {
+  let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let assemblyFormat = "(`after` $dependencies^ `:` type($dependencies))? attr-dict";
+  let builders = [OpBuilder<(ins), [{ build($_builder, $_state, ::mlir::ValueRange{}); }]>];
+}
+def WaveAMDMachine_SSetpcB64Op : WaveAMDMachine_Op<"s_setpc_b64"> {
+  let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let assemblyFormat = "(`after` $dependencies^ `:` type($dependencies))? attr-dict";
+  let builders = [OpBuilder<(ins), [{ build($_builder, $_state, ::mlir::ValueRange{}); }]>];
+}
 
 // AllTypesMatch's default predicate handles fixed operands only.
 def WaveAMDMachine_MaterializationVariantsTypesMatch : AllTypesMatch<["choices", "result"]> {
@@ -2080,7 +2088,7 @@ def WaveAMDMachine_UniformIfOp : WaveAMDMachine_Op<"uniform_if", [
 class WaveAMDMachine_TDMTransfer<string mnemonic, list<Trait> traits>
     : WaveAMDMachine_Op<mnemonic,
           !listconcat(traits, [WaveAMDMachine_TensorMemory,
-                               MemoryEffects<[MemRead, MemWrite]>])>,
+                               NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>])>,
       WaveAMDMachine_WaitcntInfo<"Tensor">,
       WaveAMDMachine_OperandLegality<"0", "0", "0", "0x1b"> {
   let arguments = (ins WaveAMDMachine_SGPR4:$d0,
@@ -2108,13 +2116,12 @@ def WaveAMDMachine_TDMStoreOp
   let summary = "gfx1250 tensor store from LDS";
 }
 
-// MemWrite prevents DCE; dependency token carries ordering.
 def WaveAMDMachine_TDMPrefetchOp
     : WaveAMDMachine_Op<"tdm_prefetch", [
         WaveAMDMachine_VMEMLoad,
         WaveAMDMachine_FlatMemory,
         WaveAMDMachine_CompletionNeutralTokenTrait,
-        MemoryEffects<[MemWrite]>
+        NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>
       ]>,
       WaveAMDMachine_OperandLegality<"0", "0", "0", "0x1"> {
   let summary = "descriptor-derived global prefetch";
@@ -2443,7 +2450,7 @@ class WaveAMDMachine_ClusterLoadAsyncToLdsOp<string mnemonic>
     : WaveAMDMachine_Op<
           mnemonic,
           [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma,
-           WaveAMDMachine_FlatMemory, MemoryEffects<[MemRead, MemWrite]>]>,
+           WaveAMDMachine_FlatMemory, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_WaitcntInfo<"Async">,
       WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "gfx1250 async cluster multicast load to LDS";
@@ -2479,7 +2486,7 @@ class WaveAMDMachine_GlobalLoadAsyncToLdsOp<string mnemonic>
     : WaveAMDMachine_Op<
           mnemonic,
           [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma,
-           WaveAMDMachine_FlatMemory, MemoryEffects<[MemRead, MemWrite]>]>,
+           WaveAMDMachine_FlatMemory, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_WaitcntInfo<"Async">,
       WaveAMDMachine_InstructionIssueCount<"2"> {
   let summary = "gfx1250 async global-to-LDS load";
@@ -2515,7 +2522,7 @@ def WaveAMDMachine_GlobalLoadAsyncToLdsB128Op
 // only). The `inst_offset` attribute remains for IR shape uniformity
 // but always emits as 0; address planning sinks constants into `voffset`.
 def WaveAMDMachine_GlobalLoadLdsB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "global-to-LDS 32-bit DMA load";
   let description = [{
@@ -2543,7 +2550,7 @@ def WaveAMDMachine_GlobalLoadLdsB32Op
 }
 
 def WaveAMDMachine_GlobalLoadLdsB128Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b128", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_load_lds_b128", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "global-to-LDS 128-bit DMA load";
   let description = [{
@@ -2592,14 +2599,14 @@ def WaveAMDMachine_UpdateBufferRsrcBaseOp
 }
 
 def WaveAMDMachine_GlobalStoreB8Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b8", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b8", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 8-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_RegOrImm:$value,
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2608,14 +2615,14 @@ def WaveAMDMachine_GlobalStoreB8Op
 }
 
 def WaveAMDMachine_GlobalStoreB16Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b16", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b16", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 16-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_RegOrImm:$value,
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2624,7 +2631,7 @@ def WaveAMDMachine_GlobalStoreB16Op
 }
 
 def WaveAMDMachine_GlobalStoreB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b32", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 32-bit store through an SGPR base";
   let description = [{
@@ -2636,7 +2643,7 @@ def WaveAMDMachine_GlobalStoreB32Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2645,13 +2652,13 @@ def WaveAMDMachine_GlobalStoreB32Op
 }
 
 def WaveAMDMachine_GlobalStoreB8Addr64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b8_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b8_addr64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 8-bit store through a VGPR64 address";
   let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2660,13 +2667,13 @@ def WaveAMDMachine_GlobalStoreB8Addr64Op
 }
 
 def WaveAMDMachine_GlobalStoreB16Addr64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b16_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b16_addr64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 16-bit store through a VGPR64 address";
   let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2675,13 +2682,13 @@ def WaveAMDMachine_GlobalStoreB16Addr64Op
 }
 
 def WaveAMDMachine_GlobalStoreB32Addr64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b32_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b32_addr64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 32-bit store through a VGPR64 address";
   let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2690,13 +2697,13 @@ def WaveAMDMachine_GlobalStoreB32Addr64Op
 }
 
 def WaveAMDMachine_GlobalStoreB64Addr64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b64_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b64_addr64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 64-bit store through a VGPR64 address";
   let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR2:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2705,13 +2712,13 @@ def WaveAMDMachine_GlobalStoreB64Addr64Op
 }
 
 def WaveAMDMachine_GlobalStoreB96Addr64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b96_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b96_addr64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 96-bit store through a VGPR64 address";
   let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR3:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2720,13 +2727,13 @@ def WaveAMDMachine_GlobalStoreB96Addr64Op
 }
 
 def WaveAMDMachine_GlobalStoreB128Addr64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b128_addr64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b128_addr64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 128-bit store through a VGPR64 address";
   let arguments = (ins WaveAMDMachine_VGPR2:$address, WaveAMDMachine_VGPR4:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $address `,` $value (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2735,14 +2742,14 @@ def WaveAMDMachine_GlobalStoreB128Addr64Op
 }
 
 def WaveAMDMachine_GlobalStoreB64Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 64-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR2:$value,
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2751,14 +2758,14 @@ def WaveAMDMachine_GlobalStoreB64Op
 }
 
 def WaveAMDMachine_GlobalStoreB96Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b96", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b96", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 96-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR3:$value,
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2767,14 +2774,14 @@ def WaveAMDMachine_GlobalStoreB96Op
 }
 
 def WaveAMDMachine_GlobalStoreB128Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_b128", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_b128", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "global 128-bit store through an SGPR base";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR4:$value,
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -2782,7 +2789,7 @@ def WaveAMDMachine_GlobalStoreB128Op
   }];
 }
 def WaveAMDMachine_BufferStoreB8Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b8", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b8", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "buffer 8-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR1:$value,
@@ -2790,7 +2797,7 @@ def WaveAMDMachine_BufferStoreB8Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -2799,7 +2806,7 @@ def WaveAMDMachine_BufferStoreB8Op
 }
 
 def WaveAMDMachine_BufferStoreB16Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b16", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b16", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "buffer 16-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR1:$value,
@@ -2807,7 +2814,7 @@ def WaveAMDMachine_BufferStoreB16Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -2816,7 +2823,7 @@ def WaveAMDMachine_BufferStoreB16Op
 }
 
 def WaveAMDMachine_BufferStoreB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b32", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "buffer 32-bit store through an SGPR descriptor and VGPR offset";
   let description = [{
@@ -2831,7 +2838,7 @@ def WaveAMDMachine_BufferStoreB32Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -3011,7 +3018,7 @@ def WaveAMDMachine_BufferLoadB128Op
 }
 
 def WaveAMDMachine_BufferStoreB64Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b64", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b64", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "buffer 64-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR2:$value,
@@ -3019,7 +3026,7 @@ def WaveAMDMachine_BufferStoreB64Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -3028,7 +3035,7 @@ def WaveAMDMachine_BufferStoreB64Op
 }
 
 def WaveAMDMachine_BufferStoreB96Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b96", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b96", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "buffer 96-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR3:$value,
@@ -3036,7 +3043,7 @@ def WaveAMDMachine_BufferStoreB96Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -3045,7 +3052,7 @@ def WaveAMDMachine_BufferStoreB96Op
 }
 
 def WaveAMDMachine_BufferStoreB128Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b128", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_b128", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMStoreInfo {
   let summary = "buffer 128-bit store through an SGPR descriptor and VGPR offset";
   let arguments = (ins WaveAMDMachine_VGPR1:$offset, WaveAMDMachine_VGPR4:$value,
@@ -3053,7 +3060,7 @@ def WaveAMDMachine_BufferStoreB128Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -3087,7 +3094,7 @@ def WaveAMDMachine_BufferLoadTupleB32Op
 // Buffer LDS DMA ops have no inst-offset slot. Constants route to
 // `soffset`, but nonzero immediates must materialize through SGPR.
 def WaveAMDMachine_BufferLoadLdsB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b32", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "buffer-to-LDS 32-bit DMA load";
   let description = [{
@@ -3119,7 +3126,7 @@ def WaveAMDMachine_BufferLoadLdsB32Op
 }
 
 def WaveAMDMachine_BufferLoadLdsB128Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b128", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, MemoryEffects<[MemRead, MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_load_lds_b128", [WaveAMDMachine_VMEMLoad, WaveAMDMachine_LDSDma, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>]>,
       WaveAMDMachine_VMEMLoadInfo {
   let summary = "buffer-to-LDS 128-bit DMA load";
   let description = [{
@@ -3149,7 +3156,7 @@ def WaveAMDMachine_BufferLoadLdsB128Op
 }
 
 def WaveAMDMachine_BufferStoreTupleB32Op
-    : WaveAMDMachine_BufferMemoryOp<"buffer_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_BufferMemoryOp<"buffer_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMTupleStoreInfo {
   let summary = "buffer 32-bit store of a VGPR tuple component";
   let description = [{
@@ -3163,7 +3170,7 @@ def WaveAMDMachine_BufferStoreTupleB32Op
                        WaveAMDMachine_SGPR1OrImm:$soffset,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $descriptor `,` $soffset
     (`after` $dependency^)? (`offset` $inst_offset^)?
@@ -3171,7 +3178,7 @@ def WaveAMDMachine_BufferStoreTupleB32Op
   }];
 }
 def WaveAMDMachine_GlobalStoreTupleB32Op
-    : WaveAMDMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_GlobalMemoryOp<"global_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_VMEMTupleStoreInfo {
   let summary = "global 32-bit store of a VGPR tuple component";
   let description = [{
@@ -3185,7 +3192,7 @@ def WaveAMDMachine_GlobalStoreTupleB32Op
                        WaveAMDMachine_SGPR2:$base,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $offset `,` $value `,` $base (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -3226,7 +3233,7 @@ def WaveAMDMachine_ScratchLoadTupleB32Op
 }
 
 def WaveAMDMachine_ScratchStoreB32Op
-    : WaveAMDMachine_ScratchMemoryOp<"scratch_store_b32", [WaveAMDMachine_VMEMStore, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_ScratchMemoryOp<"scratch_store_b32", [WaveAMDMachine_VMEMStore, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_ScratchStoreInfo {
   let summary = "scratch 32-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
@@ -3234,7 +3241,7 @@ def WaveAMDMachine_ScratchStoreB32Op
                        WaveAMDMachine_SGPR1OrImm:$saddr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $vaddr `,` $value `,` $saddr (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -3243,7 +3250,7 @@ def WaveAMDMachine_ScratchStoreB32Op
 }
 
 def WaveAMDMachine_ScratchStoreTupleB32Op
-    : WaveAMDMachine_ScratchMemoryOp<"scratch_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, MemoryEffects<[MemWrite]>]>,
+    : WaveAMDMachine_ScratchMemoryOp<"scratch_store_tuple_b32", [WaveAMDMachine_VMEMStore, WaveAMDMachine_TupleMemory, NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]>,
       WaveAMDMachine_ScratchTupleStoreInfo {
   let summary = "scratch 32-bit store of a VGPR tuple";
   let arguments = (ins WaveAMDMachine_VGPR1OrImm:$vaddr,
@@ -3251,7 +3258,7 @@ def WaveAMDMachine_ScratchStoreTupleB32Op
                        WaveAMDMachine_SGPR1OrImm:$saddr,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$inst_offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $vaddr `,` $value `,` $saddr (`after` $dependency^)?
     (`offset` $inst_offset^)?
@@ -3390,14 +3397,14 @@ def WaveAMDMachine_DsLoadTupleB32Op
 }
 
 def WaveAMDMachine_DsStoreB16Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b16", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b16", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 16-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -3405,14 +3412,14 @@ def WaveAMDMachine_DsStoreB16Op
 }
 
 def WaveAMDMachine_DsStoreB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b32", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -3420,7 +3427,7 @@ def WaveAMDMachine_DsStoreB32Op
 }
 
 def WaveAMDMachine_DsStore2B32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store2_b32", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store2_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget,
                                  "0x6"> {
@@ -3432,7 +3439,7 @@ def WaveAMDMachine_DsStore2B32Op
                        WaveAMDMachine_Offset8Attr:$offset0,
                        WaveAMDMachine_Offset8Attr:$offset1,
                        DefaultValuedAttr<BoolAttr, "false">:$st64);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value0 `,` $value1 (`after` $dependency^)?
     `offsets` `(` $offset0 `,` $offset1 `)`
@@ -3472,14 +3479,14 @@ def WaveAMDMachine_DsAddRtnU32Op
 }
 
 def WaveAMDMachine_DsStoreAddTidB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_addtid_b32", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_addtid_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit addtid store";
   let arguments = (ins WaveAMDMachine_M0:$m0, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $m0 `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -3487,14 +3494,14 @@ def WaveAMDMachine_DsStoreAddTidB32Op
 }
 
 def WaveAMDMachine_DsStoreB8Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b8", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b8", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 8-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR1:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -3640,14 +3647,14 @@ def WaveAMDMachine_DsLoadB128Op
 }
 
 def WaveAMDMachine_DsStoreB64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b64", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b64", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 64-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR2:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -3655,7 +3662,7 @@ def WaveAMDMachine_DsStoreB64Op
 }
 
 def WaveAMDMachine_DsStore2B64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store2_b64", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store2_b64", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget,
                                  "0x6"> {
@@ -3667,7 +3674,7 @@ def WaveAMDMachine_DsStore2B64Op
                        WaveAMDMachine_Offset8Attr:$offset0,
                        WaveAMDMachine_Offset8Attr:$offset1,
                        DefaultValuedAttr<BoolAttr, "false">:$st64);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value0 `,` $value1 (`after` $dependency^)?
     `offsets` `(` $offset0 `,` $offset1 `)`
@@ -3676,14 +3683,14 @@ def WaveAMDMachine_DsStore2B64Op
 }
 
 def WaveAMDMachine_DsStoreB96Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b96", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b96", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 96-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR3:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -3691,14 +3698,14 @@ def WaveAMDMachine_DsStoreB96Op
 }
 
 def WaveAMDMachine_DsStoreB128Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b128", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_b128", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 128-bit store";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR4:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)
@@ -3706,7 +3713,7 @@ def WaveAMDMachine_DsStoreB128Op
 }
 
 def WaveAMDMachine_DsStoreTupleB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [WaveAMDMachine_LDSStore, WaveAMDMachine_TupleMemory]>,
+    : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore, WaveAMDMachine_TupleMemory]>,
       WaveAMDMachine_LDSTupleStoreInfo,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS store of a register tuple as N consecutive 32-bit values";
@@ -3719,7 +3726,7 @@ def WaveAMDMachine_DsStoreTupleB32Op
   let arguments = (ins WaveAMDMachine_VGPR1:$addr, WaveAMDMachine_AVGPR:$value,
                        Optional<WaveAMDMachine_MemToken>:$dependency,
                        DefaultValuedAttr<I64Attr, "0">:$offset);
-  let results = (outs Optional<WaveAMDMachine_MemToken>:$token);
+  let results = (outs WaveAMDMachine_MemToken:$token);
   let assemblyFormat = [{
     $addr `,` $value (`after` $dependency^)? (`offset` $offset^)?
     attr-dict `:` functional-type(operands, results)

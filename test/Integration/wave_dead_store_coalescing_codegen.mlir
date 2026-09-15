@@ -45,8 +45,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @dead_store_tokens_coalesce(
-    %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %lane = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -72,12 +71,12 @@ func.func @dead_store_tokens_coalesce(
       : (!wave.simd<i32, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  %completed = wave.join %first, %second : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %completed : !wave.mem.token
 }
 
 func.func @live_store_token_stays(
-    %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %lane = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -104,12 +103,11 @@ func.func @live_store_token_stays(
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
   %barrier = wave.barrier %first : (!wave.mem.token) -> !wave.mem.token
-  return
+  return %second : !wave.mem.token
 }
 
 func.func @equivalent_empty_dependencies_coalesce(
-    %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %lane = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -136,14 +134,14 @@ func.func @equivalent_empty_dependencies_coalesce(
       : (!wave.simd<i32, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  %completed = wave.join %first, %second : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %completed : !wave.mem.token
 }
 
 func.func @distinct_load_dependencies_stay(
     %in0: !wave.ptr<#wave.global, i32>,
     %in1: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %lane = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -174,6 +172,7 @@ func.func @distinct_load_dependencies_stay(
       : (!wave.simd<i32, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  %completed = wave.join %first, %second : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %completed : !wave.mem.token
 }
 }

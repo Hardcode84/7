@@ -20,8 +20,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: global_store_dword
 // ASM: s_endpgm
 func.func @buffer_i8_pack_d16_codegen(%in: !wave.ptr<#wave.global, i8>,
-                                      %out: !wave.ptr<#wave.global, i8>)
-    attributes {wave.kernel} {
+                                      %out: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
@@ -72,7 +71,7 @@ func.func @buffer_i8_pack_d16_codegen(%in: !wave.ptr<#wave.global, i8>,
       : (!wave.simd<vector<4xi8>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i8>, 64>)
       -> !wave.mem.token
-  return
+  return %st : !wave.mem.token
 }
 
 }

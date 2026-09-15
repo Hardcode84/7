@@ -23,7 +23,7 @@ func.func @buffer_store_tuple_kernel(%arg0: !wave.ptr<#wave.global, i32>) attrib
   %desc = waveamdmachine.make_buffer_rsrc %base, %range : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 4>
   %tuple = waveamdmachine.v_mov_b32_tuple %off : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
   %t = waveamdmachine.buffer_store_tuple_b32 %off, %tuple, %desc, %zero : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %t : !waveamdmachine.mem.token
   return
 }
 

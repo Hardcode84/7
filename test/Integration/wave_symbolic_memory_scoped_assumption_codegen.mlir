@@ -84,8 +84,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @symbolic_memory_scoped_assumption_codegen(
     %source: !wave.ptr<#wave.global, i32>,
-    %destination: !wave.ptr<#wave.global, i32>, %limit_raw: i32)
-    attributes {wave.kernel,
+    %destination: !wave.ptr<#wave.global, i32>, %limit_raw: i32) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -129,13 +128,12 @@ func.func @symbolic_memory_scoped_assumption_codegen(
       : (!wave.simd<vector<2xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 
 func.func @symbolic_memory_ssa_assumption_codegen(
     %source: !wave.ptr<#wave.global, f16>,
-    %destination: !wave.ptr<#wave.global, f16>, %limit_raw: i32)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+    %destination: !wave.ptr<#wave.global, f16>, %limit_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
   %bounded_item = wave.assume %item as "x"
@@ -190,14 +188,13 @@ func.func @symbolic_memory_ssa_assumption_codegen(
       : (!wave.simd<vector<2xf16>, 64>,
          !wave.simd<!wave.ptr<#wave.global, f16>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 
 func.func @symbolic_memory_wrapping_relation_codegen(
     %source: !wave.ptr<#wave.global, f16>,
     %destination: !wave.ptr<#wave.global, f16>,
-    %stride_raw: i32, %bias_raw: i32)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+    %stride_raw: i32, %bias_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
   %bounded_item = wave.assume %item as "x"
@@ -223,13 +220,12 @@ func.func @symbolic_memory_wrapping_relation_codegen(
       : (!wave.simd<vector<2xf16>, 64>,
          !wave.simd<!wave.ptr<#wave.global, f16>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 
 func.func @symbolic_memory_predicate_quotient_codegen(
     %source: !wave.ptr<#wave.global, i8>,
-    %destination: !wave.ptr<#wave.global, i8>)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
+    %destination: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
   %bounded_item = wave.assume %item as "x"
@@ -257,6 +253,6 @@ func.func @symbolic_memory_predicate_quotient_codegen(
       : (!wave.simd<vector<4xi8>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i8>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 }

@@ -17,6 +17,7 @@ implementation (parser choice), then the plan. North star is the saxpy in
 ```c
 kernel [[amdgpu_wave_size(32)]]
 void saxpy(float *x, float *y, float a, uint32_t n) {
+  token output_done = token();
   simd<uint32_t, 32> lane = lane_id<32>();
   uint32_t           wave = wave_id_in_grid();
   simd<uint32_t, 32> i    = wave * 32 + lane;
@@ -24,8 +25,9 @@ void saxpy(float *x, float *y, float a, uint32_t n) {
   where (active) {
     simd<float, 32> xv = load(x + i);
     simd<float, 32> yv = load(y + i);
-    store(a * xv + yv, y + i);
+    output_done = join(output_done, store(a * xv + yv, y + i));
   }
+  observe(output_done);
 }
 ```
 
@@ -105,6 +107,7 @@ value argument.
 | `load(ptr [after t])` | `(ptr) -> (simd<T,W>, token)` | `wave.load` |
 | `store(value, ptr [after t])` | `(simd<T,W>, ptr) -> token` | `wave.store` |
 | `barrier([t...])` | `(token...) -> token` | `wave.barrier` |
+| `observe(t...)` | `(token...) -> ()` | logical kernel return dependencies |
 | `wait(t...)` | `(token...) -> ()` | `wave.wait` |
 | `join(t...)` | `(token...) -> token` | `wave.join` |
 | `token()` | `() -> token` (empty seed) | `wave.token` |
@@ -215,7 +218,11 @@ needs a token:
 | RAW through a register (`xv = load(...)`, then `a*xv`); store-data readiness | SSA value edge | no |
 | WAW; WAR without a value dep; RAW through memory (LDS); barrier; async completion | nothing in value flow | **yes** |
 
-saxpy needs no tokens: the store's data value-depends on both loads.
+SAXPY loads need no extra ordering token: the stored value depends on both
+loads. The output store token must reach `observe(token)`. Kernel completion
+consumes these observations. A store or DMA with no observed result can be
+removed by canonicalization. For a loop output, join each store token into an
+explicit token carry and observe the loop result at kernel scope.
 
 Ops (`WaveOps.td` 388-533): `load`/`store` take an optional `$dependency`
 token and always produce one; `token()` (seed -> `wave.token`), `after`

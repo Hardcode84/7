@@ -1035,6 +1035,8 @@ def _emit_single_tile_mma_kernel(
             bld, cfg, score_ptr, out_arg, lane, d_tile, acc_ready
         )
 
+    bld.observe(scratch_dep)
+
 
 def _emit_first_online_accs(
     bld: dsl.FunctionBuilder,
@@ -1303,6 +1305,8 @@ def _emit_multi_tile_mma_kernel(
             d_tile,
             scratch_dep,
         )
+
+    bld.observe(scratch_dep)
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: _FlashAttentionConfig) -> None:

@@ -52,8 +52,7 @@ module attributes {
 } {
 
 func.func @cluster_barrier_native_codegen(
-    %out: !wave.ptr<#wave.global, i32>)
-    attributes {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {
       wave.kernel,
       gpu.known_cluster_size = array<i32: 2, 1, 1>,
       wave.cluster_dims = array<i32: 2, 1, 1>,
@@ -81,7 +80,7 @@ func.func @cluster_barrier_native_codegen(
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %done : !wave.mem.token
 }
 
 }

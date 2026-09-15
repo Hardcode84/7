@@ -20,8 +20,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100",
 // ASM-NOT: .amdhsa_wavefront_size32
 // ASM: .wavefront_size: 64
 func.func @i64_cmpi_gfx11_wave64_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %lhs: i64, %rhs: i64)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %lhs: i64, %rhs: i64) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %vlhs = wave.splat %lhs : i64 -> !wave.simd<i64, 64>
   %vrhs = wave.splat %rhs : i64 -> !wave.simd<i64, 64>
@@ -30,13 +29,16 @@ func.func @i64_cmpi_gfx11_wave64_codegen(
   %ptrs = wave.ptr_add %out, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  wave.where %active {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active {
     %token = wave.store %lane -> %ptrs
         : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>
-  return
+    wave.yield %token : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_1 : !wave.mem.token
+  } : !wave.mask<64> -> !wave.mem.token
+  return %observe_region_2 : !wave.mem.token
 }
 
 }

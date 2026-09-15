@@ -14,8 +14,7 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @lds_mirror(%dst: !wave.ptr<#wave.global, i32>)
-      attributes {gpu.kernel, wave.kernel, wave.lds_size = @BYTES@ : i64} {
+  func.func @lds_mirror(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {gpu.kernel, wave.kernel, wave.lds_size = @BYTES@ : i64} {
     %last = arith.constant @LAST@ : i32
     %vlast = wave.splat %last : i32 -> !wave.simd<i32, @W@>
 
@@ -49,7 +48,7 @@ gpu.module @kernels {
     %final_token = wave.store %loaded#0 -> %out_ptrs after %loaded#1
         : (!wave.simd<i32, @W@>, !wave.simd<!wave.ptr<#wave.global, i32>, @W@>, !wave.mem.token)
         -> !wave.mem.token
-    return
+    return %final_token : !wave.mem.token
   }
 }
 

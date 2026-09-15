@@ -13,8 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-LABEL: global_dma_lds:
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dword
-func.func @global_dma_lds(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 128 : i64} {
+func.func @global_dma_lds(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 128 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -25,7 +24,7 @@ func.func @global_dma_lds(%in: !wave.ptr<#wave.global, i32>)
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 4 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_b128
@@ -36,8 +35,7 @@ func.func @global_dma_lds(%in: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: global_dma_lds_b128:
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
-func.func @global_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+func.func @global_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -48,7 +46,7 @@ func.func @global_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_uniform_mul_dest
@@ -59,8 +57,7 @@ func.func @global_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: global_dma_lds_uniform_mul_dest:
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
-func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 1024 : i64} {
+func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 1024 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -76,7 +73,7 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<#wave.global, i32>)
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_uniform_dest_add
@@ -90,8 +87,7 @@ func.func @global_dma_lds_uniform_mul_dest(%in: !wave.ptr<#wave.global, i32>)
 // ASM: s_mov_b32 [[M0SRC:s[0-9]+]], 0x400
 // ASM-NEXT: s_mov_b32 m0, [[M0SRC]]
 // ASM: global_load_lds_dwordx4
-func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 2048 : i64} {
+func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 2048 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -107,7 +103,7 @@ func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<#wave.global, i32>)
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_uniform_dest_sadd_m0
@@ -124,8 +120,7 @@ func.func @global_dma_lds_uniform_dest_add(%in: !wave.ptr<#wave.global, i32>)
 // ASM: s_add_i32 m0, [[SCALED]], 0x400
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_uniform_dest_sadd_m0(
-    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
-    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 4096 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -140,7 +135,7 @@ func.func @global_dma_lds_uniform_dest_sadd_m0(
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_intconvert_range_m0
@@ -155,8 +150,7 @@ func.func @global_dma_lds_uniform_dest_sadd_m0(
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_intconvert_range_m0(
-    %in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 16384 : i64} {
+    %in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 16384 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w"
       [#wave.pred<"w >= 0">, #wave.pred<"w <= 255">]
@@ -178,7 +172,7 @@ func.func @global_dma_lds_intconvert_range_m0(
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_wrapping_intconvert_wide_m0
@@ -193,8 +187,7 @@ func.func @global_dma_lds_intconvert_range_m0(
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_wrapping_intconvert_wide_m0(
-    %in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 16384 : i64} {
+    %in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 16384 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w"
       [#wave.pred<"w >= 0">, #wave.pred<"w <= 127">]
@@ -216,7 +209,7 @@ func.func @global_dma_lds_wrapping_intconvert_wide_m0(
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_wide_uniform_dest_m0
@@ -232,8 +225,7 @@ func.func @global_dma_lds_wrapping_intconvert_wide_m0(
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_wide_uniform_dest_m0(
-    %in: !wave.ptr<#wave.global, i32>, %x_raw: i64)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %x_raw: i64) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -248,7 +240,7 @@ func.func @global_dma_lds_wide_uniform_dest_m0(
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_i64_fit_dest_m0
@@ -265,8 +257,7 @@ func.func @global_dma_lds_wide_uniform_dest_m0(
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_i64_fit_dest_m0(
-    %in: !wave.ptr<#wave.global, i32>, %x_raw: i64)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %x_raw: i64) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -281,7 +272,7 @@ func.func @global_dma_lds_i64_fit_dest_m0(
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_uniform_dest_split_remainder_m0
@@ -298,8 +289,7 @@ func.func @global_dma_lds_i64_fit_dest_m0(
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_uniform_dest_split_remainder_m0(
-    %in: !wave.ptr<#wave.global, i32>, %a_raw: i64, %b_raw: i64)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %a_raw: i64, %b_raw: i64) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
   %src = wave.ptr_add %in, %wi
@@ -315,7 +305,7 @@ func.func @global_dma_lds_uniform_dest_split_remainder_m0(
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_wide_source_base_adjust
@@ -329,8 +319,7 @@ func.func @global_dma_lds_uniform_dest_split_remainder_m0(
 // ASM: v_lshrrev_b64
 // ASM: global_load_lds_dwordx4
 func.func @global_dma_lds_wide_source_base_adjust(
-    %in: !wave.ptr<#wave.global, i32>, %x_raw: i64)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %x_raw: i64) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
   %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1099511627775">] : i64
@@ -344,7 +333,7 @@ func.func @global_dma_lds_wide_source_base_adjust(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_addr64_fallback
@@ -361,8 +350,7 @@ func.func @global_dma_lds_wide_source_base_adjust(
 // SELECT-NOT: waveamdmachine.s_mov_m0
 // SELECT-NOT: waveamdmachine.s_add_m0_i32
 func.func @global_dma_lds_addr64_fallback(
-    %in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w" [#wave.pred<"w >= 0">, #wave.pred<"w <= 63">] : !wave.simd<i32, 64>
   %off = wave.index_expr <"4294967296*w"> ["w"](%wi)
@@ -375,7 +363,7 @@ func.func @global_dma_lds_addr64_fallback(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @global_dma_lds_source_const_offset
@@ -386,8 +374,7 @@ func.func @global_dma_lds_addr64_fallback(
 // ASM: s_mov_b32 m0,
 // ASM: global_load_lds_dwordx4
 // ASM-NOT: offset:
-func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %src_off = wave.index_expr <"64 + wi"> ["wi"](%wi)
@@ -400,7 +387,7 @@ func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<#wave.global, i32>)
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds
@@ -411,8 +398,7 @@ func.func @global_dma_lds_source_const_offset(%in: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: buffer_dma_lds:
 // ASM: s_mov_b32 m0,
 // ASM: buffer_load_dword {{.*}} lds
-func.func @buffer_dma_lds(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 128 : i64} {
+func.func @buffer_dma_lds(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 128 : i64} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -426,7 +412,7 @@ func.func @buffer_dma_lds(%in: !wave.ptr<#wave.global, i32>)
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 4 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_b128
@@ -437,8 +423,7 @@ func.func @buffer_dma_lds(%in: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: buffer_dma_lds_b128:
 // ASM: s_mov_b32 m0,
 // ASM: buffer_load_dwordx4 {{.*}} lds
-func.func @buffer_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+func.func @buffer_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -452,7 +437,7 @@ func.func @buffer_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_uniform_dest_sadd_m0
@@ -469,8 +454,7 @@ func.func @buffer_dma_lds_b128(%in: !wave.ptr<#wave.global, i32>)
 // ASM: s_add_i32 m0, [[SCALED]], 0x400
 // ASM: buffer_load_dwordx4 {{.*}} lds
 func.func @buffer_dma_lds_uniform_dest_sadd_m0(
-    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
-    attributes {wave.kernel, wave.lds_size = 4096 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 4096 : i64} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -488,7 +472,7 @@ func.func @buffer_dma_lds_uniform_dest_sadd_m0(
   %tok = waveamd.dma_load_lds %src -> %dst after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_wide_uniform_source_uses_global_provenance
@@ -497,8 +481,7 @@ func.func @buffer_dma_lds_uniform_dest_sadd_m0(
 // ASM-LABEL: buffer_dma_lds_wide_uniform_source_uses_global_provenance:
 // ASM: global_load_lds_dwordx4
 func.func @buffer_dma_lds_wide_uniform_source_uses_global_provenance(
-    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 2147483647 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -518,7 +501,7 @@ func.func @buffer_dma_lds_wide_uniform_source_uses_global_provenance(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_bounded_source_soffset
@@ -532,8 +515,7 @@ func.func @buffer_dma_lds_wide_uniform_source_uses_global_provenance(
 // ASM-LABEL: buffer_dma_lds_bounded_source_soffset:
 // ASM: buffer_load_dwordx4 {{.*}}, s{{[0-9]+}} offen lds
 func.func @buffer_dma_lds_bounded_source_soffset(
-    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -550,7 +532,7 @@ func.func @buffer_dma_lds_bounded_source_soffset(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_lane_terms_before_uniform
@@ -568,8 +550,7 @@ func.func @buffer_dma_lds_bounded_source_soffset(
 // ASM-LABEL: buffer_dma_lds_lane_terms_before_uniform:
 // ASM: buffer_load_dwordx4 {{.*}}, s{{[0-9]+}} offen lds
 func.func @buffer_dma_lds_lane_terms_before_uniform(
-    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %u_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 8192 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -597,7 +578,7 @@ func.func @buffer_dma_lds_lane_terms_before_uniform(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_source_const_soffset
@@ -611,8 +592,7 @@ func.func @buffer_dma_lds_lane_terms_before_uniform(
 // ASM-LABEL: buffer_dma_lds_source_const_soffset:
 // ASM: buffer_load_dwordx4 {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], s{{[0-9]+}} offen lds
 func.func @buffer_dma_lds_source_const_soffset(
-    %in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -628,7 +608,7 @@ func.func @buffer_dma_lds_source_const_soffset(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_dma_lds_composed_source_assumption
@@ -639,8 +619,7 @@ func.func @buffer_dma_lds_source_const_soffset(
 // ASM-LABEL: buffer_dma_lds_composed_source_assumption:
 // ASM: buffer_load_dwordx4 {{v[0-9]+}}, s[{{[0-9]+}}:{{[0-9]+}}], 0 offen lds
 func.func @buffer_dma_lds_composed_source_assumption(
-    %in: !wave.ptr<#wave.global, i8>, %u_raw: i64)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i8>, %u_raw: i64) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
@@ -658,7 +637,7 @@ func.func @buffer_dma_lds_composed_source_assumption(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 }
@@ -671,8 +650,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // SELECT: waveamdmachine.v_lshlrev_b64
 // ASM-LABEL: gfx950_simd_i64_shl:
 // ASM: v_lshlrev_b64
-func.func @gfx950_simd_i64_shl(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @gfx950_simd_i64_shl(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
   %value = wave.cast intconvert %item
       policy {extension = #wave.cast_extension<zero>}
@@ -689,7 +667,7 @@ func.func @gfx950_simd_i64_shl(%out: !wave.ptr<#wave.global, i32>)
   %token = wave.store %stored -> %ptrs
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 }

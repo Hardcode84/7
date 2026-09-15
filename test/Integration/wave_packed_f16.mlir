@@ -14,8 +14,7 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @packed_f16_math(%dst: !wave.ptr<#wave.global, f32>)
-      attributes {gpu.kernel, wave.kernel} {
+  func.func @packed_f16_math(%dst: !wave.ptr<#wave.global, f32>) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %c1f = arith.constant 1.000000e+00 : f32
     %c2f = arith.constant 2.000000e+00 : f32
     %c3f = arith.constant 3.000000e+00 : f32
@@ -91,7 +90,7 @@ gpu.module @kernels {
         : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<#wave.global, f32>, 32>,
            !wave.mem.token)
         -> !wave.mem.token
-    return
+    return %hi_tok : !wave.mem.token
   }
 }
 

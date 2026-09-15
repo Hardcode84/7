@@ -11,8 +11,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @redistribute_after_released_lds(
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %lane = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -50,6 +49,6 @@ func.func @redistribute_after_released_lds(
   %done = wave.store %sum -> %dst_ptr after %ready
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %done : !wave.mem.token
 }
 }

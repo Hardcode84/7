@@ -19,8 +19,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CLEANUP: %[[SHIFTED:.*]] = waveamdmachine.v_lshlrev_b32 %[[ODD]]
 // CLEANUP: waveamdmachine.v_or3_b32 %[[EVEN_LO]], %[[EVEN_HI]], %[[SHIFTED]]
 func.func @buffer_i8_pack_d16(%in: !wave.ptr<#wave.global, i8>,
-                              %out: !wave.ptr<#wave.global, i8>)
-    attributes {wave.kernel} {
+                              %out: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
@@ -71,7 +70,7 @@ func.func @buffer_i8_pack_d16(%in: !wave.ptr<#wave.global, i8>,
       : (!wave.simd<vector<4xi8>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i8>, 64>)
       -> !wave.mem.token
-  return
+  return %st : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @buffer_i8_pack_shared_load_keeps_scalar
@@ -89,8 +88,7 @@ func.func @buffer_i8_pack_d16(%in: !wave.ptr<#wave.global, i8>,
 // CLEANUP-NOT: waveamdmachine.buffer_load_u8_d16
 // CLEANUP: waveamdmachine.v_or_b32
 func.func @buffer_i8_pack_shared_load_keeps_scalar(
-    %in: !wave.ptr<#wave.global, i8>, %out: !wave.ptr<#wave.global, i8>)
-    attributes {wave.kernel} {
+    %in: !wave.ptr<#wave.global, i8>, %out: !wave.ptr<#wave.global, i8>) -> (!wave.mem.token, !wave.mem.token) attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
@@ -144,7 +142,7 @@ func.func @buffer_i8_pack_shared_load_keeps_scalar(
   %scalar_store = wave.store %v0 -> %op
       : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>)
       -> !wave.mem.token
-  return
+  return %packed_store, %scalar_store : !wave.mem.token, !wave.mem.token
 }
 
 }

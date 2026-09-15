@@ -22,7 +22,7 @@ func.func @packed_bf16_gfx950(%out: !wave.ptr<#wave.global, i32>)
   %store = waveamdmachine.global_store_b32 %a, %pk, %base
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %store : !waveamdmachine.mem.token
   return
 }
 

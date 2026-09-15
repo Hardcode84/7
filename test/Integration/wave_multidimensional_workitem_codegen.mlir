@@ -13,8 +13,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @symbolic_memory_3d(
     %src: !wave.ptr<#wave.global, i32>,
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 16, 2, 2>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item_x = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -44,6 +43,6 @@ func.func @symbolic_memory_3d(
       : (!wave.simd<vector<1xi32>, 64>, !wave.ptr<#wave.global, i32>,
          !wave.simd<i32, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 }

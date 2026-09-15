@@ -1759,6 +1759,15 @@ static TypeRef *type_wait(Checker *c, Expr *e) {
     return NULL;
   return void_marker(c);
 }
+static TypeRef *type_observe(Checker *c, Expr *e) {
+  if (!no_gargs(c, e, "observe"))
+    return NULL;
+  if (!check_all_token_args(c, e, /*allow_zero=*/0, "observe"))
+    return NULL;
+  if (!no_dep(c, e, "observe"))
+    return NULL;
+  return void_marker(c);
+}
 
 static TypeRef *type_shared_memory_base_checked(Checker *c, Expr *e) {
   if (!no_dep(c, e, "shared_memory_base"))
@@ -1797,6 +1806,7 @@ static const BuiltinEntry kBuiltins[] = {
     {"barrier", type_barrier},
     {"join", type_join},
     {"wait", type_wait},
+    {"observe", type_observe},
     {"shared_memory_base", type_shared_memory_base_checked},
     {"index_cast", type_index_cast_checked},
     {"cast", type_cast_checked},

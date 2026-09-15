@@ -8,14 +8,14 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: v_add_co_ci_u32_e64 v5, vcc_lo, v1, v3, vcc_lo
 func.func @add64(%x: !waveamdmachine.reg<vgpr, 2, 0>,
                  %y: !waveamdmachine.reg<vgpr, 2, 2>,
-                 %data: !waveamdmachine.reg<vgpr, 1, 6>) {
+                 %data: !waveamdmachine.reg<vgpr, 1, 6>) -> !waveamdmachine.mem.token {
   %sum, %vcc = waveamdmachine.v_add_u64 %x, %y
       : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 2>)
         -> (!waveamdmachine.reg<vgpr, 2, 4>, !waveamdmachine.reg<vcc, 1>)
   %token = waveamdmachine.global_store_b32_addr64 %sum, %data
       : (!waveamdmachine.reg<vgpr, 2, 4>, !waveamdmachine.reg<vgpr, 1, 6>)
         -> !waveamdmachine.mem.token
-  return
+  return %token : !waveamdmachine.mem.token
 }
 
 // ASM-LABEL: add64u32:
@@ -23,14 +23,14 @@ func.func @add64(%x: !waveamdmachine.reg<vgpr, 2, 0>,
 // ASM: v_add_co_ci_u32_e64 v5, vcc_lo, v1, 0, vcc_lo
 func.func @add64u32(%base: !waveamdmachine.reg<vgpr, 2, 0>,
                     %offset: !waveamdmachine.reg<vgpr, 1, 2>,
-                    %data: !waveamdmachine.reg<vgpr, 1, 6>) {
+                    %data: !waveamdmachine.reg<vgpr, 1, 6>) -> !waveamdmachine.mem.token {
   %sum, %vcc = waveamdmachine.v_add_u64_u32 %base, %offset
       : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 1, 2>)
         -> (!waveamdmachine.reg<vgpr, 2, 4>, !waveamdmachine.reg<vcc, 1>)
   %token = waveamdmachine.global_store_b32_addr64 %sum, %data
       : (!waveamdmachine.reg<vgpr, 2, 4>, !waveamdmachine.reg<vgpr, 1, 6>)
         -> !waveamdmachine.mem.token
-  return
+  return %token : !waveamdmachine.mem.token
 }
 
 }

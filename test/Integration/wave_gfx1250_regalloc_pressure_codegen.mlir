@@ -69,8 +69,7 @@ func.func @gfx1250_pressure(
     %src2: !wave.ptr<#wave.global, i32>,
     %dst0: !wave.ptr<#wave.global, i32>,
     %dst1: !wave.ptr<#wave.global, i32>,
-    %dst2: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst2: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64,
                 waveamdmachine.target_waves = 1 : i64} {
@@ -137,6 +136,6 @@ func.func @gfx1250_pressure(
       : (!wave.simd<vector<128xi32>, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored0 : !wave.mem.token
 }
 }

@@ -11,7 +11,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // ASM: v_mfma_f32_16x16x16{{.*}}f16
 // ASM: .amdhsa_kernel mfma_gfx942_f16_16x16x16_codegen
 func.func @mfma_gfx942_f16_16x16x16_codegen(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, f16, 16, 16, 64, 2>
@@ -38,14 +38,14 @@ func.func @mfma_gfx942_f16_16x16x16_codegen(
   %token = wave.store %regs -> %ptrs
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: mfma_gfx942_bf16_16x16x16_codegen:
 // ASM: v_mfma_f32_16x16x16{{.*}}bf16
 // ASM: .amdhsa_kernel mfma_gfx942_bf16_16x16x16_codegen
 func.func @mfma_gfx942_bf16_16x16x16_codegen(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, bf16, 16, 16, 64, 2>
@@ -72,7 +72,7 @@ func.func @mfma_gfx942_bf16_16x16x16_codegen(
   %token = wave.store %regs -> %ptrs
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 }

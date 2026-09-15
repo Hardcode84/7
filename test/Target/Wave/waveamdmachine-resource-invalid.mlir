@@ -257,7 +257,7 @@ func.func @interfering_sgprs() {
 // -----
 
 // expected-error @below {{waveamd-resource-info found interfering AGPR register live ranges}}
-func.func @interfering_agprs() {
+func.func @interfering_agprs() -> !waveamdmachine.mem.token {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 1>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 6>
   // expected-note @below {{lhs phys=[0, 1) live=[2, 4]}}
@@ -274,7 +274,7 @@ func.func @interfering_agprs() {
   %store_b = waveamdmachine.global_store_b32 %off, %read_b, %base after %store_a
       : (!waveamdmachine.reg<vgpr, 1, 1>, !waveamdmachine.reg<vgpr, 1, 3>,
          !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  return
+  return %store_b : !waveamdmachine.mem.token
 }
 
 // -----

@@ -12,8 +12,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: v_lshrrev_b64
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @full_address_rational_mod_floor(
-    %out: !wave.ptr<#wave.global, i32>, %x_raw: i32)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %x_raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %x = wave.assume %x_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 4095">] : i32
   %off = wave.index_expr <"1073741824 + floor(1/512*Mod(8*x, 1024)) + lid">
@@ -25,15 +24,14 @@ func.func @full_address_rational_mod_floor(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: full_address_vector4_store:
 // ASM-NOT: global_store_b32
 // ASM: global_store_b128 v[{{[0-9]+}}:{{[0-9]+}}], v[{{[0-9]+}}:{{[0-9]+}}], off
 func.func @full_address_vector4_store(%out: !wave.ptr<#wave.global, i32>,
-                                      %raw: i32)
-    attributes {wave.kernel} {
+                                      %raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c1 = arith.constant 1 : i32
   %c2 = arith.constant 2 : i32
   %c3 = arith.constant 3 : i32
@@ -56,7 +54,7 @@ func.func @full_address_vector4_store(%out: !wave.ptr<#wave.global, i32>,
       : (!wave.simd<vector<4xi32>, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 }

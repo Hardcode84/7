@@ -7,6 +7,7 @@
 
 kernel [[amdgpu_wave_size(W)]]
 void saxpy(float *x, float *y, float a, uint32_t n) {
+  token output_done = token();
   simd<uint32_t, W> lane = lane_id<W>();
   uint32_t          wave = workgroup_id<0>();
   simd<uint32_t, W> i    = wave * W + lane;
@@ -14,6 +15,7 @@ void saxpy(float *x, float *y, float a, uint32_t n) {
   where (active) {
     simd<float, W> xv = load(x + i);
     simd<float, W> yv = load(y + i);
-    store(a * xv + yv, y + i);
+    output_done = join(output_done, store(a * xv + yv, y + i));
   }
+  observe(output_done);
 }

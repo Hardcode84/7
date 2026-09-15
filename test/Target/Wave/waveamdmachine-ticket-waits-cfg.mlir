@@ -44,9 +44,9 @@ func.func @exec_if_branch_min_vscnt(%cond: !waveamdmachine.reg<sgpr, 1>,
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
   waveamdmachine.exec_if %cond {
-    waveamdmachine.global_store_b32 %off, %val, %base
+    %observed_store_1 = waveamdmachine.global_store_b32 %off, %val, %base
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
-           !waveamdmachine.reg<sgpr, 2>) -> ()
+           !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
     waveamdmachine.yield
   } otherwise {
     waveamdmachine.yield
@@ -350,7 +350,7 @@ func.func @uniform_loop_carried_dma_token_barrier(
     %off: !waveamdmachine.reg<vgpr, 1>,
     %base: !waveamdmachine.reg<sgpr, 2>,
     %shared_base: !waveamdmachine.reg<sgpr, 1>,
-    %ec: !waveamdmachine.reg<scc, 1>) {
+    %ec: !waveamdmachine.reg<scc, 1>) -> !waveamdmachine.mem.token {
   %root = waveamdmachine.token : !waveamdmachine.mem.token
   %m0 = waveamdmachine.s_mov_m0 %shared_base
       : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
@@ -372,7 +372,7 @@ func.func @uniform_loop_carried_dma_token_barrier(
     waveamdmachine.continue_if %ec : !waveamdmachine.reg<scc, 1>
         carries(%next : !waveamdmachine.mem.token)
   } -> !waveamdmachine.mem.token
-  return
+  return %unused : !waveamdmachine.mem.token
 }
 
 }

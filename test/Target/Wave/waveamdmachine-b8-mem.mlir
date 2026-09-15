@@ -31,7 +31,7 @@ func.func @byte_global_saddr(%arg0: !wave.ptr<#wave.global, i32>)
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %store : !waveamdmachine.mem.token
   return
 }
 
@@ -60,7 +60,7 @@ func.func @byte_global_addr64() attributes {wave.kernel} {
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %store : !waveamdmachine.mem.token
   return
 }
 
@@ -97,7 +97,7 @@ func.func @byte_buffer(%arg0: !wave.ptr<#wave.global, i32>)
          !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm,
          !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %store : !waveamdmachine.mem.token
   return
 }
 
@@ -124,7 +124,7 @@ func.func @byte_ds() attributes {wave.kernel, waveamdmachine.lds_size = 256 : i6
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %store : !waveamdmachine.mem.token
   return
 }
 

@@ -66,7 +66,7 @@ func.func @wave_i64_cmp(%lhs: i64, %rhs: i64) -> i32 {
 }
 
 // CHECK-LABEL: wave_where:
-func.func @wave_where(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
+func.func @wave_where(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> (i32, !wave.mem.token) {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
@@ -76,20 +76,23 @@ func.func @wave_where(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
   // CHECK: v_add_nc_u32_e32
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
   // CHECK: s_cbranch_execz [[END:.Lwave_where.exec_endif_[0-9]+]]
-  wave.where %active {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active {
     %sum = wave.binary addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %t = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<32>
+    wave.yield %t : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_1 : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
   // CHECK: [[END]]:
   // CHECK: s_mov_b32 exec_lo, [[SAVE]]
   %bits = wave.ballot %active : !wave.mask<32> -> i32
   // CHECK: s_mov_b32 s0,
-  return %bits : i32
+  return %bits, %observe_region_2 : i32, !wave.mem.token
 }
 
 // CHECK-LABEL: wave_where_else:
-func.func @wave_where_else(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i32 {
+func.func @wave_where_else(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> (i32, !wave.mem.token) {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
@@ -100,25 +103,26 @@ func.func @wave_where_else(%limit: i32, %out: !wave.ptr<#wave.global, i32>) -> i
   // CHECK: v_xor_b32_e32
   // CHECK: s_and_saveexec_b32 [[SAVE:s[0-9]+]], [[MASK]]
   // CHECK: s_cbranch_execz [[ELSE:.Lwave_where_else.exec_else_[0-9]+]]
-  wave.where %active {
+  %observe_seed_5 = wave.token : !wave.mem.token
+  %observe_region_6 = wave.where %active {
     %then = wave.binary addi %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %t0 = wave.store %then -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-    wave.yield
+    wave.yield %t0 : !wave.mem.token
   } otherwise {
     // CHECK: [[ELSE]]:
     // CHECK: s_and_not1_b32 exec_lo, [[SAVE]], [[MASK]]
     %else = wave.binary xori %lane, %vlimit : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     %t1 = wave.store %else -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<32>
+    wave.yield %t1 : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
   // CHECK: s_mov_b32 exec_lo, [[SAVE]]
   %bits = wave.ballot %active : !wave.mask<32> -> i32
-  return %bits : i32
+  return %bits, %observe_region_6 : i32, !wave.mem.token
 }
 
 // CHECK-LABEL: wave_nested_where:
 func.func @wave_nested_where(%limit: i32, %alt: i32,
-                             %out: !wave.ptr<#wave.global, i32>) -> i32 {
+                             %out: !wave.ptr<#wave.global, i32>) -> (i32, !wave.mem.token) {
   // CHECK: v_mbcnt_lo_u32_b32 [[NEST_LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
@@ -132,39 +136,41 @@ func.func @wave_nested_where(%limit: i32, %alt: i32,
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   // CHECK: s_and_saveexec_b32 [[OUTER_SAVE:s[0-9]+]],
   // CHECK: s_cbranch_execz [[OUTER_ELSE:.Lwave_nested_where.exec_else_[0-9]+]]
-  wave.where %outer {
+  %observe_seed_15 = wave.token : !wave.mem.token
+  %observe_region_16 = wave.where %outer {
     // CHECK: s_and_saveexec_b32 [[INNER_SAVE:s[0-9]+]],
     // CHECK: s_cbranch_execz [[INNER_ELSE:.Lwave_nested_where.exec_else_[0-9]+]]
-    wave.where %inner {
+    %observe_seed_10 = wave.token : !wave.mem.token
+    %observe_region_11 = wave.where %inner {
       %t = wave.store %lane -> %ptrs
           : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
           -> !wave.mem.token
-      wave.yield
+      wave.yield %t : !wave.mem.token
     } otherwise {
       // CHECK: [[INNER_ELSE]]:
       // CHECK: s_and_not1_b32 exec_lo, [[INNER_SAVE]]
       %t = wave.store %valt -> %ptrs
           : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
           -> !wave.mem.token
-      wave.yield
-    } : !wave.mask<32>
+      wave.yield %t : !wave.mem.token
+    } : !wave.mask<32> -> !wave.mem.token
     // CHECK: s_mov_b32 exec_lo, [[INNER_SAVE]]
-    wave.yield
+    wave.yield %observe_region_11 : !wave.mem.token
   } otherwise {
     // CHECK: [[OUTER_ELSE]]:
     // CHECK: s_and_not1_b32 exec_lo, [[OUTER_SAVE]]
     %t = wave.store %vlimit -> %ptrs
         : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<32>
+    wave.yield %t : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
   // CHECK: s_mov_b32 exec_lo, [[OUTER_SAVE]]
   %bits = wave.ballot %outer : !wave.mask<32> -> i32
-  return %bits : i32
+  return %bits, %observe_region_16 : i32, !wave.mem.token
 }
 
 // CHECK-LABEL: wave_kernel:
-func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
+func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   // CHECK: s_load_b64 [[OUT:s\[[0-9]+:[0-9]+\]]], s[0:1], 0x0
   // CHECK: s_load_b32 [[X:s[0-9]+]], s[0:1], 0x8
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
@@ -180,7 +186,7 @@ func.func @wave_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
   %store_token = wave.store %sum -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   // CHECK-NOT: s_waitcnt
   // CHECK: s_endpgm
-  return
+  return %store_token : !wave.mem.token
 }
 // CHECK: .amdhsa_kernel wave_kernel
 
@@ -217,8 +223,7 @@ func.func @wave_splat_muli_uniform(%x: i32, %y: i32) -> i32 {
 // dependencies on prior LDS stores the waitcnt pass inserts an
 // `s_waitcnt lgkmcnt(0)` ahead of the barrier.
 // CHECK-LABEL: wave_lds_echo:
-func.func @wave_lds_echo(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 128 : i64} {
+func.func @wave_lds_echo(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 128 : i64} {
   // CHECK: v_mbcnt_lo_u32_b32 [[LANE:v[0-9]+]], -1, 0
   %lane = wave.lane_id : !wave.simd<i32, 32>
   // CHECK: v_lshlrev_b32_e32 [[BYTE:v[0-9]+]], 2, [[LANE]]
@@ -234,7 +239,7 @@ func.func @wave_lds_echo(%out: !wave.ptr<#wave.global, i32>)
   // CHECK: global_store_b32 [[BYTE]], [[VAL]]
   %out_ptrs = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %final_token = wave.store %loaded#0 -> %out_ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  return
+  return %final_token : !wave.mem.token
 }
 // CHECK: .amdhsa_kernel wave_lds_echo
 // CHECK: .amdhsa_group_segment_fixed_size 128
@@ -243,8 +248,7 @@ func.func @wave_lds_echo(%out: !wave.ptr<#wave.global, i32>)
 // folded into each instruction.
 // CHECK-LABEL: wave_lds_tuple_echo:
 func.func @wave_lds_tuple_echo(%in: !wave.ptr<#wave.global, i32>,
-                               %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 1024 : i64} {
+                               %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 1024 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   // CHECK: global_load_b128
@@ -270,7 +274,7 @@ func.func @wave_lds_tuple_echo(%in: !wave.ptr<#wave.global, i32>,
   %tuple_op = wave.ptr_add %op, %lane_off : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %frag : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %final_token = wave.store %regs -> %tuple_op after %loaded#1 : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %final_token : !wave.mem.token
 }
 // CHECK: .amdhsa_kernel wave_lds_tuple_echo
 // CHECK: .amdhsa_group_segment_fixed_size 1024
@@ -280,8 +284,7 @@ func.func @wave_lds_tuple_echo(%in: !wave.ptr<#wave.global, i32>,
 // vaddr and SGPR descriptor, with `offset:i*4` folded into each.
 // CHECK-LABEL: wave_buffer_tuple_load:
 func.func @wave_buffer_tuple_load(%in: !wave.ptr<#wave.global, i32>,
-                                  %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+                                  %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 1024 : i32
   %buffer = waveamd.make_buffer %in, %range : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -297,7 +300,7 @@ func.func @wave_buffer_tuple_load(%in: !wave.ptr<#wave.global, i32>,
   %tuple_optrs = wave.ptr_add %optrs, %lane_off : !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %frag : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %final_token = wave.store %regs -> %tuple_optrs after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %final_token : !wave.mem.token
 }
 
 // Two back-to-back global tuple loads followed by two LDS stores must
@@ -314,8 +317,7 @@ func.func @wave_buffer_tuple_load(%in: !wave.ptr<#wave.global, i32>,
 // will surface here.
 // CHECK-LABEL: wave_two_tuple_loads_overlap:
 func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<#wave.global, i32>,
-                                        %b_in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 2048 : i64} {
+                                        %b_in: !wave.ptr<#wave.global, i32>) -> (!wave.mem.token, !wave.mem.token) attributes {wave.kernel, wave.lds_size = 2048 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ap = wave.ptr_add %a_in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %bp = wave.ptr_add %b_in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
@@ -341,7 +343,7 @@ func.func @wave_two_tuple_loads_overlap(%a_in: !wave.ptr<#wave.global, i32>,
   // CHECK-NEXT: ds_store_b128 {{v[0-9]+, v\[[0-9]+:[0-9]+\]$}}
   // CHECK-NEXT: ds_store_b128 {{v[0-9]+, v\[[0-9]+:[0-9]+\]}} offset
   %b_st = wave.store %b_regs -> %slot_b after %b_tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.shared, i32>, 32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %a_st, %b_st : !wave.mem.token, !wave.mem.token
 }
 
 // NOTE: NT_AMDGPU_METADATA

@@ -6,7 +6,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // GROUP-LABEL: func.func @cyclic_offset_group_codegen(
-// GROUP: scf.for {{.*}} iter_args(%[[OFF:.*]] = {{.*}})
+// GROUP: scf.for {{.*}} iter_args(%{{[^ ]+}} = %{{[^,]+}}, %[[OFF:[^ ]+]] = {{.*}})
 // GROUP: %[[PEER:.*]] = wave.index_expr <"8192 + offset"> ["offset"](%[[OFF]])
 // GROUP: wave.ptr_add %arg0, %[[OFF]]
 // GROUP: wave.ptr_add %arg1, %[[PEER]]
@@ -14,12 +14,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-LABEL: cyclic_offset_group_codegen:
 // ASM-COUNT-2: buffer_load_dword
 func.func @cyclic_offset_group_codegen(
-    %a: !wave.ptr<#wave.global, i32>, %b: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+    %a: !wave.ptr<#wave.global, i32>, %b: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c8 = arith.constant 8 : i32
-  scf.for %i = %c0 to %c8 step %c1 : i32 {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = scf.for %i = %c0 to %c8 step %c1 iter_args(%observe_carry_3 = %observe_seed_1) -> (!wave.mem.token) : i32  {
     %aoff = wave.index_expr <"32768*Mod(i, 4)"> ["i"](%i) : (i32) -> index
     %boff = wave.index_expr <"8192 + 32768*Mod(i, 4)"> ["i"](%i)
         : (i32) -> index
@@ -37,8 +37,10 @@ func.func @cyclic_offset_group_codegen(
     %bst = wave.store %bv -> %bp after %bt
         : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>, !wave.mem.token)
           -> !wave.mem.token
+    %observe_join_4 = wave.join %observe_carry_3, %ast, %bst : !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %observe_join_4 : !wave.mem.token
   }
-  return
+  return %observe_region_2 : !wave.mem.token
 }
 
 }

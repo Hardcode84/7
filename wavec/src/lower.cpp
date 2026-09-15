@@ -84,9 +84,11 @@ struct Binding {
 // Per-lower state. No globals: everything threads through here.
 struct LowerCtx {
   std::vector<Binding> env;
+  std::vector<MlirValue> observed;
   MlirContext ctx;
   MlirLocation loc;
   MlirBlock block; // current insertion point
+  MlirBlock kernelBlock;
   DiagList *diags;
   uint64_t waves_per_workgroup;
   unsigned depth;
@@ -1050,6 +1052,18 @@ static bool lowerJoinCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   return lowerTokenResultCall(lc, e, "wave.join", out);
 }
 
+static bool lowerObserveCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
+  if (!mlirBlockEqual(lc.block, lc.kernelBlock)) {
+    fail(lc, e->span,
+         "observe requires a kernel-level token; carry it out of the region");
+    return false;
+  }
+  if (!lowerTokenOperands(lc, e->as.call, lc.observed))
+    return false;
+  *out = MlirValue{nullptr};
+  return true;
+}
+
 static bool lowerWaitCall(LowerCtx &lc, const Expr *e, MlirValue *out) {
   std::vector<MlirValue> operands;
   if (!lowerTokenOperands(lc, e->as.call, operands))
@@ -1210,6 +1224,7 @@ static const LowerCallEntry kLowerCalls[] = {
     {"barrier", lowerBarrierCall},
     {"join", lowerJoinCall},
     {"wait", lowerWaitCall},
+    {"observe", lowerObserveCall},
     {"shared_memory_base", lowerSharedMemoryBaseCall},
     {"index_cast", lowerIndexCastCall},
     {"cast", lowerCastCall},
@@ -2097,13 +2112,23 @@ static bool lowerKernel(LowerCtx &lc, MlirBlock moduleBody, const Kernel *k) {
   uint64_t savedWavesPerWorkgroup = lc.waves_per_workgroup;
   lc.waves_per_workgroup = launch.waves_per_workgroup;
   lc.block = entry;
+  lc.kernelBlock = entry;
+  lc.observed.clear();
   for (size_t i = 0; i < k->param_count; ++i)
     bindNew(lc, k->params[i]->name.name, k->params[i]->name.name_len,
             mlirBlockGetArgument(entry, (intptr_t)i), k->params[i]->type);
 
   bool ok = lowerBlock(lc, k->body);
-  if (ok)
-    buildOp(lc, "func.return", {}, {});
+  if (ok) {
+    std::vector<MlirType> results(lc.observed.size(),
+                                  mlirWaveMemTokenTypeGet(lc.ctx));
+    MlirType logicalType =
+        mlirFunctionTypeGet(lc.ctx, (intptr_t)inputs.size(), inputs.data(),
+                            (intptr_t)results.size(), results.data());
+    mlirOperationSetAttributeByName(func, sr("function_type"),
+                                    mlirTypeAttrGet(logicalType));
+    buildOp(lc, "func.return", lc.observed, {});
+  }
   lc.env.resize(envMark);
   lc.block = saved;
   lc.waves_per_workgroup = savedWavesPerWorkgroup;

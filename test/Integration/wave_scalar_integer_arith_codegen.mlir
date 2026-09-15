@@ -18,8 +18,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-NEXT: s_cselect_b32
 // ASM: global_store_b32
 func.func @scalar_integer_arith_codegen(%out: !wave.ptr<#wave.global, i32>,
-                                        %x: i32, %y: i32)
-    attributes {wave.kernel} {
+                                        %x: i32, %y: i32) -> !wave.mem.token attributes {wave.kernel} {
   %two = arith.constant 2 : i32
   %four = arith.constant 4 : i32
   %diff = wave.binary subi %x, %y : i32, i32 -> i32
@@ -36,7 +35,7 @@ func.func @scalar_integer_arith_codegen(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %v -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_i32_dynamic_pow2_divsi_codegen:
@@ -44,8 +43,7 @@ func.func @scalar_integer_arith_codegen(%out: !wave.ptr<#wave.global, i32>,
 // ASM: s_lshr_b32
 // ASM: global_store_b32
 func.func @scalar_i32_dynamic_pow2_divsi_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %x: i32, %d: i32)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %x: i32, %d: i32) -> !wave.mem.token attributes {wave.kernel} {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i32
   %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">,
                                   #wave.pred<"d > 0">] : i32
@@ -54,7 +52,7 @@ func.func @scalar_i32_dynamic_pow2_divsi_codegen(
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_i32_const_pow2_divsi_codegen:
@@ -64,38 +62,35 @@ func.func @scalar_i32_dynamic_pow2_divsi_codegen(
 // ASM: s_ashr_i32
 // ASM: global_store_b32
 func.func @scalar_i32_const_pow2_divsi_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %x: i32)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   %thirty_two = arith.constant 32 : i32
   %quot = wave.binary divsi %x, %thirty_two : i32, i32 -> i32
   %v = wave.splat %quot : i32 -> !wave.simd<i32, 32>
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_i32_const_signed_rem3_codegen:
 // ASM: s_mul_hi_u32
 // ASM: global_store_b32
 func.func @scalar_i32_const_signed_rem3_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %x: i32)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   %three = arith.constant 3 : i32
   %rem = wave.binary remsi %x, %three : i32, i32 -> i32
   %v = wave.splat %rem : i32 -> !wave.simd<i32, 32>
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: simd_i32_const_signed_rem3_codegen:
 // ASM: v_mul_hi_u32
 // ASM: global_store_b32
 func.func @simd_i32_const_signed_rem3_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %bias: i32)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %bias: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vbias = wave.splat %bias : i32 -> !wave.simd<i32, 32>
   %numerator = wave.binary subi %lane, %vbias
@@ -109,7 +104,7 @@ func.func @simd_i32_const_signed_rem3_codegen(
   %tok = wave.store %rem -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_i64_signed_i32_range_rem_codegen:
@@ -117,8 +112,7 @@ func.func @simd_i32_const_signed_rem3_codegen(
 // ASM: s_mul_hi_u32
 // ASM: global_store_b32
 func.func @scalar_i64_signed_i32_range_rem_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %x: i64, %d: i64)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %x: i64, %d: i64) -> !wave.mem.token attributes {wave.kernel} {
   %bx = wave.assume %x as "x"
       [#wave.pred<"2147483648 + x >= 0">,
        #wave.pred<"-2147483647 + x <= 0">] : i64
@@ -131,7 +125,7 @@ func.func @scalar_i64_signed_i32_range_rem_codegen(
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_i64_div_rem_codegen:
@@ -143,8 +137,7 @@ func.func @scalar_i64_signed_i32_range_rem_codegen(
 // ASM: s_or_b32
 // ASM: global_store_b32
 func.func @scalar_i64_div_rem_codegen(%out: !wave.ptr<#wave.global, i32>,
-                                      %wide: i64)
-    attributes {wave.kernel} {
+                                      %wide: i64) -> !wave.mem.token attributes {wave.kernel} {
   %two64 = arith.constant 2 : i64
   %eight64 = arith.constant 8 : i64
   %wide_half = wave.binary divui %wide, %two64 : i64, i64 -> i64
@@ -162,15 +155,14 @@ func.func @scalar_i64_div_rem_codegen(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %v -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: mask_vote_codegen:
 // ASM: s_cmp_eq_u32
 // ASM: s_cmp_lg_u32
 // ASM: global_store_b32
-func.func @mask_vote_codegen(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @mask_vote_codegen(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %c16 = arith.constant 16 : i32
   %v16 = wave.splat %c16 : i32 -> !wave.simd<i32, 32>
@@ -187,7 +179,7 @@ func.func @mask_vote_codegen(%out: !wave.ptr<#wave.global, i32>)
   %tok = wave.store %value -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_i64_dynamic_pow2_divsi_codegen:
@@ -195,8 +187,7 @@ func.func @mask_vote_codegen(%out: !wave.ptr<#wave.global, i32>)
 // ASM: s_lshr_b64
 // ASM: global_store_b32
 func.func @scalar_i64_dynamic_pow2_divsi_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %x: i64, %d: i64)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %x: i64, %d: i64) -> !wave.mem.token attributes {wave.kernel} {
   %nonneg = wave.assume %x as "x" [#wave.pred<"x >= 0">] : i64
   %pow2 = wave.assume %d as "d" [#wave.pred<"d & (d - 1) == 0">,
                                   #wave.pred<"d > 0">] : i64
@@ -211,7 +202,7 @@ func.func @scalar_i64_dynamic_pow2_divsi_codegen(
   %tok = wave.store %v -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_i32_loop_rem5_recurrence_codegen:
@@ -225,8 +216,7 @@ func.func @scalar_i64_dynamic_pow2_divsi_codegen(
 // ASM-NOT: s_mul_i32
 // ASM: s_cbranch_scc1 .Lscalar_i32_loop_rem5_recurrence_codegen.loop_head_0
 func.func @scalar_i32_loop_rem5_recurrence_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %trip: i32)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %trip: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c2 = arith.constant 2 : i32
@@ -244,7 +234,7 @@ func.func @scalar_i32_loop_rem5_recurrence_codegen(
   %tok = wave.store %value -> %out
       : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 }

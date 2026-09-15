@@ -12,7 +12,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: .amdhsa_kernel scalar_bf16_codegen
 func.func @scalar_bf16_codegen(
     %src: !wave.ptr<#wave.global, f32>,
-    %dst: !wave.ptr<#wave.global, bf16>) attributes {wave.kernel} {
+    %dst: !wave.ptr<#wave.global, bf16>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %src_ptrs = wave.ptr_add %src, %lane
       : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 64>
@@ -29,7 +29,7 @@ func.func @scalar_bf16_codegen(
       : (!wave.simd<bf16, 64>,
          !wave.simd<!wave.ptr<#wave.global, bf16>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: scalar_bf16_to_f32_codegen:
@@ -38,7 +38,7 @@ func.func @scalar_bf16_codegen(
 // ASM: .amdhsa_kernel scalar_bf16_to_f32_codegen
 func.func @scalar_bf16_to_f32_codegen(
     %src: !wave.ptr<#wave.global, bf16>,
-    %dst: !wave.ptr<#wave.global, f32>) attributes {wave.kernel} {
+    %dst: !wave.ptr<#wave.global, f32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %src_ptrs = wave.ptr_add %src, %lane
       : !wave.ptr<#wave.global, bf16>, !wave.simd<i32, 64>
@@ -55,7 +55,7 @@ func.func @scalar_bf16_to_f32_codegen(
       : (!wave.simd<f32, 64>,
          !wave.simd<!wave.ptr<#wave.global, f32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

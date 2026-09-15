@@ -30,7 +30,7 @@ func.func @bad_buffer_load_literal_soffset(%in: !wave.ptr<#wave.global, i32>)
          !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.reg<sgpr, 1>,
          !waveamdmachine.mem.token)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %st : !waveamdmachine.mem.token
   return
 }
 
@@ -68,7 +68,7 @@ func.func @bad_buffer_load_b8_literal_soffset(%in: !wave.ptr<#wave.global, i32>)
          !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.reg<sgpr, 1>,
          !waveamdmachine.mem.token)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %st : !waveamdmachine.mem.token
   return
 }
 
@@ -98,7 +98,7 @@ func.func @bad_buffer_store_b8_literal_soffset(%out: !wave.ptr<#wave.global, i32
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok : !waveamdmachine.mem.token
   return
 }
 
@@ -128,7 +128,7 @@ func.func @bad_buffer_store_literal_soffset(%out: !wave.ptr<#wave.global, i32>)
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok : !waveamdmachine.mem.token
   return
 }
 
@@ -164,7 +164,7 @@ func.func @bad_buffer_lds_literal_soffset(%in: !wave.ptr<#wave.global, i32>)
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
          !waveamdmachine.imm, !waveamdmachine.m0, !waveamdmachine.mem.token)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok : !waveamdmachine.mem.token
   return
 }
 

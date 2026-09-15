@@ -36,7 +36,7 @@ with w.module() as module_builder:
             source_slot=w.sym("slot"),
         )
         pointer = function_builder.ptr_add(destination, item)
-        function_builder.store(moved, pointer)
+        function_builder.observe(function_builder.store(moved, pointer))
 
     print(module_builder.module)
 

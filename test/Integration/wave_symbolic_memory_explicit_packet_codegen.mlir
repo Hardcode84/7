@@ -21,8 +21,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @explicit_packet_offset_codegen(
     %destination: !wave.ptr<#wave.global, f16>, %tile: i32,
-    %column_limit_raw: i32, %row_limit_raw: i32)
-    attributes {wave.kernel,
+    %column_limit_raw: i32, %row_limit_raw: i32) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %c128_i32 = arith.constant 128 : i32
@@ -129,7 +128,8 @@ func.func @explicit_packet_offset_codegen(
                 #wave.pred<"x <= 2147483647">]
       ["x"](%offset3_assumed)
       : (!wave.simd<index, 64>) -> !wave.simd<index, 64>
-  wave.where %active0, %active1, %active2, %active3 {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active0, %active1, %active2, %active3 {
     %stored = wave.scatter %value to %base mapping
         <bit_offset =
           <"16*Piecewise((offset0, slot == 0), (offset1, slot == 1), (offset2, slot == 2), (offset3, True))">>
@@ -139,8 +139,10 @@ func.func @explicit_packet_offset_codegen(
            !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 64>,
            !wave.simd<index, 64>, !wave.simd<index, 64>,
            !wave.simd<index, 64>) -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>, !wave.mask<64>, !wave.mask<64>, !wave.mask<64>
-  return
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_1 : !wave.mem.token
+  } : !wave.mask<64>, !wave.mask<64>, !wave.mask<64>, !wave.mask<64> -> !wave.mem.token
+  return %observe_region_2 : !wave.mem.token
 }
 }

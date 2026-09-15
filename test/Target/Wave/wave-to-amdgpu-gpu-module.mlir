@@ -5,8 +5,7 @@ module attributes {gpu.container_module, waveamdmachine.target = "amdgcn-amd-amd
   gpu.module @kernels {
     // ASM-LABEL: nested_write_lane_id:
     // ASM: buffer_store_b32
-    func.func @nested_write_lane_id(%dst: !wave.ptr<#wave.global, i32>)
-        attributes {gpu.kernel, wave.kernel} {
+    func.func @nested_write_lane_id(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
       %range = arith.constant 128 : i32
       %buffer = waveamd.make_buffer %dst, %range
           : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -17,7 +16,7 @@ module attributes {gpu.container_module, waveamdmachine.target = "amdgcn-amd-amd
       %tok = wave.store %lane -> %ptrs
           : (!wave.simd<i32, 32>,
              !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) -> !wave.mem.token
-      return
+      return %tok : !wave.mem.token
     }
   }
 }

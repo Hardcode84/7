@@ -87,20 +87,20 @@ func.func @partial_x(
     %second: !waveamdmachine.reg<vgpr, 1, 2>,
     %lhs: !waveamdmachine.reg<vgpr, 1, 3>,
     %rhs: !waveamdmachine.reg<vgpr, 1, 4>,
-    %base: !waveamdmachine.reg<sgpr, 2, 0>) {
-  waveamdmachine.global_store_b32 %off, %first, %base
+    %base: !waveamdmachine.reg<sgpr, 2, 0>) -> (!waveamdmachine.mem.token, !waveamdmachine.mem.token) {
+  %observed_store_1 = waveamdmachine.global_store_b32 %off, %first, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 1>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.global_store_b32 %off, %second, %base
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  %observed_store_2 = waveamdmachine.global_store_b32 %off, %second, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 2>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   %clobber = waveamdmachine.v_add_u32 %lhs, %rhs
       : (!waveamdmachine.reg<vgpr, 1, 3>,
          !waveamdmachine.reg<vgpr, 1, 4>)
         -> !waveamdmachine.reg<vgpr, 1, 1>
-  return
+  return %observed_store_1, %observed_store_2 : !waveamdmachine.mem.token, !waveamdmachine.mem.token
 }
 
 // CHECK-LABEL: func.func @interleaved_smem_vmem_drains_x
@@ -112,20 +112,20 @@ func.func @interleaved_smem_vmem_drains_x(
     %off: !waveamdmachine.reg<vgpr, 1, 0>,
     %value: !waveamdmachine.reg<vgpr, 1, 1>,
     %source: !waveamdmachine.reg<sgpr, 1, 7>,
-    %base: !waveamdmachine.reg<sgpr, 2, 4>) {
+    %base: !waveamdmachine.reg<sgpr, 2, 4>) -> !waveamdmachine.mem.token {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %one = waveamdmachine.imm 1 : !waveamdmachine.imm
   %unused = waveamdmachine.s_load_b32 %zero, "s[0:1]"
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 1, 6>
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_3 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 1>,
-         !waveamdmachine.reg<sgpr, 2, 4>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 4>) -> !waveamdmachine.mem.token
   %clobber, %scc = waveamdmachine.s_add_i32 %source, %one
       : (!waveamdmachine.reg<sgpr, 1, 7>, !waveamdmachine.imm)
         -> (!waveamdmachine.reg<sgpr, 1, 0>,
             !waveamdmachine.reg<scc, 1>)
-  return
+  return %observed_store_3 : !waveamdmachine.mem.token
 }
 
 // CHECK-LABEL: func.func @explicit_x_wait_is_observed
@@ -137,17 +137,17 @@ func.func @explicit_x_wait_is_observed(
     %value: !waveamdmachine.reg<vgpr, 1, 1>,
     %lhs: !waveamdmachine.reg<vgpr, 1, 2>,
     %rhs: !waveamdmachine.reg<vgpr, 1, 3>,
-    %base: !waveamdmachine.reg<sgpr, 2, 0>) {
-  waveamdmachine.global_store_b32 %off, %value, %base
+    %base: !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token {
+  %observed_store_4 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 1>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   waveamdmachine.s_waitcnt_split xcnt(0)
   %clobber = waveamdmachine.v_add_u32 %lhs, %rhs
       : (!waveamdmachine.reg<vgpr, 1, 2>,
          !waveamdmachine.reg<vgpr, 1, 3>)
         -> !waveamdmachine.reg<vgpr, 1, 1>
-  return
+  return %observed_store_4 : !waveamdmachine.mem.token
 }
 
 // CHECK-LABEL: func.func @load_wait_implies_x
@@ -200,18 +200,18 @@ func.func @vgpr_window_switch_drains_x(
     %value: !waveamdmachine.reg<vgpr, 1, 1>,
     %lhs: !waveamdmachine.reg<vgpr, 1, 2>,
     %rhs: !waveamdmachine.reg<vgpr, 1, 3>,
-    %base: !waveamdmachine.reg<sgpr, 2, 0>) {
+    %base: !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token {
   %mode = waveamdmachine.imm 0 : !waveamdmachine.imm
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_5 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 1>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   waveamdmachine.s_set_vgpr_msb %mode : (!waveamdmachine.imm) -> ()
   %clobber = waveamdmachine.v_add_u32 %lhs, %rhs
       : (!waveamdmachine.reg<vgpr, 1, 2>,
          !waveamdmachine.reg<vgpr, 1, 3>)
         -> !waveamdmachine.reg<vgpr, 1, 1>
-  return
+  return %observed_store_5 : !waveamdmachine.mem.token
 }
 
 // CHECK-LABEL: func.func @exec_if_restore_requires_x
@@ -228,10 +228,10 @@ func.func @exec_if_restore_requires_x(
     %rhs: !waveamdmachine.reg<vgpr, 1, 3>,
     %base: !waveamdmachine.reg<sgpr, 2, 0>) {
   waveamdmachine.exec_if %cond {
-    waveamdmachine.global_store_b32 %off, %value, %base
+    %observed_store_6 = waveamdmachine.global_store_b32 %off, %value, %base
         : (!waveamdmachine.reg<vgpr, 1, 0>,
            !waveamdmachine.reg<vgpr, 1, 1>,
-           !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+           !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
     waveamdmachine.yield
   } : !waveamdmachine.reg<sgpr, 1, 8>
   %clobber = waveamdmachine.v_add_u32 %lhs, %rhs
@@ -249,14 +249,14 @@ func.func @writes_exec_requires_x(
     %mask: !waveamdmachine.reg<sgpr, 1, 8>,
     %off: !waveamdmachine.reg<vgpr, 1, 0>,
     %value: !waveamdmachine.reg<vgpr, 1, 1>,
-    %base: !waveamdmachine.reg<sgpr, 2, 0>) {
-  waveamdmachine.global_store_b32 %off, %value, %base
+    %base: !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token {
+  %observed_store_7 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 1>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   waveamdmachine.s_mov_exec_lo %mask
       : (!waveamdmachine.reg<sgpr, 1, 8>) -> ()
-  return
+  return %observed_store_7 : !waveamdmachine.mem.token
 }
 
 // CHECK-LABEL: func.func @exec_if_save_requires_x
@@ -267,15 +267,15 @@ func.func @exec_if_save_requires_x(
     %cond: !waveamdmachine.reg<sgpr, 1, 8>,
     %off: !waveamdmachine.reg<vgpr, 1, 0>,
     %value: !waveamdmachine.reg<vgpr, 1, 1>,
-    %base: !waveamdmachine.reg<sgpr, 2, 0>) {
-  waveamdmachine.global_store_b32 %off, %value, %base
+    %base: !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token {
+  %observed_store_8 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 1>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   waveamdmachine.exec_if %cond {
     waveamdmachine.yield
   } : !waveamdmachine.reg<sgpr, 1, 8>
-  return
+  return %observed_store_8 : !waveamdmachine.mem.token
 }
 
 // CHECK-LABEL: func.func @exec_if_arm_transitions_require_x
@@ -294,16 +294,16 @@ func.func @exec_if_arm_transitions_require_x(
     %else_value: !waveamdmachine.reg<vgpr, 1, 3>,
     %base: !waveamdmachine.reg<sgpr, 2, 0>) {
   waveamdmachine.exec_if %cond {
-    waveamdmachine.global_store_b32 %then_off, %then_value, %base
+    %observed_store_9 = waveamdmachine.global_store_b32 %then_off, %then_value, %base
         : (!waveamdmachine.reg<vgpr, 1, 0>,
            !waveamdmachine.reg<vgpr, 1, 1>,
-           !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+           !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
     waveamdmachine.yield
   } otherwise {
-    waveamdmachine.global_store_b32 %else_off, %else_value, %base
+    %observed_store_10 = waveamdmachine.global_store_b32 %else_off, %else_value, %base
         : (!waveamdmachine.reg<vgpr, 1, 2>,
            !waveamdmachine.reg<vgpr, 1, 3>,
-           !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+           !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
     waveamdmachine.yield
   } : !waveamdmachine.reg<sgpr, 1, 8>
   return
@@ -411,10 +411,10 @@ func.func @exec_if_yield_copy_def(
     %else_source: !waveamdmachine.reg<vgpr, 1, 5>,
     %base: !waveamdmachine.reg<sgpr, 2, 0>) {
   %copied = waveamdmachine.exec_if %cond {
-    waveamdmachine.global_store_b32 %off, %value, %base
+    %observed_store_11 = waveamdmachine.global_store_b32 %off, %value, %base
         : (!waveamdmachine.reg<vgpr, 1, 0>,
            !waveamdmachine.reg<vgpr, 1, 1>,
-           !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+           !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
     waveamdmachine.yield %copy_source
         : !waveamdmachine.reg<vgpr, 1, 4>
   } otherwise {
@@ -635,11 +635,11 @@ func.func @cfg_store_join(
 func.func @terminal_scratch_store() attributes {wave.kernel} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
-  waveamdmachine.scratch_store_b32 %zero, %value, %zero
+  %observed_store_12 = waveamdmachine.scratch_store_b32 %zero, %value, %zero
       : (!waveamdmachine.imm,
          !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.imm) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_12 : !waveamdmachine.mem.token
   return
 }
 

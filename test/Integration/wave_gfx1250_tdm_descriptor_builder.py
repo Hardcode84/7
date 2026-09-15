@@ -49,7 +49,7 @@ with w.module() as m:
             lds_address=lds_address,
         )
         d2_done = f.tdm_load(d2, after=f.token())
-        f.tdm_load(d4, after=d2_done)
+        f.observe(f.tdm_load(d4, after=d2_done))
 
     print(m.module)
 

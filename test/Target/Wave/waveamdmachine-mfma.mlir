@@ -15,8 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // ASM-LABEL: mfma_gfx950_f16xf32_kernel:
 // ASM: v_mfma_f32_16x16x32_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
-func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, f16, 16, 16, 64, 4>
@@ -47,7 +46,7 @@ func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_f16_32x32x16_kernel
@@ -59,7 +58,7 @@ func.func @mfma_gfx950_f16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: mfma_gfx950_f16_32x32x16_kernel:
 // ASM: v_mfma_f32_32x32x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
 func.func @mfma_gfx950_f16_32x32x16_kernel(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, f16, 32, 32, 64, 4>
@@ -86,7 +85,7 @@ func.func @mfma_gfx950_f16_32x32x16_kernel(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<16xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_packed_zero_acc_kernel
@@ -97,7 +96,7 @@ func.func @mfma_gfx950_f16_32x32x16_kernel(
 // ASM-LABEL: mfma_gfx950_packed_zero_acc_kernel:
 // ASM: v_mfma_f32_32x32x16_f16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
 func.func @mfma_gfx950_packed_zero_acc_kernel(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero_bits = arith.constant 0 : i32
   %zero = wave.constant 0.000000e+00 : f32 -> !wave.simd<f32, 64>
   %acc_regs = wave.pack %zero, %zero, %zero, %zero,
@@ -138,7 +137,7 @@ func.func @mfma_gfx950_packed_zero_acc_kernel(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<16xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_packed_nonzero_acc_kernel
@@ -209,8 +208,7 @@ func.func @mfma_gfx950_shared_packed_zero_acc()
 
 // ASM-LABEL: mfma_gfx950_mxfp4_kernel:
 // ASM: v_mfma_scale_f32_16x16x128_f8f6f4 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]], [[SA:v[0-9]+]], [[SB:v[0-9]+]] op_sel:[1,0,0] op_sel_hi:[0,1,0] cbsz:4 blgp:4
-func.func @mfma_gfx950_mxfp4_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @mfma_gfx950_mxfp4_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %scale_bits = arith.constant 2139062143 : i32
   %scale = wave.splat %scale_bits : i32 -> !wave.simd<i32, 64>
@@ -245,7 +243,7 @@ func.func @mfma_gfx950_mxfp4_kernel(%out: !wave.ptr<#wave.global, i32>)
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_mxfp4_32x32_kernel
@@ -260,7 +258,7 @@ func.func @mfma_gfx950_mxfp4_kernel(%out: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: mfma_gfx950_mxfp4_32x32_kernel:
 // ASM: v_mfma_scale_f32_32x32x64_f8f6f4 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], [[C:v\[[0-9]+:[0-9]+\]]], [[SA:v[0-9]+]], [[SB:v[0-9]+]] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
 func.func @mfma_gfx950_mxfp4_32x32_kernel(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %scale_bits = arith.constant 2139062143 : i32
   %scale = wave.splat %scale_bits : i32 -> !wave.simd<i32, 64>
@@ -293,7 +291,7 @@ func.func @mfma_gfx950_mxfp4_32x32_kernel(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<16xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_mxfp4_transposed_scale_kernel
@@ -304,8 +302,7 @@ func.func @mfma_gfx950_mxfp4_32x32_kernel(
 // ASM-LABEL: mfma_gfx950_mxfp4_transposed_scale_kernel:
 // ASM: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM: v_mfma_scale_f32_16x16x128_f8f6f4 {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{v[0-9]+}} op_sel_hi:[0,0,0] cbsz:4 blgp:4
-func.func @mfma_gfx950_mxfp4_transposed_scale_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, waveamdmachine.lds_size = 512 : i64} {
+func.func @mfma_gfx950_mxfp4_transposed_scale_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, waveamdmachine.lds_size = 512 : i64} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, i8, 16, 16, 64, 4>
@@ -342,7 +339,7 @@ func.func @mfma_gfx950_mxfp4_transposed_scale_kernel(%out: !wave.ptr<#wave.globa
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
         -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_bf16xf32_kernel
@@ -353,8 +350,7 @@ func.func @mfma_gfx950_mxfp4_transposed_scale_kernel(%out: !wave.ptr<#wave.globa
 
 // ASM-LABEL: mfma_gfx950_bf16xf32_kernel:
 // ASM: v_mfma_f32_16x16x32_bf16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
-func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, bf16, 16, 16, 64, 4>
@@ -385,7 +381,7 @@ func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_bf16_32x32x16_kernel
@@ -397,7 +393,7 @@ func.func @mfma_gfx950_bf16xf32_kernel(%out: !wave.ptr<#wave.global, i32>)
 // ASM-LABEL: mfma_gfx950_bf16_32x32x16_kernel:
 // ASM: v_mfma_f32_32x32x16_bf16 [[DST:v\[[0-9]+:[0-9]+\]]], [[A:v\[[0-9]+:[0-9]+\]]], [[B:v\[[0-9]+:[0-9]+\]]], 0
 func.func @mfma_gfx950_bf16_32x32x16_kernel(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, bf16, 32, 32, 64, 4>
@@ -424,14 +420,13 @@ func.func @mfma_gfx950_bf16_32x32x16_kernel(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<16xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // ASM-LABEL: gfx950_literal_mul_kernel:
 // ASM: v_mov_b32_e32 [[IMM:v[0-9]+]], 0x100
 // ASM: v_mul_lo_u32 [[MUL:v[0-9]+]], [[IMM]], {{[vs][0-9]+}}
-func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %c256 = arith.constant 256 : i32
@@ -444,14 +439,14 @@ func.func @gfx950_literal_mul_kernel(%out: !wave.ptr<#wave.global, i32>)
   %store_token = wave.store %value -> %ptrs
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
       -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @mfma_gfx950_mxfp4_scale_byte_pack_kernel
 // SELECT-NOT: waveamdmachine.tuple_from_elements
 // SELECT: waveamdmachine.mfma_scale_f32_16x16x128_f4_f4{{.*}} : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 4>
 func.func @mfma_gfx950_mxfp4_scale_byte_pack_kernel(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero_i32 = arith.constant 0 : i32
   %z = wave.constant 0 : i8 -> !wave.simd<i8, 64>
   %a0 = wave.constant 1 : i8 -> !wave.simd<i8, 64>
@@ -500,7 +495,7 @@ func.func @mfma_gfx950_mxfp4_scale_byte_pack_kernel(
   %store_token = wave.store %regs -> %tuple_ptr
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 }

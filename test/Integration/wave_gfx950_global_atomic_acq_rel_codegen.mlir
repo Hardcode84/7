@@ -17,8 +17,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: s_endpgm
 func.func @global_atomic_acq_rel_codegen(
     %counter: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>, %increment: i32)
-    attributes {
+    %out: !wave.ptr<#wave.global, i32>, %increment: i32) -> !wave.mem.token attributes {
       wave.kernel,
       wave.workgroup_size = array<i32: 64, 1, 1>
     } {
@@ -34,7 +33,7 @@ func.func @global_atomic_acq_rel_codegen(
   %stored = wave.store %old -> %out_ptrs after %atomic
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: global_atomic_acq_rel_simd_pointer_codegen:
@@ -47,8 +46,7 @@ func.func @global_atomic_acq_rel_codegen(
 // ASM: s_endpgm
 func.func @global_atomic_acq_rel_simd_pointer_codegen(
     %counters: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>, %increment: i32)
-    attributes {
+    %out: !wave.ptr<#wave.global, i32>, %increment: i32) -> !wave.mem.token attributes {
       wave.kernel,
       wave.workgroup_size = array<i32: 64, 1, 1>
     } {
@@ -69,7 +67,7 @@ func.func @global_atomic_acq_rel_simd_pointer_codegen(
   %stored = wave.store %old -> %out_ptrs after %atomic
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

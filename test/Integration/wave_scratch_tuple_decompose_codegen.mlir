@@ -48,7 +48,7 @@ func.func @scratch_tuple_decompose_codegen()
       : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1, 5>,
          !waveamdmachine.reg<sgpr, 1, 6>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %store2 : !waveamdmachine.mem.token
   return
 }
 

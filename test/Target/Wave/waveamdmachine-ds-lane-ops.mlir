@@ -88,7 +88,7 @@ func.func @ds_agpr_load_store() attributes {wave.kernel} {
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<agpr, 4, 0>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok1 : !waveamdmachine.mem.token
   return
 }
 
@@ -122,7 +122,7 @@ func.func @ds_agpr_store2() attributes {wave.kernel} {
          !waveamdmachine.reg<agpr, 2, 2>,
          !waveamdmachine.reg<agpr, 2, 4>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok1 : !waveamdmachine.mem.token
   return
 }
 

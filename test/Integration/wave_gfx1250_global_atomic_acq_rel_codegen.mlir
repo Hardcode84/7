@@ -33,8 +33,7 @@ module attributes {
 // DIS: global_inv scope:SCOPE_DEV
 func.func @global_atomic_acq_rel_codegen(
     %counter: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>, %increment: i32)
-    attributes {
+    %out: !wave.ptr<#wave.global, i32>, %increment: i32) -> !wave.mem.token attributes {
       wave.kernel,
       wave.workgroup_size = array<i32: 32, 1, 1>
     } {
@@ -51,7 +50,7 @@ func.func @global_atomic_acq_rel_codegen(
   %stored = wave.store %old -> %out_ptrs after %atomic
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: global_atomic_acq_rel_simd_pointer_codegen:
@@ -73,8 +72,7 @@ func.func @global_atomic_acq_rel_codegen(
 // DIS: global_inv scope:SCOPE_DEV
 func.func @global_atomic_acq_rel_simd_pointer_codegen(
     %counters: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>, %increment: i32)
-    attributes {
+    %out: !wave.ptr<#wave.global, i32>, %increment: i32) -> !wave.mem.token attributes {
       wave.kernel,
       wave.workgroup_size = array<i32: 32, 1, 1>
     } {
@@ -95,7 +93,7 @@ func.func @global_atomic_acq_rel_simd_pointer_codegen(
   %stored = wave.store %old -> %out_ptrs after %atomic
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

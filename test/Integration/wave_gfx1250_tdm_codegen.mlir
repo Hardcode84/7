@@ -43,7 +43,7 @@
 // DIS: tensor_store_from_lds
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
-  func.func @gfx1250_tdm(%raw: i32, %alternate: i32, %choose: i1) attributes {
+  func.func @gfx1250_tdm(%raw: i32, %alternate: i32, %choose: i1) -> (!wave.mem.token, !wave.mem.token, !wave.mem.token) attributes {
       wave.kernel,
       wave.workgroup_size = array<i32: 32, 1, 1>
     } {
@@ -94,6 +94,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
         %d0_selected, %d1_selected, %d2_selected, %d3_selected after %second
         : (vector<4xi32>, vector<8xi32>, !wave.mem.token,
            vector<4xi32>, vector<4xi32>) -> !wave.mem.token
-    return
+    return %stored2, %prefetched_spec, %stored4 : !wave.mem.token, !wave.mem.token, !wave.mem.token
   }
 }

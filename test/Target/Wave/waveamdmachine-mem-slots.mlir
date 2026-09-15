@@ -26,7 +26,7 @@ func.func @global_slots(%arg0: !wave.ptr<#wave.global, i32>) attributes {wave.ke
   %off = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %v, %tok = waveamdmachine.global_load_b32 %off, %base offset 16 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
   %st = waveamdmachine.global_store_b32 %off, %v, %base offset 32 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %st : !waveamdmachine.mem.token
   return
 }
 
@@ -46,7 +46,7 @@ func.func @buffer_slots(%arg0: !wave.ptr<#wave.global, i32>) attributes {wave.ke
   %desc = waveamdmachine.make_buffer_rsrc %base, %range : (!waveamdmachine.reg<sgpr, 2>, !waveamdmachine.imm) -> !waveamdmachine.reg<sgpr, 4>
   %v, %tok = waveamdmachine.buffer_load_b32 %off, %desc, %soff offset 16 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.reg<sgpr, 1>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
   %st = waveamdmachine.buffer_store_b32 %off, %v, %desc, %soff offset 32 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %st : !waveamdmachine.mem.token
   return
 }
 
@@ -82,7 +82,7 @@ func.func @update_buffer_rsrc_base_alias() attributes {wave.kernel} {
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 1>,
          !waveamdmachine.reg<sgpr, 4, 52>, !waveamdmachine.imm,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %st : !waveamdmachine.mem.token
   return
 }
 

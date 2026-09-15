@@ -72,8 +72,7 @@ func.func @transpose_load_b16_datatypes()
 // MACHINE-NOT: waveamdmachine.v_lshrrev_b32
 // MACHINE-NOT: waveamdmachine.v_or_b32
 // MACHINE: waveamdmachine.global_store_tuple_b32
-func.func @transpose_load_b16_pack_words(%out: !wave.ptr<#wave.global, f16>)
-    attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
+func.func @transpose_load_b16_pack_words(%out: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, f16>
   %ptr0 = wave.ptr_add %lds, %lane
@@ -118,7 +117,7 @@ func.func @transpose_load_b16_pack_words(%out: !wave.ptr<#wave.global, f16>)
       : (!wave.simd<vector<8xf16>, 64>,
          !wave.simd<!wave.ptr<#wave.global, f16>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %store : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @transpose_load_b96_b6
@@ -242,8 +241,7 @@ func.func @transpose_load_opaque_index_expr()
 // ASM: ds_read_u8 {{v[0-9]+}}, {{v[0-9]+}}
 // ASM: ds_{{write|store}}_b8 {{v[0-9]+}}, {{v[0-9]+}}
 // ASM: s_endpgm
-func.func @generic_i8_shared_load_store()
-    attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
+func.func @generic_i8_shared_load_store() -> !wave.mem.token attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %ptr = wave.ptr_add %lds, %lane
@@ -256,7 +254,7 @@ func.func @generic_i8_shared_load_store()
       : (!wave.simd<i8, 64>,
          !wave.simd<!wave.ptr<#wave.shared, i8>, 64>, !wave.mem.token)
         -> !wave.mem.token
-  return
+  return %store_tok : !wave.mem.token
 }
 
 }

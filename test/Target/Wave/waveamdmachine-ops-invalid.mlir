@@ -50,7 +50,7 @@ func.func @bad_s_load_result_type(%offset: !waveamdmachine.imm) {
 
 func.func @bad_global_store_base(%offset: !waveamdmachine.reg<vgpr, 1>, %value: !waveamdmachine.reg<vgpr, 1>, %base: !waveamdmachine.reg<sgpr, 1>) {
   // expected-error @below {{operand #2 must be WaveAMDMachine SGPR pair register}}
-  "waveamdmachine.global_store_b32"(%offset, %value, %base) : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> ()
+  "waveamdmachine.global_store_b32"(%offset, %value, %base) : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.mem.token
   return
 }
 

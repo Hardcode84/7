@@ -100,10 +100,10 @@ func.func @generated_split_waitcnts() {
             !waveamdmachine.reg<scc, 1>)
   %stored = waveamdmachine.uninit
       : !waveamdmachine.reg<vgpr, 1, 6>
-  waveamdmachine.global_store_b32 %off, %stored, %base
+  %observed_store_1 = waveamdmachine.global_store_b32 %off, %stored, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 6>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   %lhs = waveamdmachine.uninit
       : !waveamdmachine.reg<vgpr, 1, 7>
   %rhs = waveamdmachine.uninit
@@ -112,7 +112,7 @@ func.func @generated_split_waitcnts() {
       : (!waveamdmachine.reg<vgpr, 1, 7>,
          !waveamdmachine.reg<vgpr, 1, 8>)
         -> !waveamdmachine.reg<vgpr, 1, 6>
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 

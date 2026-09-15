@@ -15,8 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-NOT: v_cmp
 // ASM: s_mov_b32 [[COND:s[0-9]+]], -1
 // ASM: s_and_saveexec_b32 {{s[0-9]+}}, [[COND]]
-func.func @proven_true_wave32_where(%dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @proven_true_wave32_where(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %dst, %range
       : !wave.ptr<#wave.global, i32>, i32
@@ -28,14 +27,17 @@ func.func @proven_true_wave32_where(%dst: !wave.ptr<#wave.global, i32>)
   %ptrs = wave.ptr_add %buffer, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
-  wave.where %active {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active {
     %token = wave.store %lane -> %ptrs
         : (!wave.simd<i32, 32>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<32>
-  return
+    wave.yield %token : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_1 : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
+  return %observe_region_2 : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @boolean_select_mask_roundtrip
@@ -49,8 +51,7 @@ func.func @proven_true_wave32_where(%dst: !wave.ptr<#wave.global, i32>)
 // ASM-NOT: v_cmp
 // ASM: s_and_saveexec_b32
 func.func @boolean_select_mask_roundtrip(
-    %dst: !wave.ptr<#wave.global, i32>, %limit: i32)
-    attributes {wave.kernel} {
+    %dst: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %dst, %range
       : !wave.ptr<#wave.global, i32>, i32
@@ -69,14 +70,17 @@ func.func @boolean_select_mask_roundtrip(
   %ptrs = wave.ptr_add %buffer, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
-  wave.where %recovered {
+  %observe_seed_5 = wave.token : !wave.mem.token
+  %observe_region_6 = wave.where %recovered {
     %token = wave.store %lane -> %ptrs
         : (!wave.simd<i32, 32>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<32>
-  return
+    wave.yield %token : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_5 : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
+  return %observe_region_6 : !wave.mem.token
 }
 
 }

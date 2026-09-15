@@ -19,8 +19,7 @@
 // ASM: s_endpgm
 // ASM: .amdhsa_group_segment_fixed_size 0
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -48,7 +47,7 @@ func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
   %token = wave.store %result -> %ptr
       : (!wave.simd<vector<2xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>) -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_permuted_source_slots:
@@ -63,8 +62,7 @@ func.func @redistribute_permlane32(%dst: !wave.ptr<#wave.global, i32>)
 // ASM: .amdhsa_group_segment_fixed_size 0
 func.func @redistribute_permuted_source_slots(
     %src: !wave.ptr<#wave.global, bf16>,
-    %dst: !wave.ptr<#wave.global, bf16>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, bf16>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 512, 1, 1>,
                 wave.waves_per_workgroup = 8 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
@@ -88,7 +86,7 @@ func.func @redistribute_permuted_source_slots(
       : (!wave.simd<vector<64xbf16>, 64>,
          !wave.simd<!wave.ptr<#wave.global, bf16>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: half_exchange_reduction_permlane32:
@@ -142,7 +140,7 @@ func.func @half_exchange_reduction_permlane32() attributes {
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %token : !waveamdmachine.mem.token
   return
 }
 
@@ -188,7 +186,7 @@ func.func @direct_half_exchange_reduction_permlane32() attributes {
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.imm)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %token : !waveamdmachine.mem.token
   return
 }
 }

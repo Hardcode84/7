@@ -470,7 +470,7 @@ def _emit_subtile_output(
         is_store=True,
     )
     stored = builder.tdm_store(c_descriptor, after=output_ready)
-    builder.barrier(stored)
+    builder.observe(builder.barrier(stored))
 
 
 def _emit_subtile_kernel(
@@ -701,7 +701,7 @@ def _emit_output(
         is_store=True,
     )
     stored = builder.tdm_store(c_descriptor, after=output_ready)
-    builder.barrier(stored)
+    builder.observe(builder.barrier(stored))
 
 
 def _emit_kernel(

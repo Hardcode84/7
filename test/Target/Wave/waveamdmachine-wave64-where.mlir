@@ -29,8 +29,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 // ASM: .amdhsa_user_sgpr_kernarg_preload_offset 0
 // ASM: .wavefront_size: 64
 func.func @where_wave64_else(%out: !wave.ptr<#wave.global, i32>,
-                             %active: !wave.mask<64>)
-    attributes {wave.kernel} {
+                             %active: !wave.mask<64>) -> !wave.mem.token attributes {wave.kernel} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %one = arith.constant 1 : i32
@@ -40,18 +39,19 @@ func.func @where_wave64_else(%out: !wave.ptr<#wave.global, i32>,
   %ptrs = wave.ptr_add %out, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
-  wave.where %active {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active {
     %tok0 = wave.store %wi -> %ptrs
         : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
         -> !wave.mem.token
-    wave.yield
+    wave.yield %tok0 : !wave.mem.token
   } otherwise {
     %tok1 = wave.store %other -> %ptrs
         : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>
-  return
+    wave.yield %tok1 : !wave.mem.token
+  } : !wave.mask<64> -> !wave.mem.token
+  return %observe_region_2 : !wave.mem.token
 }
 
 }

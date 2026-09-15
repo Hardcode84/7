@@ -26,15 +26,15 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @symbolic_memory_control_codegen(
     %src: !wave.ptr<#wave.global, i32>,
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %zero = wave.constant 0 : i32 -> !wave.simd<i32, 64>
   %active = wave.cmpi ugt %lane, %zero
       : !wave.simd<i32, 64>, !wave.simd<i32, 64> -> !wave.mask<64>
-  wave.where %active {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active {
     %value, %read = wave.gather %src mapping
         <bit_offset = <"32 * (2 * Mod(d, 2*d) + slot)">>
         bindings ["d"](%lane)
@@ -46,8 +46,10 @@ func.func @symbolic_memory_control_codegen(
         : (!wave.simd<vector<2xi32>, 64>, !wave.ptr<#wave.global, i32>,
            !wave.simd<i32, 64>, !wave.mem.token)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>
-  return
+    wave.yield %written : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_1 : !wave.mem.token
+  } : !wave.mask<64> -> !wave.mem.token
+  return %observe_region_2 : !wave.mem.token
 }
 }

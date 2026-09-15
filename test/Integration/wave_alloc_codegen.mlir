@@ -13,8 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: ds_load_b32
 // ASM: buffer_store_b32
 // ASM: .amdhsa_group_segment_fixed_size 128
-func.func @alloc_codegen(%dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @alloc_codegen(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %a = wave.alloc() {align = 16 : i64, bytesize = 128 : i64}
       : !wave.ptr<#wave.shared, i32>
@@ -51,7 +50,7 @@ func.func @alloc_codegen(%dst: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %tok2 : !wave.mem.token
 }
 
 }

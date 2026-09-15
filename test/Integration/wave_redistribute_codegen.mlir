@@ -8,8 +8,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: ds_bpermute_b32
 // ASM-NOT: s_barrier
 // ASM: buffer_store_b32
-func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -30,7 +29,7 @@ func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>)
   %token = wave.store %value -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_same_wave_scalar:
@@ -38,8 +37,7 @@ func.func @redistribute_same_wave(%dst: !wave.ptr<#wave.global, i32>)
 // ASM-NOT: s_barrier
 // ASM: buffer_store_b32
 func.func @redistribute_same_wave_scalar(
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -55,7 +53,7 @@ func.func @redistribute_same_wave_scalar(
   %token = wave.store %moved -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_pointer_load_store:
@@ -65,8 +63,7 @@ func.func @redistribute_same_wave_scalar(
 // ASM: {{buffer|global}}_store_b32
 func.func @redistribute_pointer_load_store(
     %src: !wave.ptr<#wave.global, i32>,
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -95,7 +92,7 @@ func.func @redistribute_pointer_load_store(
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_same_wave_packet_select:
@@ -105,8 +102,7 @@ func.func @redistribute_pointer_load_store(
 // ASM-NOT: ds_store
 // ASM: buffer_store_b32
 func.func @redistribute_same_wave_packet_select(
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -147,7 +143,7 @@ func.func @redistribute_same_wave_packet_select(
   %token = wave.store %value -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_cross_wave:
@@ -157,8 +153,7 @@ func.func @redistribute_same_wave_packet_select(
 // ASM-NOT: s_barrier
 // ASM: buffer_store_b32
 // ASM: .amdhsa_group_segment_fixed_size 512
-func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -182,7 +177,7 @@ func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>)
   %token = wave.store %value -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_cross_wave_scalar:
@@ -193,8 +188,7 @@ func.func @redistribute_cross_wave(%dst: !wave.ptr<#wave.global, i32>)
 // ASM: buffer_store_b32
 // ASM: .amdhsa_group_segment_fixed_size 256
 func.func @redistribute_cross_wave_scalar(
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -210,7 +204,7 @@ func.func @redistribute_cross_wave_scalar(
   %token = wave.store %moved -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_cross_wave_swizzled:
@@ -223,8 +217,7 @@ func.func @redistribute_cross_wave_scalar(
 // ASM: buffer_store_b32
 // ASM: .amdhsa_group_segment_fixed_size 1024
 func.func @redistribute_cross_wave_swizzled(
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -255,7 +248,7 @@ func.func @redistribute_cross_wave_swizzled(
   %token = wave.store %value -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_cross_wave_nested:
@@ -267,8 +260,7 @@ func.func @redistribute_cross_wave_swizzled(
 // ASM: buffer_store_b32
 // ASM: .amdhsa_group_segment_fixed_size 256
 func.func @redistribute_cross_wave_nested(
-    %dst: !wave.ptr<#wave.global, i32>, %condition: i1)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>, %condition: i1) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -277,7 +269,8 @@ func.func @redistribute_cross_wave_nested(
       : !wave.simd<i32, 32>
   %source = wave.pack %item
       : !wave.simd<i32, 32> -> !wave.simd<vector<1xi32>, 32>
-  scf.if %condition {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = scf.if %condition -> (!wave.mem.token) {
     %moved = wave.redistribute %source,
         <blocks = 1, items = 64, source_block = "block", source_item = "xor(item, 32)", source_slot = "slot">
         : !wave.simd<vector<1xi32>, 32> -> !wave.simd<vector<1xi32>, 32>
@@ -289,8 +282,11 @@ func.func @redistribute_cross_wave_nested(
     %token = wave.store %value -> %ptr
         : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
         -> !wave.mem.token
+    scf.yield %token : !wave.mem.token
+  } else {
+    scf.yield %observe_seed_1 : !wave.mem.token
   }
-  return
+  return %observe_region_2 : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_cross_wave_sequence:
@@ -299,8 +295,7 @@ func.func @redistribute_cross_wave_nested(
 // ASM: buffer_store_b32
 // ASM: .amdhsa_group_segment_fixed_size 512
 func.func @redistribute_cross_wave_sequence(
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -343,7 +338,7 @@ func.func @redistribute_cross_wave_sequence(
   %token = wave.store %sum -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // Allocation resolution keeps lowering-introduced scratch recurrences
@@ -354,8 +349,7 @@ func.func @redistribute_cross_wave_sequence(
 // ASM: ds_load_b32
 // ASM: .amdhsa_group_segment_fixed_size 65536
 func.func @redistribute_cross_wave_loop_lifetime(
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.lds_size = 65024 : i64,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
@@ -406,7 +400,7 @@ func.func @redistribute_cross_wave_loop_lifetime(
   %stored = wave.store %done -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // Mutually exclusive non-repetitive lifetimes share the only scratch plane.
@@ -417,8 +411,7 @@ func.func @redistribute_cross_wave_loop_lifetime(
 // ASM: buffer_store_b32
 // ASM: .amdhsa_group_segment_fixed_size 65536
 func.func @redistribute_exclusive_scratch(
-    %dst: !wave.ptr<#wave.global, i32>, %condition: i1)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>, %condition: i1) -> !wave.mem.token attributes {wave.kernel,
                 wave.lds_size = 65280 : i64,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
@@ -454,7 +447,7 @@ func.func @redistribute_exclusive_scratch(
   %stored = wave.store %value -> %ptr
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

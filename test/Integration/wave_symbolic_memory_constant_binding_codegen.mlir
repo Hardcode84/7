@@ -11,8 +11,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @symbolic_memory_constant_binding_codegen(
     %unused: !wave.ptr<#wave.global, i32>,
     %src: !wave.ptr<#wave.global, i32>,
-    %dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %one = arith.constant 1 : index
@@ -36,6 +35,6 @@ func.func @symbolic_memory_constant_binding_codegen(
       : (!wave.simd<vector<2xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 }

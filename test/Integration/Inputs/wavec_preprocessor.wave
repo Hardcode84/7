@@ -6,7 +6,9 @@
 
 kernel [[amdgpu_wave_size(W)]]
 void PP_KERNEL_NAME(uint32_t *out) {
+  token output_done = token();
   simd<uint32_t, W> lane = lane_id<W>();
   simd<uint32_t, W> value = lane + PP_OFFSET;
-  store(value, out + lane);
+  output_done = join(output_done, store(value, out + lane));
+  observe(output_done);
 }

@@ -68,8 +68,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @redistribute_loop_private_lifetime(
     %source0: !wave.ptr<#wave.global, i32>,
     %source1: !wave.ptr<#wave.global, i32>,
-    %destination: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 0 : i64,
+    %destination: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 0 : i64,
                 wave.workgroup_size = array<i32: 64, 1, 1>} {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -134,7 +133,7 @@ func.func @redistribute_loop_private_lifetime(
   %stored = wave.store %sum -> %output after %ready
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 func.func @nested_component_lifetime(

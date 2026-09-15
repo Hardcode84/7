@@ -16,8 +16,7 @@
 // CHOICE-LABEL: func.func @modular_offset_runtime
 // CHOICE: wave.materialization_variants
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @modular_offset_runtime(%out: !wave.ptr<#wave.global, i32>, %stride: i32)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 32, 1, 1>,
+func.func @modular_offset_runtime(%out: !wave.ptr<#wave.global, i32>, %stride: i32) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 32, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %zero = arith.constant 0 : i32
   %one = arith.constant 1 : i32
@@ -41,6 +40,6 @@ func.func @modular_offset_runtime(%out: !wave.ptr<#wave.global, i32>, %stride: i
         -> !wave.mem.token
     scf.yield %stored : !wave.mem.token
   }
-  return
+  return %done : !wave.mem.token
 }
 }

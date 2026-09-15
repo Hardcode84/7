@@ -19,7 +19,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-LABEL: negative_constant_divisor_scalar:
 // ASM: s_endpgm
 func.func @negative_constant_divisor_scalar(%out: !wave.ptr<#wave.global, i32>,
-    %x: i32) attributes {wave.kernel} {
+    %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   %divisor = arith.constant -3 : i32
   %q = wave.binary divsi %x, %divisor : i32, i32 -> i32
   %r = wave.binary remsi %x, %divisor : i32, i32 -> i32
@@ -42,7 +42,7 @@ func.func @negative_constant_divisor_scalar(%out: !wave.ptr<#wave.global, i32>,
   %rt = wave.store %vr -> %rp after %qt
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %rt : !wave.mem.token
 }
 
 // IR-LABEL: func.func @negative_constant_divisor_narrow
@@ -58,7 +58,7 @@ func.func @negative_constant_divisor_scalar(%out: !wave.ptr<#wave.global, i32>,
 // ASM-LABEL: negative_constant_divisor_narrow:
 // ASM: s_endpgm
 func.func @negative_constant_divisor_narrow(%out: !wave.ptr<#wave.global, i32>,
-    %x: i64) attributes {wave.kernel} {
+    %x: i64) -> !wave.mem.token attributes {wave.kernel} {
   %bx = wave.assume %x as "x"
       [#wave.pred<"x >= -2147483648">, #wave.pred<"x <= 2147483647">] : i64
   %divisor = arith.constant -3 : i64
@@ -85,7 +85,7 @@ func.func @negative_constant_divisor_narrow(%out: !wave.ptr<#wave.global, i32>,
   %rt = wave.store %vr -> %rp after %qt
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %rt : !wave.mem.token
 }
 
 // IR-LABEL: func.func @negative_constant_divisor_simd
@@ -101,7 +101,7 @@ func.func @negative_constant_divisor_narrow(%out: !wave.ptr<#wave.global, i32>,
 // ASM-LABEL: negative_constant_divisor_simd:
 // ASM: s_endpgm
 func.func @negative_constant_divisor_simd(%src: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %divisor = arith.constant -3 : i32
   %divisors = wave.splat %divisor : i32 -> !wave.simd<i32, 32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -131,6 +131,6 @@ func.func @negative_constant_divisor_simd(%src: !wave.ptr<#wave.global, i32>,
   %rt = wave.store %r -> %rp after %qt
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %rt : !wave.mem.token
 }
 }

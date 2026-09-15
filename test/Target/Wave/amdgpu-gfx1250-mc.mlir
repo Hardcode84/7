@@ -192,20 +192,20 @@ func.func @memory_and_sync() {
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<sgpr, 2, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 3>
-  waveamdmachine.global_store_b32 %off, %global, %base
+  %observed_store_1 = waveamdmachine.global_store_b32 %off, %global, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 3>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
   %buffer = waveamdmachine.buffer_load_b32 %off, %desc, %zero
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<sgpr, 4, 8>,
          !waveamdmachine.imm)
         -> !waveamdmachine.reg<vgpr, 1, 4>
-  waveamdmachine.buffer_store_b32 %off, %buffer, %desc, %zero
+  %observed_store_2 = waveamdmachine.buffer_store_b32 %off, %buffer, %desc, %zero
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 4>,
          !waveamdmachine.reg<sgpr, 4, 8>,
-         !waveamdmachine.imm) -> ()
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
   %d16_lo = waveamdmachine.buffer_load_u8_d16 %off, %desc, %zero
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<sgpr, 4, 8>,
@@ -221,23 +221,23 @@ func.func @memory_and_sync() {
   %lds = waveamdmachine.ds_load_b32 %off
       : (!waveamdmachine.reg<vgpr, 1, 0>)
         -> !waveamdmachine.reg<vgpr, 1, 5>
-  waveamdmachine.ds_store_b32 %off, %lds
+  %observed_store_3 = waveamdmachine.ds_store_b32 %off, %lds
       : (!waveamdmachine.reg<vgpr, 1, 0>,
-         !waveamdmachine.reg<vgpr, 1, 5>) -> ()
+         !waveamdmachine.reg<vgpr, 1, 5>) -> !waveamdmachine.mem.token
   %scratch = waveamdmachine.scratch_load_b32 %zero, %saddr
       : (!waveamdmachine.imm,
          !waveamdmachine.reg<sgpr, 1, 13>)
         -> !waveamdmachine.reg<vgpr, 1, 6>
-  waveamdmachine.scratch_store_b32 %zero, %scratch, %saddr
+  %observed_store_4 = waveamdmachine.scratch_store_b32 %zero, %scratch, %saddr
       : (!waveamdmachine.imm,
          !waveamdmachine.reg<vgpr, 1, 6>,
-         !waveamdmachine.reg<sgpr, 1, 13>) -> ()
+         !waveamdmachine.reg<sgpr, 1, 13>) -> !waveamdmachine.mem.token
   %barrier_root = waveamdmachine.token : !waveamdmachine.mem.token
   %barrier_signal = waveamdmachine.s_barrier_signal %barrier_root
       : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
   %barrier_ready = waveamdmachine.s_barrier_wait %barrier_signal
       : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %observed_store_1, %observed_store_2, %observed_store_3, %observed_store_4 : !waveamdmachine.mem.token, !waveamdmachine.mem.token, !waveamdmachine.mem.token, !waveamdmachine.mem.token
   return
 }
 
@@ -476,7 +476,7 @@ func.func @tdm_sgpr_tuple_base_four() {
       : (!waveamdmachine.reg<sgpr, 4, 0>,
          !waveamdmachine.reg<sgpr, 8, 4>,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %loaded : !waveamdmachine.mem.token
   return
 }
 

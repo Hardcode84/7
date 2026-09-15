@@ -27,8 +27,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--CHIP"} {
 
-func.func @full_waves(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>} {
+func.func @full_waves(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>} {
   %raw = wave.workitem_id 0 : !wave.simd<i32, WAVE_WIDTH>
   %tid = wave.assume %raw as "x"
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 255">]
@@ -43,11 +42,10 @@ func.func @full_waves(%out: !wave.ptr<#wave.global, i32>)
   %stored = wave.store %data -> %dst
       : (!wave.simd<i32, WAVE_WIDTH>,
          !wave.simd<!wave.ptr<#wave.global, i32>, WAVE_WIDTH>) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
-func.func @partial_wave(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 96, 1, 1>} {
+func.func @partial_wave(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 96, 1, 1>} {
   %raw = wave.workitem_id 0 : !wave.simd<i32, WAVE_WIDTH>
   %tid = wave.assume %raw as "x"
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 95">]
@@ -62,11 +60,10 @@ func.func @partial_wave(%out: !wave.ptr<#wave.global, i32>)
   %stored = wave.store %data -> %dst
       : (!wave.simd<i32, WAVE_WIDTH>,
          !wave.simd<!wave.ptr<#wave.global, i32>, WAVE_WIDTH>) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
-func.func @two_rows(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 96, 2, 1>} {
+func.func @two_rows(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 96, 2, 1>} {
   %raw = wave.workitem_id 0 : !wave.simd<i32, WAVE_WIDTH>
   %tid = wave.assume %raw as "x"
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 95">]
@@ -85,6 +82,6 @@ func.func @two_rows(%out: !wave.ptr<#wave.global, i32>)
   %stored = wave.store %data -> %dst
       : (!wave.simd<i32, WAVE_WIDTH>,
          !wave.simd<!wave.ptr<#wave.global, i32>, WAVE_WIDTH>) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 }

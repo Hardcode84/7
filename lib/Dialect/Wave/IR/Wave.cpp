@@ -18,6 +18,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/Dialect/Wave/IR/WaveMemoryCanonicalization.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/IRMapping.h"
@@ -50,6 +51,13 @@ using namespace mlir::wave;
 
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.cpp.inc"
 #include "mlir/Dialect/Wave/IR/WaveOpsEnums.cpp.inc"
+
+void WaveDialect::getCanonicalizationPatterns(
+    RewritePatternSet &patterns) const {
+  patterns.add<EraseUnobservedMemory,
+               EraseUnobservedRegionMemory<TokenOp, MemTokenType>>(
+      getContext());
+}
 
 void WaveDialect::initialize() {
   if (!symbolStore)

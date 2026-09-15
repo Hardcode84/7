@@ -24,8 +24,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: buffer_load_dwordx4
 // ASM: s_endpgm
 func.func @gfx950_phased_dma_lowering_codegen(
-    %in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 2048 : i64,
+    %in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 2048 : i64,
                 wave.workgroup_size = array<i32: 128, 1, 1>,
                 waveamdmachine.kernarg_preload_length = 2 : i64} {
   %c0 = arith.constant 0 : index
@@ -40,8 +39,9 @@ func.func @gfx950_phased_dma_lowering_codegen(
   %next_lds = wave.ptr_add %lds, %c256
       : !wave.ptr<#wave.shared, i32>, index -> !wave.ptr<#wave.shared, i32>
   %root = wave.token : !wave.mem.token
-  %result = scf.for %i = %c0 to %c2 step %c1 iter_args(%base = %in)
-      -> (!wave.ptr<#wave.global, i32>) {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %result, %observe_region_2 = scf.for %i = %c0 to %c2 step %c1 iter_args(%base = %in, %observe_carry_3 = %observe_seed_1)
+      -> (!wave.ptr<#wave.global, i32>, !wave.mem.token) {
     %src = wave.ptr_add %base, %wi
         : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
         -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
@@ -59,9 +59,10 @@ func.func @gfx950_phased_dma_lowering_codegen(
         {bytes = 16 : i64}
         : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
            !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-    scf.yield %base : !wave.ptr<#wave.global, i32>
+    %observe_join_4 = wave.join %observe_carry_3, %first, %second, %third : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %base, %observe_join_4 : !wave.ptr<#wave.global, i32>, !wave.mem.token
   }
-  return
+  return %observe_region_2 : !wave.mem.token
 }
 
 }

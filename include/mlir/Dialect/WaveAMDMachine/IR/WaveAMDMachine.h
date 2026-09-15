@@ -11,6 +11,7 @@
 #define MLIR_DIALECT_WAVEAMDMACHINE_IR_WAVEAMDMACHINE_H
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Dialect/Wave/IR/WaveMemoryEffects.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineAddressFields.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"

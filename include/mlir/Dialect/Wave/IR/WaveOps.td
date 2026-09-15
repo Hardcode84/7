@@ -606,7 +606,10 @@ def Wave_GatherOp : Wave_Op<"gather", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
-def Wave_ScatterOp : Wave_Op<"scatter", [AttrSizedOperandSegments]> {
+def Wave_ScatterOp : Wave_Op<"scatter", [
+  AttrSizedOperandSegments,
+  NativeOpTrait<"wave::DiscardableMemoryOp">
+]> {
   let summary = "scatter a packet through a symbolic memory mapping";
   let description = [{
     Writes every active packet point. Address equality does not remove writes;
@@ -813,7 +816,7 @@ def Wave_IndexExprOp : Wave_Op<"index_expr", [Pure, Elementwise,
   let hasCanonicalizer = 1;
 }
 
-def Wave_StoreOp : Wave_Op<"store"> {
+def Wave_StoreOp : Wave_Op<"store", [NativeOpTrait<"wave::DiscardableMemoryOp">]> {
   let summary = "store a lane-varying SIMD value to memory";
   let description = [{
     Stores a value to a `!wave.ptr<space, T>` or lane-varying

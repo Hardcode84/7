@@ -107,7 +107,7 @@ module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 
-func.func @old_lds_dma() {
+func.func @old_lds_dma() -> !waveamdmachine.mem.token {
   %off = waveamdmachine.uninit
       : !waveamdmachine.reg<vgpr, 1, 0>
   %base = waveamdmachine.uninit
@@ -127,7 +127,7 @@ func.func @old_lds_dma() {
          !waveamdmachine.m0,
          !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  return
+  return %token : !waveamdmachine.mem.token
 }
 
 }
@@ -558,7 +558,7 @@ func.func @tdm_illegal_sgpr_tuple_base() {
       : (!waveamdmachine.reg<sgpr, 4, 0>,
          !waveamdmachine.reg<sgpr, 8, 6>,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %loaded : !waveamdmachine.mem.token
   return
 }
 

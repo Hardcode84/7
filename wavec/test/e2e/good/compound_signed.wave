@@ -1,5 +1,6 @@
 kernel [[amdgpu_wave_size(32)]]
 void compound_signed(uint32_t *out, int32_t sx, uint32_t ux) {
+  token output_done = token();
   int32_t s = sx | 1;
   s >>= 1;
   s /= 3;
@@ -11,5 +12,6 @@ void compound_signed(uint32_t *out, int32_t sx, uint32_t ux) {
   u %= 5;
 
   simd<uint32_t, 32> lane = lane_id<32>();
-  store(lane + u, out + lane);
+  output_done = join(output_done, store(lane + u, out + lane));
+  observe(output_done);
 }

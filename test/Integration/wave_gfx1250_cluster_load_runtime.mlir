@@ -192,7 +192,7 @@ func.func @gfx1250_cluster_load(
          !waveamdmachine.reg<sgpr, 2>,
          !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %result : !waveamdmachine.mem.token
   return
 }
 
@@ -299,7 +299,7 @@ func.func @gfx1250_cluster_load_async(
          !waveamdmachine.reg<sgpr, 2>,
          !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %result : !waveamdmachine.mem.token
   return
 }
 

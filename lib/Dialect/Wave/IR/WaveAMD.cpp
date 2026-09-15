@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 
 #include "mlir/Dialect/Wave/IR/Wave.h"
+#include "mlir/Dialect/Wave/IR/WaveMemoryCanonicalization.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/PatternMatch.h"
@@ -21,6 +22,11 @@ using namespace mlir::waveamd;
 
 #include "mlir/Dialect/Wave/IR/WaveAMDOpsDialect.cpp.inc"
 #include "mlir/Dialect/Wave/IR/WaveAMDOpsEnums.cpp.inc"
+
+void WaveAMDDialect::getCanonicalizationPatterns(
+    RewritePatternSet &patterns) const {
+  patterns.add<::mlir::wave::EraseUnobservedMemory>(getContext());
+}
 
 void WaveAMDDialect::initialize() {
   registerAttributes();

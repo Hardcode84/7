@@ -5,8 +5,7 @@
 // CHECK-LABEL: func.func @generate_after_normalize
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[IDX:.*]]: !wave.simd<index, 32>)
 func.func @generate_after_normalize(%out: !wave.ptr<#wave.global, f32>,
-                                    %idx: !wave.simd<index, 32>)
-    attributes {wave.kernel} {
+                                    %idx: !wave.simd<index, 32>) -> !wave.mem.token attributes {wave.kernel} {
   %c16 = arith.constant 16 : index
   %s16 = wave.splat %c16 : index -> !wave.simd<index, 32>
   %offset = wave.binary addi %idx, %s16 overflow<nsw> : !wave.simd<index, 32>, !wave.simd<index, 32> -> !wave.simd<index, 32>
@@ -15,14 +14,13 @@ func.func @generate_after_normalize(%out: !wave.ptr<#wave.global, f32>,
   %cst = arith.constant 0.000000e+00 : f32
   %val = wave.splat %cst : f32 -> !wave.simd<f32, 32>
   %token = wave.store %val -> %ptr : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<#wave.global, f32>, 32>) -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // CHECK-LABEL: func.func @rewrite_nested_splat_leaf_after_normalize
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[STRIDE:.*]]: i32, %[[BASE:.*]]: i32)
 func.func @rewrite_nested_splat_leaf_after_normalize(
-    %out: !wave.ptr<#wave.global, f16>, %stride_raw: i32, %base_raw: i32)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>} {
+    %out: !wave.ptr<#wave.global, f16>, %stride_raw: i32, %base_raw: i32) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>} {
   %zero = arith.constant 0.000000e+00 : f16
   %c6 = arith.constant 6 : i32
   %c8 = arith.constant 8 : i32
@@ -67,14 +65,13 @@ func.func @rewrite_nested_splat_leaf_after_normalize(
       : (!wave.simd<f16, 64>, !wave.simd<!wave.ptr<#wave.global, f16>, 64>)
       -> !wave.mem.token
   // CHECK: wave.store
-  return
+  return %token : !wave.mem.token
 }
 
 // CHECK-LABEL: func.func @generate_divsi_after_normalize
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[IDX:.*]]: !wave.simd<i32, 32>)
 func.func @generate_divsi_after_normalize(%out: !wave.ptr<#wave.global, f32>,
-                                          %idx_raw: !wave.simd<i32, 32>)
-    attributes {wave.kernel} {
+                                          %idx_raw: !wave.simd<i32, 32>) -> !wave.mem.token attributes {wave.kernel} {
   %c2 = arith.constant 2 : i32
   %cst = arith.constant 0.000000e+00 : f32
   // CHECK: %[[ASSUME:.*]] = wave.assume %[[IDX]]
@@ -90,14 +87,13 @@ func.func @generate_divsi_after_normalize(%out: !wave.ptr<#wave.global, f32>,
   %token = wave.store %val -> %ptr
       : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // CHECK-LABEL: func.func @rewrite_assumed_offset_after_normalize
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[IDX:.*]]: !wave.simd<i32, 32>)
 func.func @rewrite_assumed_offset_after_normalize(
-    %out: !wave.ptr<#wave.global, f16>, %idx_raw: !wave.simd<i32, 32>)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, f16>, %idx_raw: !wave.simd<i32, 32>) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0.000000e+00 : f16
   %c2 = arith.constant 2 : i32
   %c4 = arith.constant 4 : i32
@@ -125,7 +121,7 @@ func.func @rewrite_assumed_offset_after_normalize(
   %token = wave.store %val -> %ptr
       : (!wave.simd<f16, 32>, !wave.simd<!wave.ptr<#wave.global, f16>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // CHECK-LABEL: func.func @rewrite_assumed_buffer_offset_after_normalize
@@ -165,8 +161,7 @@ func.func @rewrite_assumed_buffer_offset_after_normalize(
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[IDX_RAW:.*]]: !wave.simd<i32, 32>, %[[LIMIT_RAW:.*]]: i32)
 func.func @keep_cmp_operands_after_index_generation(
     %out: !wave.ptr<#wave.global, f16>, %idx_raw: !wave.simd<i32, 32>,
-    %limit_raw: i32) -> !wave.mask<32>
-    attributes {wave.kernel} {
+    %limit_raw: i32) -> (!wave.mask<32>, !wave.mem.token) attributes {wave.kernel} {
   %c0 = arith.constant 0.000000e+00 : f16
   %c2 = arith.constant 2 : i32
   %c4 = arith.constant 4 : i32
@@ -205,8 +200,8 @@ func.func @keep_cmp_operands_after_index_generation(
   // CHECK: %[[MASK:.*]] = wave.cmpi slt %[[OFFSET]], %[[SLIMIT]] : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
   %mask = wave.cmpi slt %offset, %slimit
       : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
-  // CHECK: return %[[MASK]] : !wave.mask<32>
-  return %mask : !wave.mask<32>
+  // CHECK: return %[[MASK]], {{%.*}} : !wave.mask<32>, !wave.mem.token
+  return %mask, %token : !wave.mask<32>, !wave.mem.token
 }
 
 // -----
@@ -244,8 +239,7 @@ func.func @rewrite_integerized_mask_and(
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global>, %[[X:.*]]: !wave.simd<i32, 32>)
 // CHECK: wave.index_expr <"4*(1 + raw0)"> {{.*}} ["raw0"](%[[X]])
 func.func @generate_packet_alias_after_normalize(
-    %out: !wave.ptr<#wave.global, f32>, %x: !wave.simd<i32, 32>)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, f32>, %x: !wave.simd<i32, 32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = wave.constant 0 : i32 -> !wave.simd<i32, 32>
   %one = wave.constant 1 : i32 -> !wave.simd<i32, 32>
   %next = wave.binary addi %x, %one overflow<nsw>
@@ -264,5 +258,5 @@ func.func @generate_packet_alias_after_normalize(
   %token = wave.store %values -> %ptr
       : (!wave.simd<f32, 32>, !wave.simd<!wave.ptr<#wave.global, f32>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }

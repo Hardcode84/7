@@ -14,8 +14,7 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @write_under_mask(%dst: !wave.ptr<#wave.global, i32>, %limit: i32)
-      attributes {gpu.kernel, wave.kernel} {
+  func.func @write_under_mask(%dst: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %range = arith.constant @BYTES@ : i32
     %buffer = waveamd.make_buffer %dst, %range
         : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -26,20 +25,22 @@ gpu.module @kernels {
     %ptrs = wave.ptr_add %buffer, %lane
         : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, @W@>
         -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>
-    wave.where %active {
+    %observe_seed_1 = wave.token : !wave.mem.token
+    %observe_region_2 = wave.where %active {
       %tok = wave.store %lane -> %ptrs
           : (!wave.simd<i32, @W@>,
              !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>)
           -> !wave.mem.token
-      wave.yield
-    } : !wave.mask<@W@>
-    return
+      wave.yield %tok : !wave.mem.token
+    } otherwise {
+      wave.yield %observe_seed_1 : !wave.mem.token
+    } : !wave.mask<@W@> -> !wave.mem.token
+    return %observe_region_2 : !wave.mem.token
   }
 
   func.func @load_under_mask(%src: !wave.ptr<#wave.global, i32>,
                              %dst: !wave.ptr<#wave.global, i32>,
-                             %limit: i32)
-      attributes {gpu.kernel, wave.kernel} {
+                             %limit: i32) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %range = arith.constant @BYTES@ : i32
     %src_buffer = waveamd.make_buffer %src, %range
         : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -61,21 +62,23 @@ gpu.module @kernels {
           -> (!wave.simd<i32, @W@>, !wave.mem.token)
       wave.yield %value, %token : !wave.simd<i32, @W@>, !wave.mem.token
     } : !wave.mask<@W@> -> !wave.simd<i32, @W@>, !wave.mem.token
-    wave.where %active {
+    %observe_seed_5 = wave.token : !wave.mem.token
+    %observe_region_6 = wave.where %active {
       %store_token = wave.store %loaded -> %dst_ptrs after %load_token
           : (!wave.simd<i32, @W@>,
              !wave.simd<!wave.ptr<#waveamd.buffer, i32>, @W@>,
              !wave.mem.token)
           -> !wave.mem.token
-      wave.yield
-    } : !wave.mask<@W@>
-    return
+      wave.yield %store_token : !wave.mem.token
+    } otherwise {
+      wave.yield %observe_seed_5 : !wave.mem.token
+    } : !wave.mask<@W@> -> !wave.mem.token
+    return %observe_region_6 : !wave.mem.token
   }
 
   func.func @load_then_store_otherwise(%src: !wave.ptr<#wave.global, i32>,
                                        %dst: !wave.ptr<#wave.global, i32>,
-                                       %limit: i32)
-      attributes {gpu.kernel, wave.kernel} {
+                                       %limit: i32) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %range = arith.constant @BYTES@ : i32
     %fallback_scalar = arith.constant 5 : i32
     %src_buffer = waveamd.make_buffer %src, %range
@@ -113,12 +116,12 @@ gpu.module @kernels {
           -> !wave.mem.token
       wave.yield %token : !wave.mem.token
     } : !wave.mask<@W@> -> !wave.mem.token
-    return
+    return %store_token : !wave.mem.token
   }
 
   func.func @masked_load_other_global_f32(
       %src: !wave.ptr<#wave.global, f32>, %dst: !wave.ptr<#wave.global, f32>,
-      %limit: i32) attributes {gpu.kernel, wave.kernel} {
+      %limit: i32) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %cw_i32 = arith.constant @W@ : i32
     %five = arith.constant 5.000000e+00 : f32
     %pid = wave.workgroup_id 0
@@ -159,7 +162,7 @@ gpu.module @kernels {
           -> !wave.mem.token
       wave.yield %token : !wave.mem.token
     } : !wave.mask<@W@> -> !wave.mem.token
-    return
+    return %store_token : !wave.mem.token
   }
 }
 

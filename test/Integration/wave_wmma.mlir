@@ -23,8 +23,7 @@
 module attributes {gpu.container_module} {
 
 gpu.module @kernels {
-  func.func @wmma_iu8_matmul_const(%out: !wave.ptr<#wave.global, i32>)
-      attributes {gpu.kernel, wave.kernel} {
+  func.func @wmma_iu8_matmul_const(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {gpu.kernel, wave.kernel} {
     %ones_i8x4 = arith.constant 0x01010101 : i32
     %acc_init  = arith.constant 0 : i32
     %base      = arith.constant 0 : i32
@@ -55,7 +54,7 @@ gpu.module @kernels {
     %tok = wave.store %regs -> %tuple_ptr
         : (!wave.simd<vector<8xi32>, 32>,
            !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-    return
+    return %tok : !wave.mem.token
   }
 }
 

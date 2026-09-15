@@ -19,8 +19,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @modular_buffer_offset_codegen(
-    %a: !wave.ptr<#wave.global, i8>, %stride: i32)
-    attributes {wave.kernel} {
+    %a: !wave.ptr<#wave.global, i8>, %stride: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
@@ -28,7 +27,8 @@ func.func @modular_buffer_offset_codegen(
   %buffer = waveamd.make_buffer %a, %range
       : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
   %lane = wave.lane_id : !wave.simd<i32, 64>
-  scf.for %i = %c0 to %c4 step %c1 : i32 {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = scf.for %i = %c0 to %c4 step %c1 iter_args(%observe_carry_3 = %observe_seed_1) -> (!wave.mem.token) : i32  {
     %scaled = wave.binary muli %i, %stride : i32, i32 -> i32
     %off = wave.index_expr <"Mod(128*x + lane, 4294967296)"> ["x", "lane"]
         (%scaled, %lane)
@@ -43,8 +43,10 @@ func.func @modular_buffer_offset_codegen(
         : (!wave.simd<i8, 64>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>, !wave.mem.token)
         -> !wave.mem.token
+    %observe_join_4 = wave.join %observe_carry_3, %stored : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %observe_join_4 : !wave.mem.token
   }
-  return
+  return %observe_region_2 : !wave.mem.token
 }
 
 }

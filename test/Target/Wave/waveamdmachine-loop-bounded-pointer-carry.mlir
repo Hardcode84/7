@@ -5,8 +5,7 @@
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %{{.*}}: !waveamdmachine.reg<sgpr, 1>):
 // CHECK: waveamdmachine.ds_store_b32
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @shared_absolute_symbolic_carry()
-    attributes {wave.kernel, wave.lds_size = 1024 : i64} {
+func.func @shared_absolute_symbolic_carry() -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 1024 : i64} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
@@ -29,7 +28,7 @@ func.func @shared_absolute_symbolic_carry()
   %token = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.shared, i32>, 32>) -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 }
 
@@ -38,8 +37,7 @@ func.func @shared_absolute_symbolic_carry()
 // CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %{{.*}}: !waveamdmachine.reg<sgpr, 1>, %{{.*}}: !waveamdmachine.reg<sgpr, 1>):
 // CHECK: waveamdmachine.ds_store_b32
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @shared_permuted_pointer_carries()
-    attributes {wave.kernel, wave.lds_size = 1024 : i64} {
+func.func @shared_permuted_pointer_carries() -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 1024 : i64} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
@@ -61,7 +59,7 @@ func.func @shared_permuted_pointer_carries()
   %token = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.shared, i32>, 32>) -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 }
 
@@ -69,8 +67,7 @@ func.func @shared_permuted_pointer_carries()
 // CHECK: waveamdmachine.uniform_loop
 // CHECK: waveamdmachine.ds_store_b32
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @shared_absolute_cast_carry()
-    attributes {wave.kernel, wave.lds_size = 1024 : i64} {
+func.func @shared_absolute_cast_carry() -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 1024 : i64} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
@@ -97,6 +94,6 @@ func.func @shared_absolute_cast_carry()
   %token = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.shared, i32>, 32>) -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 }

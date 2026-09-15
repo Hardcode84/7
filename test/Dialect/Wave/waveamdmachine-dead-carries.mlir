@@ -276,7 +276,7 @@ func.func @fill_loop_carried_wait(
     %x: !waveamdmachine.reg<sgpr, 1>,
     %y: !waveamdmachine.reg<sgpr, 1>,
     %cond: !waveamdmachine.reg<scc, 1>,
-    %root: !waveamdmachine.mem.token) {
+    %root: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
   %loaded, %init = waveamdmachine.ds_load_b32 %addr after %root
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
@@ -305,7 +305,7 @@ func.func @fill_loop_carried_wait(
                 !waveamdmachine.reg<sgpr, 1>)
   } -> !waveamdmachine.mem.token, !waveamdmachine.reg<vgpr, 1>,
        !waveamdmachine.reg<sgpr, 1>
-  return
+  return %loop#0 : !waveamdmachine.mem.token
 }
 }
 

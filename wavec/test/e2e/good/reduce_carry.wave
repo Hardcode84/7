@@ -1,9 +1,11 @@
 kernel [[amdgpu_wave_size(32)]]
 void reduce_carry(float *out, uint32_t N) {
+  token output_done = token();
   simd<uint32_t, 32> lane = lane_id<32>();
   simd<float, 32> acc = 0.0f;
   for uint32_t i in 0..N {
     if (N < 100) { acc = acc + acc; }
   }
-  store(acc, out + lane);
+  output_done = join(output_done, store(acc, out + lane));
+  observe(output_done);
 }

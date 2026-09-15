@@ -68,6 +68,7 @@ from mlir.ir import (
     DictAttr,
     F16Type,
     F32Type,
+    FunctionType,
     IndexType,
     InsertionPoint,
     IntegerAttr,
@@ -78,6 +79,7 @@ from mlir.ir import (
     ShapedType,
     StringAttr,
     Type,
+    TypeAttr,
     UnitAttr,
     UnrankedMemRefType,
     Value,
@@ -1240,8 +1242,9 @@ class ModuleBuilder:
                 op.attributes[attr_name] = attr
         block = op.add_entry_block()
         with InsertionPoint(block):
-            yield FunctionBuilder(block)
-            func.ReturnOp([])
+            builder = FunctionBuilder(block)
+            yield builder
+            builder.finish()
 
     @contextmanager
     def host_main(
@@ -1253,8 +1256,9 @@ class ModuleBuilder:
         op = func.FuncOp(name, (list(inputs), list(results)))
         block = op.add_entry_block()
         with InsertionPoint(block):
-            yield FunctionBuilder(block)
-            func.ReturnOp([])
+            builder = FunctionBuilder(block)
+            yield builder
+            builder.finish()
 
     def declare_external(
         self,
@@ -1306,8 +1310,9 @@ class _GpuModuleBuilder:
                 op.attributes[attr_name] = attr
         block = op.add_entry_block()
         with InsertionPoint(block):
-            yield FunctionBuilder(block)
-            func.ReturnOp([])
+            builder = FunctionBuilder(block)
+            yield builder
+            builder.finish()
 
 
 class _WhereBuilder:
@@ -1394,6 +1399,37 @@ class FunctionBuilder:
     def __init__(self, block: Block) -> None:
         self.block = block
         self._yield_stack: list[_YieldKind] = []
+        self._observed: list[Value] = []
+
+    def finish(self) -> None:
+        if not self.block.operations or self.block.operations[-1].name != "func.return":
+            self.return_()
+
+    def observe(self, *tokens: Value) -> None:
+        """Make explicit memory effects visible at kernel completion."""
+        if InsertionPoint.current.block != self.block:
+            raise ValueError("yield region tokens before observing them")
+        if any(not MemTokenType.isinstance(token.type) for token in tokens):
+            raise ValueError("observation requires memory tokens")
+        if self.block.operations and self.block.operations[-1].name == "func.return":
+            raise ValueError("observation must precede the function return")
+        self._observed.extend(tokens)
+
+    def return_(self, values: Sequence[Value] = ()) -> None:
+        """Return explicit data or memory dependencies from the function."""
+        values = [*values, *self._observed]
+        op = self.block.owner
+        declared = list(
+            FunctionType(TypeAttr(op.attributes["function_type"]).value).results
+        )
+        if declared and declared != [value.type for value in values]:
+            raise ValueError("return values do not match declared function results")
+        op.attributes["function_type"] = TypeAttr.get(
+            FunctionType.get(
+                [arg.type for arg in self.block.arguments], [v.type for v in values]
+            )
+        )
+        func.ReturnOp(list(values))
 
     @property
     def args(self) -> Sequence[Value]:

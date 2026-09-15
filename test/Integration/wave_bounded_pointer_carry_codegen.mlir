@@ -21,8 +21,7 @@
 // ASM: s_endpgm
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @bounded_pointer_carry(%out: !wave.ptr<#wave.global, i32>)
-    attributes {
+func.func @bounded_pointer_carry(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {
       wave.kernel,
       wave.lds_size = 1024 : i64,
       wave.workgroup_size = array<i32: 32, 1, 1>
@@ -66,6 +65,6 @@ func.func @bounded_pointer_carry(%out: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 }

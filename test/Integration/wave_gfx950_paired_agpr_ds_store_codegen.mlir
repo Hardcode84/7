@@ -24,8 +24,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: .amdhsa_private_segment_fixed_size 0
 func.func @paired_agpr_store_codegen(
     %input: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64,
                 waveamdmachine.vgpr_count_max = 16 : i64} {
@@ -149,7 +148,7 @@ func.func @paired_agpr_store_codegen(
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %stored3 : !wave.mem.token
 }
 
 }

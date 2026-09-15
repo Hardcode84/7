@@ -17,8 +17,7 @@ module attributes {
 // ASM: s_endpgm
 func.func @sched_barrier_packed_math(
     %dst: !wave.ptr<#wave.global, f32>,
-    %a0: f32, %a1: f32, %b0: f32, %b1: f32)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %a0: f32, %a1: f32, %b0: f32, %b1: f32) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %range = arith.constant 256 : i32
   %buffer = waveamd.make_buffer %dst, %range
       : !wave.ptr<#wave.global, f32>, i32
@@ -42,7 +41,7 @@ func.func @sched_barrier_packed_math(
       : (!wave.simd<f32, 64>,
          !wave.simd<!wave.ptr<#waveamd.buffer, f32>, 64>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 // ASM-LABEL: paired_f32_sub_math:
@@ -53,8 +52,7 @@ func.func @sched_barrier_packed_math(
 // ASM: s_endpgm
 func.func @paired_f32_sub_math(
     %dst: !wave.ptr<#wave.global, f32>,
-    %a0: f32, %a1: f32, %b0: f32, %b1: f32)
-    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
+    %a0: f32, %a1: f32, %b0: f32, %b1: f32) -> !wave.mem.token attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %range = arith.constant 256 : i32
   %buffer = waveamd.make_buffer %dst, %range
       : !wave.ptr<#wave.global, f32>, i32
@@ -77,7 +75,7 @@ func.func @paired_f32_sub_math(
       : (!wave.simd<f32, 64>,
          !wave.simd<!wave.ptr<#waveamd.buffer, f32>, 64>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 }

@@ -7,8 +7,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-COUNT-1: waveamdmachine.s_cmp_lt_i32
 // CHECK: waveamdmachine.buffer_store_b32
 func.func @equivalent_mask_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %base_raw: i32, %limit_raw: i32)
-    attributes {
+    %out: !wave.ptr<#wave.global, i32>, %base_raw: i32, %limit_raw: i32) -> !wave.mem.token attributes {
       wave.kernel,
       wave.workgroup_size = array<i32: 256, 1, 1>,
       wave.waves_per_workgroup = 4 : i64
@@ -54,7 +53,7 @@ func.func @equivalent_mask_codegen(
       : (!wave.simd<i32, 64>,
          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 }

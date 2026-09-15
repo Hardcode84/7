@@ -172,7 +172,7 @@ def WaveAMD_MmaScaleOp : WaveAMD_Op<"mma_scale", [Pure]> {
   let hasVerifier = 1;
 }
 
-def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds"> {
+def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds", [NativeOpTrait<"wave::DiscardableMemoryOp">]> {
   let summary = "DMA one dword from global or buffer memory into LDS";
   let description = [{
     Starts a global/buffer to LDS transfer. The source pointer may be lane
@@ -199,7 +199,7 @@ def WaveAMD_DmaLoadLdsOp : WaveAMD_Op<"dma_load_lds"> {
 }
 
 class WaveAMD_TDMTransfer<string mnemonic>
-    : WaveAMD_Op<mnemonic, [MemoryEffects<[MemRead, MemWrite]>]> {
+    : WaveAMD_Op<mnemonic, [NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemRead, MemWrite]>]> {
   let arguments = (ins WaveAMD_TDMDwordGroup4:$d0,
                        WaveAMD_TDMDwordGroup8:$d1,
                        Wave_MemToken:$dependency,
@@ -222,9 +222,8 @@ def WaveAMD_TDMStoreOp : WaveAMD_TDMTransfer<"tdm_store"> {
   let summary = "gfx1250 tensor store from LDS";
 }
 
-// MemWrite prevents DCE; dependency token carries ordering.
 def WaveAMD_TDMPrefetchOp
-    : WaveAMD_Op<"tdm_prefetch", [MemoryEffects<[MemWrite]>]> {
+    : WaveAMD_Op<"tdm_prefetch", [NativeOpTrait<"wave::DiscardableMemoryOp">, MemoryEffects<[MemWrite]>]> {
   let summary = "prefetch one descriptor-derived address to L2";
   let arguments = (ins WaveAMD_TDMDwordGroup4:$d0,
                        Wave_Simd:$byte_offset,

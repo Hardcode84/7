@@ -13,10 +13,10 @@ func.func @vmov_b64_zero_codegen(%addr: !waveamdmachine.reg<vgpr, 1, 0>,
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %wide = waveamdmachine.v_mov_b64_tuple %zero
       : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2, 2>
-  waveamdmachine.global_store_b64 %addr, %wide, %base
+  %observed_store_1 = waveamdmachine.global_store_b64 %addr, %wide, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 2, 2>,
-         !waveamdmachine.reg<sgpr, 2, 6>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 6>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 

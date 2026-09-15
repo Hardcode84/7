@@ -22,7 +22,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-NOT: s_cmp_lt_i32
 // ASM: .amdhsa_kernel positive_divisor_scalar
 func.func @positive_divisor_scalar(%out: !wave.ptr<#wave.global, i32>,
-    %x: i32, %d: i32) attributes {wave.kernel} {
+    %x: i32, %d: i32) -> !wave.mem.token attributes {wave.kernel} {
   %pos = wave.assume %d as "d" [#wave.pred<"d >= 1">] : i32
   %q = wave.binary divsi %x, %pos : i32, i32 -> i32
   %r = wave.binary remsi %x, %pos : i32, i32 -> i32
@@ -45,7 +45,7 @@ func.func @positive_divisor_scalar(%out: !wave.ptr<#wave.global, i32>,
   %rt = wave.store %vr -> %rp after %qt
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %rt : !wave.mem.token
 }
 
 // IR-LABEL: func.func @positive_divisor_narrow
@@ -63,7 +63,7 @@ func.func @positive_divisor_scalar(%out: !wave.ptr<#wave.global, i32>,
 // ASM-NOT: s_cmp_lt_i32
 // ASM: .amdhsa_kernel positive_divisor_narrow
 func.func @positive_divisor_narrow(%out: !wave.ptr<#wave.global, i32>,
-    %x: i64, %d: i64) attributes {wave.kernel} {
+    %x: i64, %d: i64) -> !wave.mem.token attributes {wave.kernel} {
   %bx = wave.assume %x as "x"
       [#wave.pred<"x >= -2147483648">, #wave.pred<"x <= 2147483647">] : i64
   %pos = wave.assume %d as "d"
@@ -91,7 +91,7 @@ func.func @positive_divisor_narrow(%out: !wave.ptr<#wave.global, i32>,
   %rt = wave.store %vr -> %rp after %qt
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %rt : !wave.mem.token
 }
 
 // IR-LABEL: func.func @positive_divisor_simd
@@ -109,7 +109,7 @@ func.func @positive_divisor_narrow(%out: !wave.ptr<#wave.global, i32>,
 // ASM-NOT: v_cmp_lt_i32
 // ASM: .amdhsa_kernel positive_divisor_simd
 func.func @positive_divisor_simd(%src: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>, %d: i32) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %d: i32) -> !wave.mem.token attributes {wave.kernel} {
   %pos = wave.assume %d as "d" [#wave.pred<"d >= 1">] : i32
   %vp = wave.splat %pos : i32 -> !wave.simd<i32, 32>
   %lane = wave.lane_id : !wave.simd<i32, 32>
@@ -139,6 +139,6 @@ func.func @positive_divisor_simd(%src: !wave.ptr<#wave.global, i32>,
   %rt = wave.store %r -> %rp after %qt
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %rt : !wave.mem.token
 }
 }

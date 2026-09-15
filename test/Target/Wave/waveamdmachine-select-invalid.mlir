@@ -382,7 +382,7 @@ func.func @gfx942_rejects_wave32_override(%x: i32) {
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @where_otherwise_pointer_different_base(
     %a: !wave.ptr<#wave.global, i32>, %b: !wave.ptr<#wave.global, i32>,
-    %limit: i32) attributes {wave.kernel} {
+    %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
   %active = wave.cmpi ult %lane, %vlimit
@@ -402,14 +402,14 @@ func.func @where_otherwise_pointer_different_base(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 }
 
 // -----
 
 func.func @kernel_return_value(%x: i32) -> i32 attributes {wave.kernel} {
-  // expected-error @below {{kernel functions must return void}}
+  // expected-error @below {{kernel functions may return only memory tokens}}
   return %x : i32
 }
 
@@ -466,7 +466,7 @@ func.func @mod_non_power_of_two_wide_product(
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @floor_dynamic_denominator_buffer(%out: !wave.ptr<#wave.global, i32>,
-                                            %u_raw: i32) attributes {wave.kernel} {
+                                            %u_raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane_raw = wave.lane_id : !wave.simd<i32, 32>
   %lane = wave.assume %lane_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : !wave.simd<i32, 32>
   %u = wave.assume %u_raw as "x" [#wave.pred<"x >= 1">, #wave.pred<"x <= 31">] : i32
@@ -482,7 +482,7 @@ func.func @floor_dynamic_denominator_buffer(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 }
 
@@ -505,8 +505,7 @@ func.func @dynamic_denominator_product(%x_raw: i32, %y_raw: i32) -> index {
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @buffer_addr64_without_global_base(
-    %buf: !wave.ptr<#waveamd.buffer, i32>, %raw: i32)
-    attributes {wave.kernel} {
+    %buf: !wave.ptr<#waveamd.buffer, i32>, %raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptr = wave.ptr_add %buf, %raw
       : !wave.ptr<#waveamd.buffer, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -517,7 +516,7 @@ func.func @buffer_addr64_without_global_base(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 }
 
@@ -525,8 +524,7 @@ func.func @buffer_addr64_without_global_base(
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @buffer_dma_lds_unbounded_source_offset_needs_range(
-    %in: !wave.ptr<#wave.global, i32>, %u: i32)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>, %u: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %range = arith.constant 4096 : i32
   %buf = waveamd.make_buffer %in, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -543,7 +541,7 @@ func.func @buffer_dma_lds_unbounded_source_offset_needs_range(
   %tok = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 }
 
@@ -574,8 +572,7 @@ func.func @global_dma_lds_addr64_fallback_rejects_aux(
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 func.func @gfx1250_rejects_direct_to_lds(
-    %in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
   %src = wave.ptr_add %in, %wi
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -586,14 +583,14 @@ func.func @gfx1250_rejects_direct_to_lds(
   %loaded = waveamd.dma_load_lds %src -> %lds after %root {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %loaded : !wave.mem.token
 }
 }
 
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @buffer_loop_dynamic_carry_needs_bound(%out: !wave.ptr<#wave.global, i32>, %delta: i32) attributes {wave.kernel} {
+func.func @buffer_loop_dynamic_carry_needs_bound(%out: !wave.ptr<#wave.global, i32>, %delta: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
@@ -604,18 +601,20 @@ func.func @buffer_loop_dynamic_carry_needs_bound(%out: !wave.ptr<#wave.global, i
   %p0 = wave.ptr_add %buf, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %observe_seed_1 = wave.token : !wave.mem.token
   // expected-error @below {{scf.for pointer carry offset must fit proven unsigned 32-bit for every iteration}}
-  %res = scf.for %i = %c0 to %c4 step %c1 iter_args(%q = %p0)
-      -> (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>) : i32 {
+  %res, %observe_region_2 = scf.for %i = %c0 to %c4 step %c1 iter_args(%q = %p0, %observe_carry_3 = %observe_seed_1)
+      -> (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>, !wave.mem.token) : i32  {
     %tok = wave.store %lane -> %q
         : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
         -> !wave.mem.token
     %next = wave.ptr_add %q, %delta
         : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>, i32
         -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
-    scf.yield %next : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+    %observe_join_4 = wave.join %observe_carry_3, %tok : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %next, %observe_join_4 : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>, !wave.mem.token
   }
-  return
+  return %observe_region_2 : !wave.mem.token
 }
 }
 
@@ -710,4 +709,12 @@ func.func @floor_wide_nonpow2_unknown_sign(%x: i32) -> index {
   %off = wave.index_expr <"floor(1/4294967297*x)"> ["x"](%x) : (i32) -> index
   return %off : index
 }
+}
+
+// -----
+
+// expected-error @below {{memory token arguments require inlining before machine selection}}
+func.func @token_argument(%dep: !wave.mem.token) -> !wave.mem.token {
+  %t = wave.join %dep : !wave.mem.token -> !wave.mem.token
+  return %t : !wave.mem.token
 }

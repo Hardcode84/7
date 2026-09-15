@@ -11,8 +11,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @glu_epilogue_redistribute_lds_overflow(
     %src: !wave.ptr<#wave.global, f32>,
-    %dst: !wave.ptr<#wave.global, f32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, f32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.lds_size = 108736 : i64,
                 wave.workgroup_size = array<i32: 512, 1, 1>,
                 wave.waves_per_workgroup = 8 : i64} {
@@ -38,7 +37,7 @@ func.func @glu_epilogue_redistribute_lds_overflow(
   %stored = wave.store %result -> %dst_ptr after %loaded
       : (!wave.simd<f32, 64>, !wave.simd<!wave.ptr<#wave.global, f32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: redistribute_capacity_partial:
@@ -49,8 +48,7 @@ func.func @glu_epilogue_redistribute_lds_overflow(
 // ASM: .amdhsa_group_segment_fixed_size 163840
 func.func @redistribute_capacity_partial(
     %src: !wave.ptr<#wave.global, f32>,
-    %dst: !wave.ptr<#wave.global, f32>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, f32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.lds_size = 159744 : i64,
                 wave.workgroup_size = array<i32: 128, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
@@ -76,6 +74,6 @@ func.func @redistribute_capacity_partial(
   %stored = wave.store %result -> %dst_ptr after %loaded
       : (!wave.simd<f32, 64>, !wave.simd<!wave.ptr<#wave.global, f32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 }

@@ -52,7 +52,7 @@ func.func @scheduler_state() attributes {wave.kernel, waveamdmachine.kernarg_siz
   %sum = waveamdmachine.v_add_u32 %dependent, %independent : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
   %value = waveamdmachine.v_add_u32 %sum, %second#2 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 1>
   %done = waveamdmachine.global_store_b32 %off, %value, %base after %second#1 : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %done : !waveamdmachine.mem.token
   return
 }
 }

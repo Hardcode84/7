@@ -26,7 +26,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_endpgm
 func.func @masked_load_other_kernel(
     %src: !wave.ptr<#wave.global, f32>, %dst: !wave.ptr<#wave.global, f32>,
-    %limit: i32) attributes {wave.kernel} {
+    %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c32 = arith.constant 32 : i32
   %five = arith.constant 5.000000e+00 : f32
   %pid = wave.workgroup_id 0
@@ -67,7 +67,7 @@ func.func @masked_load_other_kernel(
         -> !wave.mem.token
     wave.yield %token : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

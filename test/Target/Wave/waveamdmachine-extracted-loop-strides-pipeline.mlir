@@ -8,8 +8,8 @@ func.func @load_source_dialects(%p: !wave.ptr<#wave.global, i32>, %range: i32) {
 }
 
 // LOWER-LABEL: func.func @pipeline_extracted_strided_kloop
-// LOWER: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
-// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// LOWER: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
+// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %{{[^:]+}}: !waveamdmachine.mem.token, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // LOWER: global_load_b128 %[[VOFF:.*]], %[[BASE]]
 // LOWER-NOT: waveamdmachine.v_add_u32
 // LOWER: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
@@ -18,12 +18,12 @@ func.func @load_source_dialects(%p: !wave.ptr<#wave.global, i32>, %range: i32) {
 // LOWER-NEXT: waveamdmachine.continue_if %[[COND]]
 // LOWER-SAME: %[[NEXT]]
 func.func @pipeline_extracted_strided_kloop(
-    %a: !wave.ptr<#wave.global, f16>, %n: i32)
-    attributes {wave.kernel} {
+    %a: !wave.ptr<#wave.global, f16>, %n: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
-  scf.for %i = %c0 to %n step %c1 : i32 {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = scf.for %i = %c0 to %n step %c1 iter_args(%observe_carry_3 = %observe_seed_1) -> (!wave.mem.token) : i32  {
     %off = wave.index_expr <"128*i + 64*Mod(wi, 16)"> ["i", "wi"](%i, %wi)
         : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
     %p = wave.ptr_add %a, %off
@@ -32,17 +32,19 @@ func.func @pipeline_extracted_strided_kloop(
     %v, %t = wave.load %p
         : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-    wave.store %v -> %p
+    %observed_store_1 = wave.store %v -> %p
         : (!wave.simd<vector<8xi32>, 32>,
            !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
+    %observe_join_4 = wave.join %observe_carry_3, %observed_store_1 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %observe_join_4 : !wave.mem.token
   }
-  return
+  return %observe_region_2 : !wave.mem.token
 }
 
 // LOWER-LABEL: func.func @pipeline_extracted_nested_symbolic_stride
 // LOWER: %[[STRIDE:.*]], %{{.*}} = waveamdmachine.s_lshl_b32
-// LOWER: %[[INNER:.*]]:2 = waveamdmachine.uniform_loop
-// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// LOWER: %[[INNER:.*]]:3 = waveamdmachine.uniform_loop
+// LOWER: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %{{[^:]+}}: !waveamdmachine.mem.token, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // LOWER: global_load_b128 %[[VOFF:.*]], %[[BASE]]
 // LOWER-NOT: waveamdmachine.v_add_u32
 // LOWER: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after
@@ -51,14 +53,15 @@ func.func @pipeline_extracted_strided_kloop(
 // LOWER-NEXT: waveamdmachine.continue_if %[[COND]]
 // LOWER-SAME: %[[NEXT]]
 func.func @pipeline_extracted_nested_symbolic_stride(
-    %a: !wave.ptr<#wave.global, f16>, %n_raw: i32, %m: i32)
-    attributes {wave.kernel} {
+    %a: !wave.ptr<#wave.global, f16>, %n_raw: i32, %m: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %n = wave.assume %n_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">] : i32
   %wi = wave.workitem_id 0 : !wave.simd<i32, 32>
-  scf.for %i = %c0 to %n step %c1 : i32 {
-    scf.for %j = %c1 to %m step %c1 : i32 {
+  %observe_seed_9 = wave.token : !wave.mem.token
+  %observe_region_10 = scf.for %i = %c0 to %n step %c1 iter_args(%observe_carry_11 = %observe_seed_9) -> (!wave.mem.token) : i32  {
+    %observe_seed_5 = wave.token : !wave.mem.token
+    %observe_region_6 = scf.for %j = %c1 to %m step %c1 iter_args(%observe_carry_7 = %observe_seed_5) -> (!wave.mem.token) : i32  {
       %off = wave.index_expr <"16*i*j + 64*Mod(wi, 16)">
           ["i", "j", "wi"](%i, %j, %wi)
           : (i32, i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
@@ -68,11 +71,15 @@ func.func @pipeline_extracted_nested_symbolic_stride(
       %v, %t = wave.load %p
           : (!wave.simd<!wave.ptr<#wave.global, f16>, 32>)
           -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-      wave.store %v -> %p
+      %observed_store_2 = wave.store %v -> %p
           : (!wave.simd<vector<8xi32>, 32>,
              !wave.simd<!wave.ptr<#wave.global, f16>, 32>) -> !wave.mem.token
+      %observe_join_8 = wave.join %observe_carry_7, %observed_store_2 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+      scf.yield %observe_join_8 : !wave.mem.token
     }
+    %observe_join_12 = wave.join %observe_carry_11, %observe_region_6 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %observe_join_12 : !wave.mem.token
   }
-  return
+  return %observe_region_10 : !wave.mem.token
 }
 }

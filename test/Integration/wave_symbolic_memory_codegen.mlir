@@ -11,8 +11,7 @@
 // ASM: .amdhsa_group_segment_fixed_size 1024
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @symbolic_memory_codegen(%dst: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+func.func @symbolic_memory_codegen(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -49,6 +48,6 @@ func.func @symbolic_memory_codegen(%dst: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<vector<4xi32>, 64>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 }

@@ -342,8 +342,7 @@ func.func @select_mask_true_true_constants(%limit: i32) -> i32 {
 // ASM-LABEL: select_lane_pointer:
 // ASM: v_cndmask_b32_e64
 // ASM: global_store_b32
-func.func @select_lane_pointer(%out: !wave.ptr<#wave.global, i32>, %limit: i32)
-    attributes {wave.kernel} {
+func.func @select_lane_pointer(%out: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c4 = arith.constant 4 : i32
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
@@ -362,7 +361,7 @@ func.func @select_lane_pointer(%out: !wave.ptr<#wave.global, i32>, %limit: i32)
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 }

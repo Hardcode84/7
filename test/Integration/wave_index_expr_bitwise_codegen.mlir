@@ -18,7 +18,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @index_expr_bitwise_codegen(
     %lhs_in: !wave.ptr<#wave.global, i32>,
     %rhs_in: !wave.ptr<#wave.global, i32>,
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %lhs_ptrs = wave.ptr_add %lhs_in, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
@@ -48,7 +48,7 @@ func.func @index_expr_bitwise_codegen(
   %or_stored = wave.store %rhs -> %or_ptrs after %and_stored
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %or_stored : !wave.mem.token
 }
 
 }

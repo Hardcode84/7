@@ -1,0 +1,3 @@
+kernel [[amdgpu_wave_size(32)]] void invalid() {
+  observe(1);
+}

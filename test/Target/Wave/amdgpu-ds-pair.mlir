@@ -7,7 +7,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: ds_load_2addr_b32 v[1:2], v0 offset0:1 offset1:2
 // ASM: s_waitcnt lgkmcnt(0)
 // ASM: ds_store_2addr_b32 v0, v3, v4 offset0:3 offset1:4
-func.func @ds_pair_emit() {
+func.func @ds_pair_emit() -> !waveamdmachine.mem.token {
   %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %v0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 3>
   %v1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 4>
@@ -19,14 +19,14 @@ func.func @ds_pair_emit() {
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 3>,
          !waveamdmachine.reg<vgpr, 1, 4>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  return
+  return %st : !waveamdmachine.mem.token
 }
 
 // ASM-LABEL: ds_pair_emit_st64:
 // ASM: ds_load_2addr_stride64_b64 v[8:11], v0 offset1:64
 // ASM: s_waitcnt lgkmcnt(0)
 // ASM: ds_store_2addr_stride64_b64 v0, v[3:4], v[5:6] offset1:64
-func.func @ds_pair_emit_st64() {
+func.func @ds_pair_emit_st64() -> !waveamdmachine.mem.token {
   %addr = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %v0 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2, 3>
   %v1 = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2, 5>
@@ -40,7 +40,7 @@ func.func @ds_pair_emit_st64() {
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 2, 3>,
          !waveamdmachine.reg<vgpr, 2, 5>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  return
+  return %st : !waveamdmachine.mem.token
 }
 
 }

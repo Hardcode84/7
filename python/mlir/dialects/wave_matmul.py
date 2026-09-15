@@ -6003,15 +6003,17 @@ def _store_final_tiles(
         scale_ready_token=state.scale_token,
     )
     store_after = scale_tokens[-1] if scale_tokens else None
-    _store_acc_tiles(
-        bld,
-        cfg,
-        final_accs,
-        c_ptrs,
-        0,
-        cfg.wave_n_tiles,
-        coords.wi,
-        after=store_after,
+    bld.observe(
+        _store_acc_tiles(
+            bld,
+            cfg,
+            final_accs,
+            c_ptrs,
+            0,
+            cfg.wave_n_tiles,
+            coords.wi,
+            after=store_after,
+        )
     )
 
 
@@ -6073,8 +6075,10 @@ def _store_final_mxfp4_tiles_split(
             bld, cfg, coords, left_accs, c_ptrs, 0, n_mid, after=scale_read_done
         )
     else:
-        _store_acc_tiles(
-            bld, cfg, left_accs, c_ptrs, 0, n_mid, coords.wi, after=scale_token
+        bld.observe(
+            _store_acc_tiles(
+                bld, cfg, left_accs, c_ptrs, 0, n_mid, coords.wi, after=scale_token
+            )
         )
 
     right_accs = _emit_mxfp4_mma_grid_scale_sets_slice(
@@ -6099,15 +6103,17 @@ def _store_final_mxfp4_tiles_split(
             after=scale_read_done,
         )
     else:
-        _store_acc_tiles(
-            bld,
-            cfg,
-            right_accs,
-            c_ptrs,
-            n_mid,
-            cfg.wave_n_tiles,
-            coords.wi,
-            after=scale_token,
+        bld.observe(
+            _store_acc_tiles(
+                bld,
+                cfg,
+                right_accs,
+                c_ptrs,
+                n_mid,
+                cfg.wave_n_tiles,
+                coords.wi,
+                after=scale_token,
+            )
         )
 
 
@@ -6435,7 +6441,7 @@ def _store_acc_tiles_lds_coalesced(
         dsl.vector_type(2 * cfg.mma.acc_registers, dsl.f16()),
         width=cfg.mma.wave_size,
     )
-    with bld.where(active, [dsl.mem_token_type()]):
+    with bld.where(active, [dsl.mem_token_type()]) as output:
         store_tokens: list[dsl.Value] = []
         for i in range(cfg.wave_m_tiles):
             for j in range(n_begin, n_end):
@@ -6457,6 +6463,8 @@ def _store_acc_tiles_lds_coalesced(
                     )
                 )
         bld.yield_([_join_tokens(bld, store_tokens)])
+
+    bld.observe(output.results[0])
 
 
 def _pack_fragment_f16(
@@ -8067,7 +8075,9 @@ def _emit_dma_subpanel_kernel(
     virtual_k_stride: dsl.Value,
 ) -> None:
     final_accs = _compute_dma_subpanel_tile(bld, cfg, types, staging, virtual_k_stride)
-    _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles, coords.wi)
+    bld.observe(
+        _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles, coords.wi)
+    )
 
 
 def _flatten_dma_spatial_tokens(tokens: _DmaSpatialTokens) -> tuple[dsl.Value, ...]:
@@ -8790,14 +8800,16 @@ def _emit_dma_spatial_kernel(
         final_accs = _drain_dma_spatial_single(
             bld, cfg, types, staging, first, init_accs, first_read_bases
         )
-        _store_acc_tiles(
-            bld,
-            cfg,
-            final_accs,
-            _dma_spatial_c_ptrs(bld, cfg, coords),
-            0,
-            cfg.wave_n_tiles,
-            coords.wi,
+        bld.observe(
+            _store_acc_tiles(
+                bld,
+                cfg,
+                final_accs,
+                _dma_spatial_c_ptrs(bld, cfg, coords),
+                0,
+                cfg.wave_n_tiles,
+                coords.wi,
+            )
         )
         return
 
@@ -8849,14 +8861,16 @@ def _emit_dma_spatial_kernel(
         bld, cfg, types, staging, coords, virtual_k_stride, state
     )
     final_accs = _drain_dma_spatial_tail(bld, cfg, types, staging, state)
-    _store_acc_tiles(
-        bld,
-        cfg,
-        final_accs,
-        _dma_spatial_c_ptrs(bld, cfg, coords),
-        0,
-        cfg.wave_n_tiles,
-        coords.wi,
+    bld.observe(
+        _store_acc_tiles(
+            bld,
+            cfg,
+            final_accs,
+            _dma_spatial_c_ptrs(bld, cfg, coords),
+            0,
+            cfg.wave_n_tiles,
+            coords.wi,
+        )
     )
 
 
@@ -10084,13 +10098,15 @@ def _emit_aligned_streamk_kernel(
         return
     if tiles_per_worker == 1:
         raw_m, raw_n = _streamk_raw_tile_coords(bld, cfg, worker)
-        _emit_streamk_full_tile(
-            bld,
-            cfg,
-            inputs,
-            raw_m,
-            raw_n,
-            bld.token(),
+        bld.observe(
+            _emit_streamk_full_tile(
+                bld,
+                cfg,
+                inputs,
+                raw_m,
+                raw_n,
+                bld.token(),
+            )
         )
         return
 
@@ -10120,6 +10136,8 @@ def _emit_aligned_streamk_kernel(
                 )
             ]
         )
+
+    bld.observe(loop.results[0])
 
 
 def _emit_streamk_tile_staging(
@@ -10153,7 +10171,7 @@ def _emit_pipelined_subpanel_transition(
         pipeline.types,
         staging,
         pipeline.virtual_k_stride,
-        state_values,
+        state_values[:-1],
     )
     next_tile = bld.assume_range(
         bld.addi(tile, pipeline.worker_stride),
@@ -10179,14 +10197,18 @@ def _emit_pipelined_subpanel_transition(
         ),
     )
 
+    stores: list[dsl.Value] = []
+
     def store_column(accs: tuple[dsl.Value, ...], column: int) -> None:
-        _store_streamk_output_column(
-            bld,
-            cfg,
-            coords,
-            accs,
-            column,
-            pipeline.store_root,
+        stores.append(
+            _store_streamk_output_column(
+                bld,
+                cfg,
+                coords,
+                accs,
+                column,
+                pipeline.store_root,
+            )
         )
 
     state = _emit_dma_subpanel_cross_tile_step(
@@ -10216,12 +10238,13 @@ def _emit_pipelined_subpanel_transition(
         on_final_column=store_column,
     )
     init_acc = bld.fragment_fill(bld.constant(dsl.i32(), 0), pipeline.types.acc)
-    return _flatten_dma_subpanel_loop_state(
+    next_state = _flatten_dma_subpanel_loop_state(
         replace(
             state,
             accs=tuple(init_acc for _ in range(cfg.tiles_per_wave)),
         )
     )
+    return (*next_state, bld.join(state_values[-1], *stores))
 
 
 def _emit_pipelined_subpanel_final_tile(
@@ -10230,7 +10253,7 @@ def _emit_pipelined_subpanel_final_tile(
     pipeline: _StreamKSubpanelPipeline,
     state: _DmaSubpanelLoopState,
     tile: dsl.Value,
-) -> None:
+) -> dsl.Value:
     coords, staging = _emit_streamk_tile_staging(bld, cfg, pipeline.inputs, tile)
     state = _emit_dma_subpanel_step_loop(
         bld,
@@ -10241,14 +10264,18 @@ def _emit_pipelined_subpanel_final_tile(
         _flatten_dma_subpanel_loop_state(state),
     )
 
+    stores: list[dsl.Value] = []
+
     def store_column(accs: tuple[dsl.Value, ...], column: int) -> None:
-        _store_streamk_output_column(
-            bld,
-            cfg,
-            coords,
-            accs,
-            column,
-            pipeline.store_root,
+        stores.append(
+            _store_streamk_output_column(
+                bld,
+                cfg,
+                coords,
+                accs,
+                column,
+                pipeline.store_root,
+            )
         )
 
     _emit_dma_subpanel_tail(
@@ -10259,6 +10286,7 @@ def _emit_pipelined_subpanel_final_tile(
         state,
         on_final_column=store_column,
     )
+    return bld.join(*stores)
 
 
 def _emit_pipelined_subpanel_streamk_kernel(
@@ -10318,7 +10346,7 @@ def _emit_pipelined_subpanel_streamk_kernel(
         worker,
         transition_end,
         worker_stride,
-        init_args=_flatten_dma_subpanel_loop_state(state),
+        init_args=(*_flatten_dma_subpanel_loop_state(state), store_root),
         nonzero_trip=True,
     ) as loop:
         bld.yield_(
@@ -10331,7 +10359,7 @@ def _emit_pipelined_subpanel_streamk_kernel(
             )
         )
 
-    state = _split_dma_subpanel_loop_state(tuple(loop.results), cfg)
+    state = _split_dma_subpanel_loop_state(tuple(loop.results)[:-1], cfg)
     last_tile = bld.assume_range(
         bld.addi(
             worker,
@@ -10340,13 +10368,14 @@ def _emit_pipelined_subpanel_streamk_kernel(
         0,
         tile_count - 1,
     )
-    _emit_pipelined_subpanel_final_tile(
+    output = _emit_pipelined_subpanel_final_tile(
         bld,
         cfg,
         pipeline,
         state,
         last_tile,
     )
+    bld.observe(loop.results[-1], output)
 
 
 def _emit_streamk_kernel(
@@ -10413,6 +10442,8 @@ def _emit_streamk_kernel(
                 )
             ]
         )
+
+    bld.observe(loop.results[0])
 
 
 def _issue_aiter_a_dma_phase(
@@ -10815,7 +10846,9 @@ def _emit_aiter_mxfp4_stream_kernel(
         bld, cfg, types, staging, coords, ptrs, virtual_k_stride, init_state
     )
     final_accs = _finish_aiter_mxfp4_stream(bld, cfg, types, staging, coords, state)
-    _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles, coords.wi)
+    bld.observe(
+        _store_acc_tiles(bld, cfg, final_accs, ptrs.c, 0, cfg.wave_n_tiles, coords.wi)
+    )
 
 
 def _emit_dedicated_kernel(

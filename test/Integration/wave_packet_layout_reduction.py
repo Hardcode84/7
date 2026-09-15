@@ -46,7 +46,9 @@ with w.module() as module_builder:
             lhs, rhs = combiner.arguments
             wave.YieldOp([function_builder.addi(lhs, rhs)])
         pointer = function_builder.ptr_add(destination, item)
-        function_builder.store(reduce_op.result, pointer, after=read)
+        function_builder.observe(
+            function_builder.store(reduce_op.result, pointer, after=read)
+        )
 
     with module_builder.function(
         "packet_layout_reduce_reorderable_register",
@@ -89,7 +91,9 @@ with w.module() as module_builder:
             lhs, rhs = combiner.arguments
             wave.YieldOp([function_builder.addi(lhs, rhs)])
         pointer = function_builder.ptr_add(destination, item)
-        function_builder.store(reduce_op.result, pointer, after=read)
+        function_builder.observe(
+            function_builder.store(reduce_op.result, pointer, after=read)
+        )
 
     with module_builder.function(
         "packet_layout_reduce_permuted_register",
@@ -129,7 +133,9 @@ with w.module() as module_builder:
             lhs, rhs = combiner.arguments
             wave.YieldOp([function_builder.addi(lhs, rhs)])
         pointer = function_builder.ptr_add(destination, item)
-        function_builder.store(reduce_op.result, pointer, after=read)
+        function_builder.observe(
+            function_builder.store(reduce_op.result, pointer, after=read)
+        )
 
     print(module_builder.module)
 

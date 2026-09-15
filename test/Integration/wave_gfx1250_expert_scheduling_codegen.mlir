@@ -46,11 +46,11 @@ func.func @expert_wait_codegen() attributes {
   %newer = waveamdmachine.v_exp_f32 %y
       : (!waveamdmachine.reg<vgpr, 1, 1>)
         -> !waveamdmachine.reg<vgpr, 1, 3>
-  waveamdmachine.global_store_b32 %x, %old, %base
+  %observed_store_1 = waveamdmachine.global_store_b32 %x, %old, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 2>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 

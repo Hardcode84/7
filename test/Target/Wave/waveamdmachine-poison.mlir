@@ -26,8 +26,7 @@ func.func @scalar_poison(%x: i32) -> i32 {
 // ASM-LABEL: simd_poison_store:
 // ASM-NOT: v_mov
 // ASM: global_store_b32
-func.func @simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @simd_poison_store(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %out, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -36,7 +35,7 @@ func.func @simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
   %tok = wave.store %p -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // CHECK-LABEL: func.func @packed_simd_poison_store
@@ -44,8 +43,7 @@ func.func @simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
 // CHECK: waveamdmachine.global_store_tuple_b32
 // REGALLOC-LABEL: func.func @packed_simd_poison_store
 // REGALLOC: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 2, {{[0-9]+}}>
-func.func @packed_simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @packed_simd_poison_store(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %out, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -55,7 +53,7 @@ func.func @packed_simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<vector<2xi32>, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // CHECK-LABEL: func.func @fragment_poison_store
@@ -63,8 +61,7 @@ func.func @packed_simd_poison_store(%out: !wave.ptr<#wave.global, i32>)
 // CHECK: waveamdmachine.global_store_tuple_b32
 // REGALLOC-LABEL: func.func @fragment_poison_store
 // REGALLOC: waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 8, {{[0-9]+}}>
-func.func @fragment_poison_store(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @fragment_poison_store(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ptrs = wave.ptr_add %out, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -77,7 +74,7 @@ func.func @fragment_poison_store(%out: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<vector<8xi32>, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // CHECK-LABEL: func.func @mask_poison_where32

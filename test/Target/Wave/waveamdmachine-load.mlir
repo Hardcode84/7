@@ -18,13 +18,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-LABEL: scalar_load_kernel:
 // ASM: global_load_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}
 // ASM: s_endpgm
-func.func @scalar_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+func.func @scalar_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %op = wave.ptr_add %out, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %v, %tok = wave.load %ip : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
   %st = wave.store %v -> %op after %tok : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %st : !wave.mem.token
 }
 
 // A tuple wave.load selects a tuple op; backend start decomposes it to
@@ -39,7 +39,7 @@ func.func @scalar_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr
 // ASM: global_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}{{$}}
 // ASM: global_load_b128 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}} offset:16
 // ASM: s_endpgm
-func.func @tuple_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+func.func @tuple_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %base = arith.constant 0 : i32
@@ -52,7 +52,7 @@ func.func @tuple_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<
   %tuple_ptr = wave.ptr_add %op, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %frag : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %st = wave.store %regs -> %tuple_ptr after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %st : !wave.mem.token
 }
 
 // fragment_pack is a no-op at the WaveAMDMachine level: the per-lane VGPR
@@ -61,7 +61,7 @@ func.func @tuple_load_kernel(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<
 // SELECT-LABEL: func.func @fragment_pack_is_noop
 // SELECT-NOT: waveamdmachine.fragment_pack
 // SELECT: waveamdmachine.s_endpgm
-func.func @fragment_pack_is_noop(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+func.func @fragment_pack_is_noop(%in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %base = arith.constant 0 : i32
@@ -74,7 +74,7 @@ func.func @fragment_pack_is_noop(%in: !wave.ptr<#wave.global, i32>, %out: !wave.
   %tuple_ptr = wave.ptr_add %op, %lane_off : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %regs = waveamd.fragment_unpack %frag : !waveamd.fragment<2, f32, 16, 16, 32, 8> -> !wave.simd<vector<8xi32>, 32>
   %st = wave.store %regs -> %tuple_ptr after %tok : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %st : !wave.mem.token
 }
 
 }

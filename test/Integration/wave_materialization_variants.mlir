@@ -29,26 +29,24 @@
 
 //--- live.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @live_variants(%out: !wave.ptr<#wave.global, i32>, %x: i32)
-    attributes {wave.kernel} {
+func.func @live_variants(%out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   %two = arith.constant 2 : i32
   %mul = wave.binary muli %x, %two : i32, i32 -> i32
   %add = wave.binary addi %x, %x : i32, i32 -> i32
   %choice = wave.materialization_variants %mul, %add : i32
   %v = wave.splat %choice : i32 -> !wave.simd<i32, 32>
-  wave.store %v -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
-  return
+  %observed_store_1 = wave.store %v -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
+  return %observed_store_1 : !wave.mem.token
 }
 }
 
 //--- single.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @single_variant(%out: !wave.ptr<#wave.global, i32>, %x: i32)
-    attributes {wave.kernel} {
+func.func @single_variant(%out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   %choice = wave.materialization_variants %x : i32
   %v = wave.splat %choice : i32 -> !wave.simd<i32, 32>
-  wave.store %v -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
-  return
+  %observed_store_2 = wave.store %v -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
+  return %observed_store_2 : !wave.mem.token
 }
 }
 
@@ -63,12 +61,11 @@ func.func @dead_variants() attributes {wave.kernel} {
 
 //--- chained.mlir
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @single_variant(%out: !wave.ptr<#wave.global, i32>, %x: i32)
-    attributes {wave.kernel} {
+func.func @single_variant(%out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
   %inner = wave.materialization_variants %x, %x : i32
   %choice = wave.materialization_variants %inner, %x, %inner : i32
   %v = wave.splat %choice : i32 -> !wave.simd<i32, 32>
-  wave.store %v -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
-  return
+  %observed_store_3 = wave.store %v -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
+  return %observed_store_3 : !wave.mem.token
 }
 }

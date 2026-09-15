@@ -9,10 +9,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NEXT: s_nop 15
 // CHECK-NEXT: s_nop 13
 // CHECK-NEXT: [[SKIP]]:
-func.func @dma_issue_delay(%dep: !waveamdmachine.mem.token,
-                           %m0: !waveamdmachine.m0,
+func.func @dma_issue_delay(%m0: !waveamdmachine.m0,
                            %skip: !waveamdmachine.reg<vcc, 1>)
     attributes {wave.kernel} {
+  %dep = waveamdmachine.token : !waveamdmachine.mem.token
   %delayed_m0 = waveamdmachine.dma_issue_delay %dep, %m0 unless %skip
       {cycles = 46 : i64, overlap_cycles = 16 : i64}
       : (!waveamdmachine.mem.token, !waveamdmachine.m0,
@@ -23,9 +23,9 @@ func.func @dma_issue_delay(%dep: !waveamdmachine.mem.token,
 // CHECK-LABEL: dma_issue_delay_unconditional:
 // CHECK: s_nop 15
 // CHECK-NEXT: s_nop 0
-func.func @dma_issue_delay_unconditional(%dep: !waveamdmachine.mem.token,
-                                         %m0: !waveamdmachine.m0)
+func.func @dma_issue_delay_unconditional(%m0: !waveamdmachine.m0)
     attributes {wave.kernel} {
+  %dep = waveamdmachine.token : !waveamdmachine.mem.token
   %delayed_m0 = waveamdmachine.dma_issue_delay %dep, %m0
       {cycles = 17 : i64}
       : (!waveamdmachine.mem.token, !waveamdmachine.m0)
@@ -54,9 +54,9 @@ func.func @explicit_loop_fetch_phase(
 // CHECK-NEXT: [[PLAIN_HEAD:.Lunannotated_dma_loop.loop_head_0]]:
 // CHECK: s_nop 3
 func.func @unannotated_dma_loop(
-    %dep: !waveamdmachine.mem.token,
     %m0_source: !waveamdmachine.reg<sgpr, 1>,
     %cond: !waveamdmachine.reg<scc, 1>) attributes {wave.kernel} {
+  %dep = waveamdmachine.token : !waveamdmachine.mem.token
   %m0 = waveamdmachine.s_mov_m0 %m0_source
       : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
   waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1> {

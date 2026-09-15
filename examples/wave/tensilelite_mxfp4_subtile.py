@@ -1563,7 +1563,9 @@ def _store_results(
                 cta_off + wave * (cfg.tiles_per_wave * 256) + tile * 256,
                 bindings,
             )
-            _store_fragment_f16(bld, cfg, accs[tile], bld.ptr_add(c_base, off))
+            bld.observe(
+                _store_fragment_f16(bld, cfg, accs[tile], bld.ptr_add(c_base, off))
+            )
 
 
 def _emit_kernel(bld: dsl.FunctionBuilder, cfg: Config) -> None:

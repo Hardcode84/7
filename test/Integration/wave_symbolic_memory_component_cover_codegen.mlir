@@ -36,8 +36,7 @@
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @symbolic_memory_component_cover_codegen(
     %src: !wave.ptr<#wave.global, f16>,
-    %dst: !wave.ptr<#wave.global, f16>)
-    attributes {wave.kernel, wave.waves_per_workgroup = 1 : i64} {
+    %dst: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel, wave.waves_per_workgroup = 1 : i64} {
   %value, %read = wave.gather %src mapping
       <bit_offset = <"16 * slot">>
       bindings []()
@@ -49,13 +48,12 @@ func.func @symbolic_memory_component_cover_codegen(
       : (!wave.simd<vector<22xf16>, 64>, !wave.ptr<#wave.global, f16>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 
 func.func @symbolic_memory_exact_packet_codegen(
     %src: !wave.ptr<#wave.global, f16>,
-    %dst: !wave.ptr<#wave.global, f16>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %value, %read = wave.gather %src mapping
@@ -77,13 +75,12 @@ func.func @symbolic_memory_exact_packet_codegen(
       : (!wave.simd<vector<2xf16>, 64>, !wave.ptr<#wave.global, f16>,
          !wave.simd<index, 64>, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 
 func.func @symbolic_memory_signed_remainder_codegen(
     %src: !wave.ptr<#wave.global, f16>,
-    %dst: !wave.ptr<#wave.global, f16>, %origin_raw: i32, %extent_raw: i32)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, f16>, %origin_raw: i32, %extent_raw: i32) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %value, %read = wave.gather %src mapping
@@ -103,12 +100,11 @@ func.func @symbolic_memory_signed_remainder_codegen(
       : (!wave.simd<vector<2xf16>, 64>, !wave.ptr<#wave.global, f16>,
          i32, i32, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 
 func.func @symbolic_memory_scalarized_packet_codegen(
-    %dst: !wave.ptr<#wave.global, f16>)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -129,13 +125,12 @@ func.func @symbolic_memory_scalarized_packet_codegen(
       : (!wave.simd<vector<4xf16>, 64>, !wave.ptr<#wave.global, f16>,
          !wave.simd<i32, 64>)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 
 func.func @symbolic_memory_signed_remainder_unknown_sign_codegen(
     %src: !wave.ptr<#wave.global, f16>,
-    %dst: !wave.ptr<#wave.global, f16>, %origin_raw: i32, %extent_raw: i32)
-    attributes {wave.kernel,
+    %dst: !wave.ptr<#wave.global, f16>, %origin_raw: i32, %extent_raw: i32) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 1 : i64} {
   %value, %read = wave.gather %src mapping
@@ -155,6 +150,6 @@ func.func @symbolic_memory_signed_remainder_unknown_sign_codegen(
       : (!wave.simd<vector<2xf16>, 64>, !wave.ptr<#wave.global, f16>,
          i32, i32, !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %written : !wave.mem.token
 }
 }

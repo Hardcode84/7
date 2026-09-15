@@ -42,7 +42,7 @@ func.func @wide_xor_machine(%out: !wave.ptr<#wave.global, i32>)
   %tok1 = waveamdmachine.global_store_b32_addr64 %vy, %voff after %tok0
       : (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok1 : !waveamdmachine.mem.token
   return
 }
 

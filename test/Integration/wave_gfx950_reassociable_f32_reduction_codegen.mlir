@@ -18,7 +18,7 @@ module attributes {
 func.func @reassociable_f32_reduction(
     %dst: !wave.ptr<#wave.global, f32>,
     %a: f32, %b: f32, %c: f32, %d: f32,
-    %e: f32, %f: f32, %g: f32, %h: f32) attributes {wave.kernel} {
+    %e: f32, %f: f32, %g: f32, %h: f32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %dst, %range
       : !wave.ptr<#wave.global, f32>, i32
@@ -53,7 +53,7 @@ func.func @reassociable_f32_reduction(
       : (!wave.simd<f32, 64>,
          !wave.simd<!wave.ptr<#waveamd.buffer, f32>, 64>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 }

@@ -3,8 +3,7 @@
 // CHECK: error: 'wave.redistribute' op remaining target LDS capacity 0 bytes cannot hold one 64-element scratch plane
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @redistribute_lds_overflow(%dst: !wave.ptr<#wave.global, i8>)
-    attributes {wave.kernel,
+func.func @redistribute_lds_overflow(%dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel,
                 wave.lds_size = 65536 : i64,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
@@ -23,6 +22,6 @@ func.func @redistribute_lds_overflow(%dst: !wave.ptr<#wave.global, i8>)
   %token = wave.store %out -> %ptr
       : (!wave.simd<i8, 32>, !wave.simd<!wave.ptr<#wave.global, i8>, 32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 }

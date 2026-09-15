@@ -16,7 +16,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: s_endpgm
 func.func @vcc_exec_mask_codegen(
     %out: !wave.ptr<#wave.global, i32>,
-    %limit: i32) attributes {wave.kernel} {
+    %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32
@@ -28,14 +28,17 @@ func.func @vcc_exec_mask_codegen(
   %ptr = wave.ptr_add %buffer, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  wave.where %active {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active {
     %stored = wave.store %lane -> %ptr
         : (!wave.simd<i32, 64>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>
-  return
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_1 : !wave.mem.token
+  } : !wave.mask<64> -> !wave.mem.token
+  return %observe_region_2 : !wave.mem.token
 }
 
 // ASM-LABEL: direct_compare_mask_chain_codegen:
@@ -49,7 +52,7 @@ func.func @vcc_exec_mask_codegen(
 func.func @direct_compare_mask_chain_codegen(
     %out: !wave.ptr<#wave.global, i32>,
     %lower: i32,
-    %upper: i32) attributes {wave.kernel} {
+    %upper: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32
@@ -67,14 +70,17 @@ func.func @direct_compare_mask_chain_codegen(
   %ptr = wave.ptr_add %buffer, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  wave.where %active {
+  %observe_seed_5 = wave.token : !wave.mem.token
+  %observe_region_6 = wave.where %active {
     %stored = wave.store %lane -> %ptr
         : (!wave.simd<i32, 64>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>
-  return
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_5 : !wave.mem.token
+  } : !wave.mask<64> -> !wave.mem.token
+  return %observe_region_6 : !wave.mem.token
 }
 
 // ASM-LABEL: ordered_f32_compare_codegen:
@@ -87,7 +93,7 @@ func.func @direct_compare_mask_chain_codegen(
 func.func @ordered_f32_compare_codegen(
     %out: !wave.ptr<#wave.global, i32>,
     %lhs: f32,
-    %rhs: f32) attributes {wave.kernel} {
+    %rhs: f32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32
@@ -100,14 +106,17 @@ func.func @ordered_f32_compare_codegen(
   %ptr = wave.ptr_add %buffer, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  wave.where %active {
+  %observe_seed_9 = wave.token : !wave.mem.token
+  %observe_region_10 = wave.where %active {
     %stored = wave.store %lane -> %ptr
         : (!wave.simd<i32, 64>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>
-  return
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_9 : !wave.mem.token
+  } : !wave.mask<64> -> !wave.mem.token
+  return %observe_region_10 : !wave.mem.token
 }
 
 }

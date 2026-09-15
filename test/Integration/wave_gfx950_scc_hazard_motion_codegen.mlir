@@ -50,7 +50,7 @@ func.func @scc_hazard_motion_codegen(
   waveamdmachine.label "taken"
   waveamdmachine.s_mov_b32 "s20", %fill
       : (!waveamdmachine.reg<sgpr, 1>) -> ()
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %tok : !waveamdmachine.mem.token
   return
 }
 

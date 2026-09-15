@@ -10,8 +10,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // SELECT: [[LOAD:%.*]], [[TOK:%.*]] = waveamdmachine.global_load_b32 {{.*}} {cache = #waveamd.load_cache<cg>}
 // SELECT: waveamdmachine.global_store_b32 {{.*}} after [[TOK]] {cache = #waveamd.store_cache<cs>}
 func.func @select_cache_modifiers(%in: !wave.ptr<#wave.global, i32>,
-                                  %out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+                                  %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %ip = wave.ptr_add %in, %lane
       : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 32>
@@ -26,7 +25,7 @@ func.func @select_cache_modifiers(%in: !wave.ptr<#wave.global, i32>,
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %st : !wave.mem.token
 }
 
 // ASM-LABEL: cache_modifiers_asm:
@@ -80,7 +79,7 @@ func.func @cache_modifiers_asm() attributes {wave.kernel} {
          !waveamdmachine.reg<sgpr, 4, 4>, !waveamdmachine.imm,
          !waveamdmachine.mem.token)
       -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %cg_store_tok : !waveamdmachine.mem.token
   return
 }
 

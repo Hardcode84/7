@@ -28,8 +28,7 @@ func.func @load_source_dialects(%p: !wave.ptr<#wave.global, i32>, %range: i32) {
 func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
                            %base: !waveamdmachine.reg<sgpr, 2>,
                            %a: !waveamdmachine.reg<vgpr, 1>,
-                           %b: !waveamdmachine.reg<vgpr, 1>)
-    attributes {waveamdmachine.schedule_input} {
+                           %b: !waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token attributes {waveamdmachine.schedule_input} {
   %tok0 = waveamdmachine.token : !waveamdmachine.mem.token
   %loaded, %tok1 = waveamdmachine.global_load_b32 %off, %base after %tok0
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 2>,
@@ -55,6 +54,6 @@ func.func @candidate_lower(%off: !waveamdmachine.reg<vgpr, 1>,
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 2>, !waveamdmachine.mem.token)
         -> !waveamdmachine.mem.token
-  return
+  return %tok3 : !waveamdmachine.mem.token
 }
 }

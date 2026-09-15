@@ -34,11 +34,11 @@ func.func @endpgm_dealloc_codegen() attributes {wave.kernel} {
   %off = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 0>
   %value = waveamdmachine.uninit : !waveamdmachine.reg<vgpr, 1, 97>
   %base = waveamdmachine.uninit : !waveamdmachine.reg<sgpr, 2, 0>
-  waveamdmachine.global_store_b32 %off, %value, %base
+  %observed_store_1 = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>,
          !waveamdmachine.reg<vgpr, 1, 97>,
-         !waveamdmachine.reg<sgpr, 2, 0>) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 

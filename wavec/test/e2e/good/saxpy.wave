@@ -14,6 +14,7 @@
 // never the frontend.
 kernel [[amdgpu_wave_size(32)]]
 void saxpy(float *x, float *y, float a, uint32_t n) {
+  token output_done = token();
   simd<uint32_t, 32> lane = lane_id<32>();
   uint32_t           wave = workgroup_id<0>();
   simd<uint32_t, 32> i    = wave * 32 + lane;
@@ -21,6 +22,7 @@ void saxpy(float *x, float *y, float a, uint32_t n) {
   where (active) {
     simd<float, 32> xv = load(x + i);
     simd<float, 32> yv = load(y + i);
-    store(a * xv + yv, y + i);
+    output_done = join(output_done, store(a * xv + yv, y + i));
   }
+  observe(output_done);
 }

@@ -4,8 +4,7 @@
 // buffer ops have), so the SRD stays fixed and the per-lane voffset
 // carry never sees a v_add. One iv<<5 shared as soffset across tiles.
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @strided_buf(%a: !wave.ptr<#wave.global, f16>, %n: i32, %r: i32)
-    attributes {wave.kernel} {
+func.func @strided_buf(%a: !wave.ptr<#wave.global, f16>, %n: i32, %r: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c16 = arith.constant 16 : i32
@@ -16,16 +15,18 @@ func.func @strided_buf(%a: !wave.ptr<#wave.global, f16>, %n: i32, %r: i32)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %p0 = wave.ptr_add %buf, %off : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
-  scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0)
-      -> (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>) : i32 {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_unused_4:1, %observe_region_2 = scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0, %observe_carry_3 = %observe_seed_1)
+      -> (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, !wave.mem.token) : i32  {
     %v, %t = wave.load %q : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-    wave.store %v -> %q : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>) -> !wave.mem.token
+    %observed_store_1 = wave.store %v -> %q : (!wave.simd<vector<8xi32>, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>) -> !wave.mem.token
     %nq = wave.ptr_add %q, %c16 : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, i32
         -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
-    scf.yield %nq : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
+    %observe_join_5 = wave.join %observe_carry_3, %observed_store_1 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %nq, %observe_join_5 : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, !wave.mem.token
   }
-  return
+  return %observe_region_2 : !wave.mem.token
 }
 }
 
@@ -37,8 +38,8 @@ func.func @strided_buf(%a: !wave.ptr<#wave.global, f16>, %n: i32, %r: i32)
 // CHECK: continue_if
 
 // CHECK-LABEL: func.func @strided_dma_buf
-// CHECK: %[[LOOP:.*]]:2 = waveamdmachine.uniform_loop
-// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
+// CHECK: %[[LOOP:.*]]:3 = waveamdmachine.uniform_loop
+// CHECK: ^bb0(%{{.*}}: !waveamdmachine.reg<sgpr, 1>, %{{[^:]+}}: !waveamdmachine.mem.token, %[[BASE:.*]]: !waveamdmachine.reg<sgpr, 2>):
 // CHECK: %[[DESC:.*]] = waveamdmachine.update_buffer_rsrc_base {{%.*}}, %[[BASE]]
 // CHECK: %[[ISSUE:.*]] = waveamdmachine.buffer_load_lds_b128 {{%.*}}, %[[DESC]],
 // CHECK: %[[RETAINED:.*]] = waveamdmachine.reg_after %[[BASE]] after %[[ISSUE]]
@@ -47,8 +48,7 @@ func.func @strided_buf(%a: !wave.ptr<#wave.global, f16>, %n: i32, %r: i32)
 // CHECK-SAME: %[[NEXT]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @strided_dma_buf(%a: !wave.ptr<#wave.global, i32>, %n: i32,
-                           %r: i32)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+                           %r: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
@@ -64,8 +64,9 @@ func.func @strided_dma_buf(%a: !wave.ptr<#wave.global, i32>, %n: i32,
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
-  scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0)
-      -> (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>) : i32 {
+  %observe_seed_6 = wave.token : !wave.mem.token
+  %observe_unused_9:1, %observe_region_7 = scf.for %i = %c0 to %n_bounded step %c1 iter_args(%q = %p0, %observe_carry_8 = %observe_seed_6)
+      -> (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.mem.token) : i32  {
     %root = wave.token : !wave.mem.token
     %issue = waveamd.dma_load_lds %q -> %lds after %root {bytes = 16 : i64}
         : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
@@ -73,9 +74,10 @@ func.func @strided_dma_buf(%a: !wave.ptr<#wave.global, i32>, %n: i32,
     %next = wave.ptr_add %q, %c4
         : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, i32
         -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-    scf.yield %next : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+    %observe_join_10 = wave.join %observe_carry_8, %issue : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %next, %observe_join_10 : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.mem.token
   }
-  return
+  return %observe_region_7 : !wave.mem.token
 }
 }
 
@@ -85,7 +87,7 @@ func.func @strided_dma_buf(%a: !wave.ptr<#wave.global, i32>, %n: i32,
 // CHECK: waveamdmachine.v_add_u32
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @nonzero_lower_strided_buf(%a: !wave.ptr<#wave.global, f16>,
-                                     %r: i32) attributes {wave.kernel} {
+                                     %r: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
   %c16 = arith.constant 16 : i32
@@ -97,19 +99,21 @@ func.func @nonzero_lower_strided_buf(%a: !wave.ptr<#wave.global, f16>,
   %p0 = wave.ptr_add %buf, %off
       : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
-  scf.for %i = %c1 to %c4 step %c1 iter_args(%q = %p0)
-      -> (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>) : i32 {
+  %observe_seed_11 = wave.token : !wave.mem.token
+  %observe_unused_14:1, %observe_region_12 = scf.for %i = %c1 to %c4 step %c1 iter_args(%q = %p0, %observe_carry_13 = %observe_seed_11)
+      -> (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, !wave.mem.token) : i32  {
     %v, %t = wave.load %q : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-    wave.store %v -> %q
+    %observed_store_2 = wave.store %v -> %q
         : (!wave.simd<vector<8xi32>, 32>,
            !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>) -> !wave.mem.token
     %nq = wave.ptr_add %q, %c16
         : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, i32
         -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
-    scf.yield %nq : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
+    %observe_join_15 = wave.join %observe_carry_13, %observed_store_2 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %nq, %observe_join_15 : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, !wave.mem.token
   }
-  return
+  return %observe_region_12 : !wave.mem.token
 }
 }
 
@@ -121,7 +125,7 @@ func.func @nonzero_lower_strided_buf(%a: !wave.ptr<#wave.global, f16>,
 // CHECK: buffer_load_tuple_b32 %{{.+}}, %{{.+}}, %[[SO]]
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 func.func @strided_buf_i64_bound(%a: !wave.ptr<#wave.global, f16>, %n: i64,
-                                 %r: i32) attributes {wave.kernel} {
+                                 %r: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c16 = arith.constant 16 : i32
@@ -135,19 +139,21 @@ func.func @strided_buf_i64_bound(%a: !wave.ptr<#wave.global, f16>, %n: i64,
   %p0 = wave.ptr_add %buf, %off
       : !wave.ptr<#waveamd.buffer, f16>, !wave.simd<index, 32>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
-  scf.for %i = %c0 to %ub step %c1 iter_args(%q = %p0)
-      -> (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>) {
+  %observe_seed_16 = wave.token : !wave.mem.token
+  %observe_unused_19:1, %observe_region_17 = scf.for %i = %c0 to %ub step %c1 iter_args(%q = %p0, %observe_carry_18 = %observe_seed_16)
+      -> (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, !wave.mem.token) {
     %v, %t = wave.load %q : (!wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>)
         -> (!wave.simd<vector<8xi32>, 32>, !wave.mem.token)
-    wave.store %v -> %q
+    %observed_store_3 = wave.store %v -> %q
         : (!wave.simd<vector<8xi32>, 32>,
            !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>) -> !wave.mem.token
     %nq = wave.ptr_add %q, %c16
         : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, i32
         -> !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
-    scf.yield %nq : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>
+    %observe_join_20 = wave.join %observe_carry_18, %observed_store_3 : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %nq, %observe_join_20 : !wave.simd<!wave.ptr<#waveamd.buffer, f16>, 32>, !wave.mem.token
   }
-  return
+  return %observe_region_17 : !wave.mem.token
 }
 }
 
@@ -156,8 +162,7 @@ func.func @strided_buf_i64_bound(%a: !wave.ptr<#wave.global, f16>, %n: i64,
 // CHECK-COUNT-32: waveamdmachine.buffer_load_lds_b128
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @strided_dma_buf_many_carries(
-    %a: !wave.ptr<#wave.global, i32>, %r: i32)
-    attributes {wave.kernel, wave.lds_size = 512 : i64} {
+    %a: !wave.ptr<#wave.global, i32>, %r: i32) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 512 : i64} {
   %c0 = arith.constant 0 : i32
   %c1 = arith.constant 1 : i32
   %c4 = arith.constant 4 : i32
@@ -171,7 +176,8 @@ func.func @strided_dma_buf_many_carries(
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
-  scf.for %i = %c0 to %c4 step %c1
+  %observe_seed_21 = wave.token : !wave.mem.token
+  %observe_unused_24:32, %observe_region_22 = scf.for %i = %c0 to %c4 step %c1
       iter_args(%q0 = %p0, %q1 = %p0, %q2 = %p0, %q3 = %p0,
                 %q4 = %p0, %q5 = %p0, %q6 = %p0, %q7 = %p0,
                 %q8 = %p0, %q9 = %p0, %q10 = %p0, %q11 = %p0,
@@ -179,7 +185,7 @@ func.func @strided_dma_buf_many_carries(
                 %q16 = %p0, %q17 = %p0, %q18 = %p0, %q19 = %p0,
                 %q20 = %p0, %q21 = %p0, %q22 = %p0, %q23 = %p0,
                 %q24 = %p0, %q25 = %p0, %q26 = %p0, %q27 = %p0,
-                %q28 = %p0, %q29 = %p0, %q30 = %p0, %q31 = %p0)
+                %q28 = %p0, %q29 = %p0, %q30 = %p0, %q31 = %p0, %observe_carry_23 = %observe_seed_21)
       -> (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
           !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
           !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
@@ -211,7 +217,7 @@ func.func @strided_dma_buf_many_carries(
           !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
           !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
           !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>) : i32 {
+          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.mem.token) : i32  {
     %nq0 = wave.ptr_add %q0, %c4 : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, i32 -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
     %nq1 = wave.ptr_add %q1, %c4 : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, i32 -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
     %nq2 = wave.ptr_add %q2, %c4 : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, i32 -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
@@ -341,43 +347,9 @@ func.func @strided_dma_buf_many_carries(
     %t31 = waveamd.dma_load_lds %nq31 -> %lds after %root {bytes = 16 : i64}
         : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
            !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-    scf.yield %nq0, %nq1, %nq2, %nq3, %nq4, %nq5, %nq6, %nq7,
-              %nq8, %nq9, %nq10, %nq11, %nq12, %nq13, %nq14, %nq15,
-              %nq16, %nq17, %nq18, %nq19, %nq20, %nq21, %nq22, %nq23,
-              %nq24, %nq25, %nq26, %nq27, %nq28, %nq29, %nq30, %nq31
-        : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>,
-          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
+    %observe_join_25 = wave.join %observe_carry_23, %t0, %t1, %t2, %t3, %t4, %t5, %t6, %t7, %t8, %t9, %t10, %t11, %t12, %t13, %t14, %t15, %t16, %t17, %t18, %t19, %t20, %t21, %t22, %t23, %t24, %t25, %t26, %t27, %t28, %t29, %t30, %t31 : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+    scf.yield %nq0, %nq1, %nq2, %nq3, %nq4, %nq5, %nq6, %nq7, %nq8, %nq9, %nq10, %nq11, %nq12, %nq13, %nq14, %nq15, %nq16, %nq17, %nq18, %nq19, %nq20, %nq21, %nq22, %nq23, %nq24, %nq25, %nq26, %nq27, %nq28, %nq29, %nq30, %nq31, %observe_join_25 : !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>, !wave.mem.token
   }
-  return
+  return %observe_region_22 : !wave.mem.token
 }
 }

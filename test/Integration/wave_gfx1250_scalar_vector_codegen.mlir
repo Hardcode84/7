@@ -76,8 +76,7 @@
 // DIS: scratch_load_b32
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
-func.func @gfx1250_scalar_buffer(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel,
+func.func @gfx1250_scalar_buffer(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
                 waveamdmachine.kernarg_preload_length = 0 : i64} {
   %range = arith.constant 1024 : i32
   %workgroup_raw = wave.workgroup_id 0
@@ -97,7 +96,7 @@ func.func @gfx1250_scalar_buffer(%out: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }
@@ -106,8 +105,7 @@ func.func @gfx1250_scalar_buffer(%out: !wave.ptr<#wave.global, i32>)
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 func.func @gfx1250_vector_global(
-    %out: !wave.ptr<#wave.global, i32>, %raw: i32)
-    attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %x = wave.assume %raw as "x"
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 4095">] : i32
@@ -122,7 +120,7 @@ func.func @gfx1250_vector_global(
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }
@@ -130,8 +128,7 @@ func.func @gfx1250_vector_global(
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
-func.func @gfx1250_lds(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @gfx1250_lds(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %allocation = wave.alloc() {align = 16 : i64, bytesize = 128 : i64}
       : !wave.ptr<#wave.shared, i32>
@@ -153,7 +150,7 @@ func.func @gfx1250_lds(%out: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %done : !wave.mem.token
 }
 
 }
@@ -164,8 +161,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 func.func @gfx1250_scratch(
     %in: !wave.ptr<#wave.global, i32>,
     %out: !wave.ptr<#wave.global, i32>,
-    %raw: i32)
-    attributes {wave.kernel,
+    %raw: i32) -> !wave.mem.token attributes {wave.kernel,
                 waveamdmachine.vgpr_count_max = 2 : i64} {
   %range = arith.constant 128 : i32
   %offset = wave.assume %raw as "x"
@@ -203,6 +199,6 @@ func.func @gfx1250_scratch(
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 }

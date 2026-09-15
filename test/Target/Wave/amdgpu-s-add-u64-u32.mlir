@@ -8,7 +8,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: s_addc_u32 s5, s1, 0
 func.func @sadd64u32(%base: !waveamdmachine.reg<sgpr, 2, 0>,
                      %offset: !waveamdmachine.reg<sgpr, 1, 2>,
-                     %data: !waveamdmachine.reg<vgpr, 1, 8>) {
+                     %data: !waveamdmachine.reg<vgpr, 1, 8>) -> !waveamdmachine.mem.token {
   %sum, %scc = waveamdmachine.s_add_u64_u32 %base, %offset
       : (!waveamdmachine.reg<sgpr, 2, 0>, !waveamdmachine.reg<sgpr, 1, 2>)
         -> (!waveamdmachine.reg<sgpr, 2, 4>, !waveamdmachine.reg<scc, 1>)
@@ -17,7 +17,7 @@ func.func @sadd64u32(%base: !waveamdmachine.reg<sgpr, 2, 0>,
   %token = waveamdmachine.global_store_b32_addr64 %addr, %data
       : (!waveamdmachine.reg<vgpr, 2, 6>, !waveamdmachine.reg<vgpr, 1, 8>)
         -> !waveamdmachine.mem.token
-  return
+  return %token : !waveamdmachine.mem.token
 }
 
 }

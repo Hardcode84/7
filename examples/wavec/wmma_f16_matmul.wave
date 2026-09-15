@@ -34,6 +34,7 @@
 kernel [[amdgpu_wave_size(W)]]
        [[amdgpu_workgroup_size(W)]]
 void wavec_wmma_f16_matmul(half *a, half *b, float *c) {
+  token output_done = token();
   uint32_t tile_m = workgroup_id<0>();
   uint32_t tile_n = workgroup_id<1>();
   simd<uint32_t, W> lane = lane_id<W>();
@@ -60,6 +61,7 @@ void wavec_wmma_f16_matmul(half *a, half *b, float *c) {
 
     uint32_t c_tile_base = (tile_m * N_TILES + tile_n) * 32;
     FRAG_REGS regs = fragment_unpack(acc);
-    store(regs, c_frag_ptr + c_tile_base + lane);
+    output_done = join(output_done, store(regs, c_frag_ptr + c_tile_base + lane));
   }
+  observe(output_done);
 }

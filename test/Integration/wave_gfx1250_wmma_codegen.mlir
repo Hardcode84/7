@@ -50,8 +50,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {
 
-func.func @gfx1250_wmma_f16_threeaddr(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @gfx1250_wmma_f16_threeaddr(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %b_bits = arith.constant 1006648320 : i32
   %one = arith.constant 1065353216 : i32
@@ -80,11 +79,10 @@ func.func @gfx1250_wmma_f16_threeaddr(%out: !wave.ptr<#wave.global, i32>)
   %stored = wave.store %regs -> %ptrs
       : (!wave.simd<vector<8xi32>, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
-func.func @gfx1250_wmma_bf16_immediate(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @gfx1250_wmma_bf16_immediate(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %zero = arith.constant 0 : i32
   %a = waveamd.fragment_fill %zero
       : i32 -> !waveamd.fragment<0, bf16, 16, 16, 32, 8>
@@ -109,7 +107,7 @@ func.func @gfx1250_wmma_bf16_immediate(%out: !wave.ptr<#wave.global, i32>)
   %stored = wave.store %last -> %ptrs
       : (!wave.simd<i32, 32>,
          !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 func.func @gfx1250_wmma_modifiers() {
@@ -137,12 +135,12 @@ func.func @gfx1250_wmma_modifiers() {
   %descriptor = waveamdmachine.uninit
       : !waveamdmachine.reg<sgpr, 4>
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  waveamdmachine.buffer_store_b32 %offset, %parts#0, %descriptor, %zero
+  %observed_store_1 = waveamdmachine.buffer_store_b32 %offset, %parts#0, %descriptor, %zero
       : (!waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<vgpr, 1>,
          !waveamdmachine.reg<sgpr, 4>,
-         !waveamdmachine.imm) -> ()
-  waveamdmachine.s_endpgm
+         !waveamdmachine.imm) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %observed_store_1 : !waveamdmachine.mem.token
   return
 }
 

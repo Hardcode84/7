@@ -18,7 +18,7 @@ func.func @coalesce_where_codegen(
     %out0: !wave.ptr<#wave.global, i32>,
     %out1: !wave.ptr<#wave.global, i32>,
     %out2: !wave.ptr<#wave.global, i32>,
-    %limit: i32) attributes {wave.kernel} {
+    %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %one = arith.constant 1 : i32
   %range = arith.constant 4096 : i32
   %buffer0 = waveamd.make_buffer %out0, %range
@@ -67,7 +67,7 @@ func.func @coalesce_where_codegen(
   } : !wave.mask<64> -> !wave.mem.token
   %joined = wave.join %token0, %token1, %token2
       : !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
-  return
+  return %joined : !wave.mem.token
 }
 
 // ASM-LABEL: keep_effectful_gap_codegen:
@@ -82,7 +82,7 @@ func.func @keep_effectful_gap_codegen(
     %out0: !wave.ptr<#wave.global, i32>,
     %out1: !wave.ptr<#wave.global, i32>,
     %out2: !wave.ptr<#wave.global, i32>,
-    %limit: i32) attributes {wave.kernel} {
+    %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 4096 : i32
   %buffer0 = waveamd.make_buffer %out0, %range
       : !wave.ptr<#wave.global, i32>, i32
@@ -124,7 +124,7 @@ func.func @keep_effectful_gap_codegen(
            !wave.mem.token) -> !wave.mem.token
     wave.yield %stored : !wave.mem.token
   } : !wave.mask<64> -> !wave.mem.token
-  return
+  return %token2 : !wave.mem.token
 }
 
 // ASM-LABEL: keep_readfirstlane_outside_exec_codegen:
@@ -135,7 +135,7 @@ func.func @keep_effectful_gap_codegen(
 // ASM: s_endpgm
 func.func @keep_readfirstlane_outside_exec_codegen(
     %out: !wave.ptr<#wave.global, i32>,
-    %limit: i32) attributes {wave.kernel} {
+    %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %one = arith.constant 1 : i32
   %range = arith.constant 4096 : i32
   %buffer = waveamd.make_buffer %out, %range
@@ -157,14 +157,17 @@ func.func @keep_readfirstlane_outside_exec_codegen(
   %ptr = wave.ptr_add %buffer, %lane
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<i32, 64>
       -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
-  wave.where %active {
+  %observe_seed_1 = wave.token : !wave.mem.token
+  %observe_region_2 = wave.where %active {
     %stored = wave.store %broadcast -> %ptr
         : (!wave.simd<i32, 64>,
            !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
         -> !wave.mem.token
-    wave.yield
-  } : !wave.mask<64>
-  return
+    wave.yield %stored : !wave.mem.token
+  } otherwise {
+    wave.yield %observe_seed_1 : !wave.mem.token
+  } : !wave.mask<64> -> !wave.mem.token
+  return %observe_region_2 : !wave.mem.token
 }
 
 }

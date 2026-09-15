@@ -9,7 +9,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM-NOT: cndmask
 // ASM: buffer_store_b32
 func.func @constant_select_simd_splat_codegen(
-    %dst: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %yes = arith.constant true
   %seven = arith.constant 7 : i32
   %nine = arith.constant 9 : i32
@@ -23,7 +23,7 @@ func.func @constant_select_simd_splat_codegen(
   %stored = wave.store %selected -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // ASM-LABEL: constant_select_vector_splat_codegen:
@@ -32,7 +32,7 @@ func.func @constant_select_simd_splat_codegen(
 // ASM: buffer_store_b32
 func.func @constant_select_vector_splat_codegen(
     %dst: !wave.ptr<#wave.global, i16>, %first_value: vector<2xi16>,
-    %second_value: vector<2xi16>) attributes {wave.kernel} {
+    %second_value: vector<2xi16>) -> !wave.mem.token attributes {wave.kernel} {
   %no = arith.constant false
   %first = wave.splat %first_value
       : vector<2xi16> -> !wave.simd<vector<2xi16>, 32>
@@ -48,7 +48,7 @@ func.func @constant_select_vector_splat_codegen(
       : (!wave.simd<vector<2xi16>, 32>,
          !wave.simd<!wave.ptr<#wave.global, i16>, 32>)
       -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 }

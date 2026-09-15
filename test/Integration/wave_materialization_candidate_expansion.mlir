@@ -38,14 +38,14 @@
 // CHECK-NEXT: return
 // ALLOC: must be resolved before register allocation
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-  func.func @kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
+  func.func @kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
     %two = arith.constant 2 : i32
     %mul = wave.binary muli %x, %two : i32, i32 -> i32
     %add = wave.binary addi %x, %x : i32, i32 -> i32
     %choice = wave.materialization_variants %mul, %add : i32
     %value = wave.splat %choice : i32 -> !wave.simd<i32, 32>
-    wave.store %value -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
-    return
+    %observed_store_1 = wave.store %value -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
+    return %observed_store_1 : !wave.mem.token
   }
 
 // ONE-LABEL: func.func @loop_kernel
@@ -72,7 +72,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: waveamdmachine.global_store_b32
 // CHECK: waveamdmachine.candidate_yield
 // CHECK: waveamdmachine.s_endpgm
-  func.func @loop_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {wave.kernel} {
+  func.func @loop_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) -> !wave.mem.token attributes {wave.kernel} {
     %zero = arith.constant 0 : i32
     %one = arith.constant 1 : i32
     %two = arith.constant 2 : i32
@@ -84,8 +84,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
       scf.yield %choice : i32
     }
     %value = wave.splat %result : i32 -> !wave.simd<i32, 32>
-    wave.store %value -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
-    return
+    %observed_store_2 = wave.store %value -> %out : (!wave.simd<i32, 32>, !wave.ptr<#wave.global, i32>) -> !wave.mem.token
+    return %observed_store_2 : !wave.mem.token
   }
 }
 

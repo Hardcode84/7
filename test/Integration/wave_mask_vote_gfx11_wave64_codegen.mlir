@@ -16,7 +16,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100",
 // ASM-NOT: .amdhsa_wavefront_size32
 // ASM: .wavefront_size: 64
 func.func @mask_vote_gfx11_wave64_codegen(
-    %out: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %c32 = arith.constant 32 : i32
   %v32 = wave.splat %c32 : i32 -> !wave.simd<i32, 64>
@@ -33,7 +33,7 @@ func.func @mask_vote_gfx11_wave64_codegen(
   %token = wave.store %value -> %out
       : (!wave.simd<i32, 64>, !wave.ptr<#wave.global, i32>)
       -> !wave.mem.token
-  return
+  return %token : !wave.mem.token
 }
 
 }

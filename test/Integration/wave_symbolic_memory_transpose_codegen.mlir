@@ -30,8 +30,7 @@
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
   func.func @symbolic_memory_transpose_codegen(
-      %dst: !wave.ptr<#wave.global, i8>)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 1 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 512 : i64}
@@ -53,12 +52,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_strided_transpose_codegen(
-      %dst: !wave.ptr<#wave.global, i8>)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 1 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 1024 : i64}
@@ -80,12 +78,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_packet_bound_b8_transpose_codegen(
-      %dst: !wave.ptr<#wave.global, i8>)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 1 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 512 : i64}
@@ -107,12 +104,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_b16_transpose_codegen(
-      %dst: !wave.ptr<#wave.global, f16>)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 1 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 1024 : i64}
@@ -134,12 +130,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<f16, 64>, !wave.simd<!wave.ptr<#wave.global, f16>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_b16_wide_transpose_codegen(
-      %dst: !wave.ptr<#wave.global, f16>)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 1 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 2048 : i64}
@@ -161,12 +156,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<f16, 64>, !wave.simd<!wave.ptr<#wave.global, f16>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_b16_grouped_add_codegen(
-      %dst: !wave.ptr<#wave.global, f16>)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, f16>) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 256, 1, 1>,
                   wave.waves_per_workgroup = 4 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 8192 : i64}
@@ -188,12 +182,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<f16, 64>, !wave.simd<!wave.ptr<#wave.global, f16>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_b16_xor_origin_codegen(
-      %dst: !wave.ptr<#wave.global, f16>, %origin: i32)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, f16>, %origin: i32) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 64, 1, 1>,
                   wave.waves_per_workgroup = 1 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 1024 : i64}
@@ -215,12 +208,11 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<f16, 64>, !wave.simd<!wave.ptr<#wave.global, f16>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 
   func.func @symbolic_memory_b8_xor_origin_codegen(
-      %dst: !wave.ptr<#wave.global, i8>)
-      attributes {wave.kernel,
+      %dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel,
                   wave.workgroup_size = array<i32: 512, 1, 1>,
                   wave.waves_per_workgroup = 8 : i64} {
     %lds = wave.alloc() {align = 16 : i64, bytesize = 2048 : i64}
@@ -242,6 +234,6 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     %stored = wave.store %first -> %out after %token
         : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
            !wave.mem.token) -> !wave.mem.token
-    return
+    return %stored : !wave.mem.token
   }
 }

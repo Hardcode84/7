@@ -16,7 +16,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // ASM: buffer_load_b32 {{v[0-9]+}}, [[LOAD_VOFF]], {{s\[[0-9]+:[0-9]+\]}}, [[LOAD_SOFF]] offen
 func.func @buffer_selected_oob_load_codegen(
     %in: !wave.ptr<#wave.global, i32>, %out: !wave.ptr<#wave.global, i32>,
-    %raw: i32) attributes {wave.kernel} {
+    %raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %u = wave.assume %raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %buffer = waveamd.make_buffer %in, %range
@@ -51,7 +51,7 @@ func.func @buffer_selected_oob_load_codegen(
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 
 // ASM-LABEL: buffer_selected_oob_store_codegen:
@@ -62,7 +62,7 @@ func.func @buffer_selected_oob_load_codegen(
 // ASM: v_cndmask_b32_e64 [[STORE_VOFF:v[0-9]+]], [[STORE_OOB]], {{v[0-9]+}}, {{s[0-9]+}}
 // ASM: buffer_store_b32 {{v[0-9]+}}, [[STORE_VOFF]], {{s\[[0-9]+:[0-9]+\]}}, [[STORE_SOFF]] offen
 func.func @buffer_selected_oob_store_codegen(
-    %out: !wave.ptr<#wave.global, i32>, %raw: i32) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %raw: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %u = wave.assume %raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
   %buffer = waveamd.make_buffer %out, %range
@@ -87,7 +87,7 @@ func.func @buffer_selected_oob_store_codegen(
   %tok = wave.store %lane -> %selected
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 }

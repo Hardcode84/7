@@ -4,7 +4,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx803"} {
 
 func.func @bad_add64(%x: !waveamdmachine.reg<vgpr, 2, 0>,
                      %y: !waveamdmachine.reg<vgpr, 2, 2>,
-                     %data: !waveamdmachine.reg<vgpr, 1, 6>) {
+                     %data: !waveamdmachine.reg<vgpr, 1, 6>) -> !waveamdmachine.mem.token {
   // expected-error @below {{v_add_u64 unsupported on this target}}
   %sum, %vcc = waveamdmachine.v_add_u64 %x, %y
       : (!waveamdmachine.reg<vgpr, 2, 0>, !waveamdmachine.reg<vgpr, 2, 2>)
@@ -12,7 +12,7 @@ func.func @bad_add64(%x: !waveamdmachine.reg<vgpr, 2, 0>,
   %token = waveamdmachine.global_store_b32_addr64 %sum, %data
       : (!waveamdmachine.reg<vgpr, 2, 4>, !waveamdmachine.reg<vgpr, 1, 6>)
         -> !waveamdmachine.mem.token
-  return
+  return %token : !waveamdmachine.mem.token
 }
 
 }

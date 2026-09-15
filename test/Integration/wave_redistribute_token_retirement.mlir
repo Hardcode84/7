@@ -15,8 +15,7 @@
 //--- covered.mlir
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @covered(%dst: !wave.ptr<#wave.global, i8>)
-    attributes {wave.kernel,
+func.func @covered(%dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -50,15 +49,14 @@ func.func @covered(%dst: !wave.ptr<#wave.global, i8>)
   %done = wave.store %loaded -> %dst_ptr after %moved_done
       : (!wave.simd<i8, 32>, !wave.simd<!wave.ptr<#wave.global, i8>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %done : !wave.mem.token
 }
 }
 
 //--- conditional.mlir
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @conditional(%dst: !wave.ptr<#wave.global, i8>, %condition: i1)
-    attributes {wave.kernel,
+func.func @conditional(%dst: !wave.ptr<#wave.global, i8>, %condition: i1) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -94,15 +92,14 @@ func.func @conditional(%dst: !wave.ptr<#wave.global, i8>, %condition: i1)
   %stored = wave.store %out -> %dst_ptr after %ready
       : (!wave.simd<i8, 32>, !wave.simd<!wave.ptr<#wave.global, i8>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 }
 
 //--- unrelated.mlir
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
-func.func @unrelated(%dst: !wave.ptr<#wave.global, i8>)
-    attributes {wave.kernel,
+func.func @unrelated(%dst: !wave.ptr<#wave.global, i8>) -> !wave.mem.token attributes {wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
                 wave.waves_per_workgroup = 2 : i64} {
   %item = wave.workitem_id 0 : !wave.simd<i32, 32>
@@ -137,6 +134,6 @@ func.func @unrelated(%dst: !wave.ptr<#wave.global, i8>)
   %done = wave.store %loaded -> %dst_ptr after %moved_done
       : (!wave.simd<i8, 32>, !wave.simd<!wave.ptr<#wave.global, i8>, 32>,
          !wave.mem.token) -> !wave.mem.token
-  return
+  return %done : !wave.mem.token
 }
 }

@@ -1,8 +1,7 @@
 // RUN: wave-opt --waveamd-to-machine -split-input-file -verify-diagnostics %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @first_dma_delayed(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 2048 : i64,
+func.func @first_dma_delayed(%in: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 2048 : i64,
                 wave.workgroup_size = array<i32: 64, 1, 1>} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w"
@@ -18,15 +17,14 @@ func.func @first_dma_delayed(%in: !wave.ptr<#wave.global, i32>)
       {bytes = 16 : i64, issue_delay_cycles = 17 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %dma : !wave.mem.token
 }
 }
 
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @misaligned_skip_threshold(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 2048 : i64,
+func.func @misaligned_skip_threshold(%in: !wave.ptr<#wave.global, i32>) -> (!wave.mem.token, !wave.mem.token) attributes {wave.kernel, wave.lds_size = 2048 : i64,
                 wave.workgroup_size = array<i32: 128, 1, 1>} {
   // expected-error @below {{DMA issue skip threshold must be wave-aligned}}
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
@@ -46,15 +44,14 @@ func.func @misaligned_skip_threshold(%in: !wave.ptr<#wave.global, i32>)
        issue_delay_skip_thread_threshold = 96 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %first, %second : !wave.mem.token, !wave.mem.token
 }
 }
 
 // -----
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @inconsistent_skip_thresholds(%in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 2048 : i64,
+func.func @inconsistent_skip_thresholds(%in: !wave.ptr<#wave.global, i32>) -> (!wave.mem.token, !wave.mem.token, !wave.mem.token) attributes {wave.kernel, wave.lds_size = 2048 : i64,
                 wave.workgroup_size = array<i32: 128, 1, 1>} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "w"
@@ -79,6 +76,6 @@ func.func @inconsistent_skip_thresholds(%in: !wave.ptr<#wave.global, i32>)
        issue_delay_skip_thread_threshold = 128 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
-  return
+  return %first, %second, %third : !wave.mem.token, !wave.mem.token, !wave.mem.token
 }
 }

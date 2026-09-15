@@ -12,6 +12,7 @@
 #include "Utils/AMDGPUBaseInfo.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Utils/MaterializationVariants.h"
+#include "mlir/Dialect/Wave/IR/WaveMemoryCanonicalization.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineInstrInfo.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachineTarget.h"
 #include "mlir/IR/Builders.h"
@@ -177,7 +178,10 @@ struct MaterializeMachinePoison : OpRewritePattern<ub::PoisonOp> {
 
 void WaveAMDMachineDialect::getCanonicalizationPatterns(
     RewritePatternSet &patterns) const {
-  patterns.add<MaterializeMachinePoison>(getContext());
+  patterns
+      .add<MaterializeMachinePoison, ::mlir::wave::EraseUnobservedMemory,
+           ::mlir::wave::EraseUnobservedRegionMemory<TokenOp, MemTokenType>>(
+          getContext());
 }
 
 static bool isSingletonFlagRegClass(RegClass regClass) {

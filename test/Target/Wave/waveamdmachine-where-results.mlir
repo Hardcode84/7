@@ -119,7 +119,7 @@ func.func @where_otherwise_poison_value(%limit: i32) -> i32 {
 // SELECT: otherwise
 // SELECT: waveamdmachine.global_store_b32
 func.func @where_otherwise_yields_token(%out: !wave.ptr<#wave.global, i32>,
-                                        %limit: i32) attributes {wave.kernel} {
+                                        %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
   %active = wave.cmpi ult %lane, %vlimit
@@ -138,7 +138,7 @@ func.func @where_otherwise_yields_token(%out: !wave.ptr<#wave.global, i32>,
         -> !wave.mem.token
     wave.yield %else_tok : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @where_otherwise_recomputes_else_address
@@ -154,7 +154,7 @@ func.func @where_otherwise_yields_token(%out: !wave.ptr<#wave.global, i32>,
 // ASM: global_store_b32
 func.func @where_otherwise_recomputes_else_address(
     %src: !wave.ptr<#wave.global, f32>, %dst: !wave.ptr<#wave.global, f32>,
-    %limit: i32) attributes {wave.kernel} {
+    %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c32 = arith.constant 32 : i32
   %five = arith.constant 5.000000e+00 : f32
   %pid = wave.workgroup_id 0
@@ -195,7 +195,7 @@ func.func @where_otherwise_recomputes_else_address(
         -> !wave.mem.token
     wave.yield %token : !wave.mem.token
   } : !wave.mask<32> -> !wave.mem.token
-  return
+  return %stored : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @where_yields_pointer
@@ -205,7 +205,7 @@ func.func @where_otherwise_recomputes_else_address(
 // ASM-LABEL: where_yields_pointer:
 // ASM: global_store_b32
 func.func @where_yields_pointer(%out: !wave.ptr<#wave.global, i32>,
-                                %limit: i32) attributes {wave.kernel} {
+                                %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c4 = arith.constant 4 : i32
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
@@ -222,7 +222,7 @@ func.func @where_yields_pointer(%out: !wave.ptr<#wave.global, i32>,
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @where_otherwise_yields_same_base_pointer
@@ -234,7 +234,7 @@ func.func @where_yields_pointer(%out: !wave.ptr<#wave.global, i32>,
 // ASM: s_and_not1_b32
 // ASM: global_store_b32
 func.func @where_otherwise_yields_same_base_pointer(
-    %out: !wave.ptr<#wave.global, i32>, %limit: i32) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %c4 = arith.constant 4 : i32
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
@@ -256,7 +256,7 @@ func.func @where_otherwise_yields_same_base_pointer(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @where_yields_large_pointer_offset
@@ -271,7 +271,7 @@ func.func @where_otherwise_yields_same_base_pointer(
 // ASM-LABEL: where_yields_large_pointer_offset:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @where_yields_large_pointer_offset(
-    %out: !wave.ptr<#wave.global, i32>, %limit: i32) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
   %active = wave.cmpi ult %lane, %vlimit
@@ -287,7 +287,7 @@ func.func @where_yields_large_pointer_offset(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @where_yields_negative_pointer_offset
@@ -296,7 +296,7 @@ func.func @where_yields_large_pointer_offset(
 // ASM-LABEL: where_yields_negative_pointer_offset:
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @where_yields_negative_pointer_offset(
-    %out: !wave.ptr<#wave.global, i32>, %limit: i32) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
   %active = wave.cmpi ult %lane, %vlimit
@@ -312,7 +312,7 @@ func.func @where_yields_negative_pointer_offset(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @where_otherwise_yields_large_pointer_offset
@@ -325,7 +325,7 @@ func.func @where_yields_negative_pointer_offset(
 // ASM: s_and_not1_b32
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
 func.func @where_otherwise_yields_large_pointer_offset(
-    %out: !wave.ptr<#wave.global, i32>, %limit: i32) attributes {wave.kernel} {
+    %out: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
   %active = wave.cmpi ult %lane, %vlimit
@@ -346,7 +346,7 @@ func.func @where_otherwise_yields_large_pointer_offset(
   %tok = wave.store %lane -> %ptrs
       : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>)
       -> !wave.mem.token
-  return
+  return %tok : !wave.mem.token
 }
 
 // SELECT-LABEL: func.func @where_yields_simd_index

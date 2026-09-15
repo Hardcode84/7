@@ -15,8 +15,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: buffer_store_dword
 // CHECK-NOT: s_waitcnt
 // CHECK: s_endpgm
-func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel} {
+func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %out, %range
       : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
@@ -28,7 +27,7 @@ func.func @buffer_store_kernel(%out: !wave.ptr<#wave.global, i32>)
   %store_token = wave.store %wi -> %ptrs
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>)
       -> !wave.mem.token
-  return
+  return %store_token : !wave.mem.token
 }
 // CHECK: .amdhsa_kernel buffer_store_kernel
 // CHECK: .amdhsa_user_sgpr_kernarg_preload_length 2
@@ -59,7 +58,7 @@ func.func @large_agpr_descriptor()
   %token = waveamdmachine.global_store_b32 %off, %value, %base
       : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 1, 167>,
          !waveamdmachine.reg<sgpr, 2, 0>) -> !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %token : !waveamdmachine.mem.token
   return
 }
 
@@ -69,8 +68,7 @@ func.func @large_agpr_descriptor()
 // CHECK: ds_read_b32
 // CHECK: .wavefront_size: 64
 // CHECK: amdhsa.target:   amdgcn-amd-amdhsa--gfx950
-func.func @lds_echo_kernel(%out: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, wave.lds_size = 256 : i64} {
+func.func @lds_echo_kernel(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel, wave.lds_size = 256 : i64} {
   %wi_raw = wave.workitem_id 0 : !wave.simd<i32, 64>
   %wi = wave.assume %wi_raw as "x" [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">] : !wave.simd<i32, 64>
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
@@ -91,6 +89,6 @@ func.func @lds_echo_kernel(%out: !wave.ptr<#wave.global, i32>)
       : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.mem.token)
       -> !wave.mem.token
-  return
+  return %final_token : !wave.mem.token
 }
 }

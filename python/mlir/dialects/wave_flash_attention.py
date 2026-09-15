@@ -1100,7 +1100,7 @@ def _store_output(
             row * _HEAD_DIM + group * 16 + lane_half * 8, bindings=bindings
         )
         offset = bld.assume_range(offset, 0, cfg.head_elements - 1)
-        bld.store(values, bld.ptr_add(output_buffer, offset))
+        bld.observe(bld.store(values, bld.ptr_add(output_buffer, offset)))
 
 
 def _setup_kernel(

@@ -65,7 +65,7 @@ func.func @buffer_rsrc_hoist_codegen() attributes {wave.kernel} {
                 !waveamdmachine.reg<sgpr, 1, 48>,
                 !waveamdmachine.mem.token)
   } -> !waveamdmachine.reg<sgpr, 1, 48>, !waveamdmachine.mem.token
-  waveamdmachine.s_endpgm
+  waveamdmachine.s_endpgm after %loop#1 : !waveamdmachine.mem.token
   return
 }
 
