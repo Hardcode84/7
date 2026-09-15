@@ -51,6 +51,156 @@ func.func @store_pair_dead_tokens(%out: !wave.ptr<#wave.global, f16>,
 
 // -----
 
+// Nested joins with a unique common sink preserve the same observation after
+// one wider store.
+// CHECK-LABEL: func.func @store_pair_nested_join_sink
+// CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, f16>, [[DEP:%.*]]: !wave.mem.token, [[A:%.*]]: !wave.simd<f16, 32>, [[B:%.*]]: !wave.simd<f16, 32>)
+// CHECK: [[PACK:%.*]] = wave.pack [[A]], [[B]] : !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<2xf16>, 32>
+// CHECK: [[STORE:%.*]] = wave.store [[PACK]] -> [[OUT]] after [[DEP]]
+// CHECK: [[LEFT:%.*]] = wave.join [[STORE]], [[DEP]]
+// CHECK: [[RIGHT:%.*]] = wave.join [[STORE]], [[DEP]]
+// CHECK: wave.join [[LEFT]], [[RIGHT]]
+func.func @store_pair_nested_join_sink(
+    %out: !wave.ptr<#wave.global, f16>, %dep: !wave.mem.token,
+    %a: !wave.simd<f16, 32>, %b: !wave.simd<f16, 32>)
+    -> !wave.mem.token attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1 after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %left = wave.join %t0, %dep
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  %right = wave.join %t1, %dep
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  %completed = wave.join %left, %right
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %completed : !wave.mem.token
+}
+
+// -----
+
+// Rewriting a pair gives the packed token two operands in the same join. The
+// unique join user permits recursive widening.
+// CHECK-LABEL: func.func @store_quad_observed_by_one_join
+// CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, i16>, [[DEP:%.*]]: !wave.mem.token, [[A0:%.*]]: !wave.simd<i16, 32>, [[A1:%.*]]: !wave.simd<i16, 32>, [[A2:%.*]]: !wave.simd<i16, 32>, [[A3:%.*]]: !wave.simd<i16, 32>)
+// CHECK: [[PACK:%.*]] = wave.pack [[A0]], [[A1]], [[A2]], [[A3]] : !wave.simd<i16, 32>, !wave.simd<i16, 32>, !wave.simd<i16, 32>, !wave.simd<i16, 32> -> !wave.simd<vector<4xi16>, 32>
+// CHECK: [[STORE:%.*]] = wave.store [[PACK]] -> [[OUT]] after [[DEP]]
+// CHECK: wave.join [[STORE]], [[STORE]], [[STORE]], [[STORE]]
+func.func @store_quad_observed_by_one_join(
+    %out: !wave.ptr<#wave.global, i16>, %dep: !wave.mem.token,
+    %a0: !wave.simd<i16, 32>, %a1: !wave.simd<i16, 32>,
+    %a2: !wave.simd<i16, 32>, %a3: !wave.simd<i16, 32>)
+    -> !wave.mem.token attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c3 = arith.constant 3 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, i16>, i32 -> !wave.ptr<#wave.global, i16>
+  %p2 = wave.ptr_add %out, %c2
+      : !wave.ptr<#wave.global, i16>, i32 -> !wave.ptr<#wave.global, i16>
+  %p3 = wave.ptr_add %out, %c3
+      : !wave.ptr<#wave.global, i16>, i32 -> !wave.ptr<#wave.global, i16>
+  %t0 = wave.store %a0 -> %out after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %a1 -> %p1 after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %t2 = wave.store %a2 -> %p2 after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %t3 = wave.store %a3 -> %p3 after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %completed = wave.join %t0, %t1, %t2, %t3
+      : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token
+      -> !wave.mem.token
+  return %completed : !wave.mem.token
+}
+
+// -----
+
+// A common join makes interleaved stores unordered. Address order determines
+// the packed payload order.
+// CHECK-LABEL: func.func @interleaved_observed_store_tokens
+// CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, i16>, [[DEP:%.*]]: !wave.mem.token, [[A0:%.*]]: !wave.simd<i16, 32>, [[A1:%.*]]: !wave.simd<i16, 32>, [[A2:%.*]]: !wave.simd<i16, 32>, [[A3:%.*]]: !wave.simd<i16, 32>)
+// CHECK: [[PACK:%.*]] = wave.pack [[A0]], [[A1]], [[A2]], [[A3]] : !wave.simd<i16, 32>, !wave.simd<i16, 32>, !wave.simd<i16, 32>, !wave.simd<i16, 32> -> !wave.simd<vector<4xi16>, 32>
+// CHECK: [[STORE:%.*]] = wave.store [[PACK]] -> [[OUT]] after [[DEP]]
+// CHECK: wave.join [[STORE]], [[STORE]], [[STORE]], [[STORE]]
+func.func @interleaved_observed_store_tokens(
+    %out: !wave.ptr<#wave.global, i16>, %dep: !wave.mem.token,
+    %a0: !wave.simd<i16, 32>, %a1: !wave.simd<i16, 32>,
+    %a2: !wave.simd<i16, 32>, %a3: !wave.simd<i16, 32>)
+    -> !wave.mem.token attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %c3 = arith.constant 3 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, i16>, i32 -> !wave.ptr<#wave.global, i16>
+  %p2 = wave.ptr_add %out, %c2
+      : !wave.ptr<#wave.global, i16>, i32 -> !wave.ptr<#wave.global, i16>
+  %p3 = wave.ptr_add %out, %c3
+      : !wave.ptr<#wave.global, i16>, i32 -> !wave.ptr<#wave.global, i16>
+  %t0 = wave.store %a0 -> %out after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %t2 = wave.store %a2 -> %p2 after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %a1 -> %p1 after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %t3 = wave.store %a3 -> %p3 after %dep
+      : (!wave.simd<i16, 32>, !wave.ptr<#wave.global, i16>, !wave.mem.token)
+      -> !wave.mem.token
+  %completed = wave.join %t0, %t2, %t1, %t3
+      : !wave.mem.token, !wave.mem.token, !wave.mem.token, !wave.mem.token
+      -> !wave.mem.token
+  return %completed : !wave.mem.token
+}
+
+// -----
+
+// A token with a non-join user does not have a unique observation path.
+// CHECK-LABEL: func.func @store_pair_nested_join_with_other_user_stays
+// CHECK-NOT: wave.pack
+// CHECK: wave.store
+// CHECK: wave.store
+// CHECK: wave.barrier
+func.func @store_pair_nested_join_with_other_user_stays(
+    %out: !wave.ptr<#wave.global, f16>, %dep: !wave.mem.token,
+    %a: !wave.simd<f16, 32>, %b: !wave.simd<f16, 32>)
+    -> !wave.mem.token attributes {wave.kernel} {
+  %c1 = arith.constant 1 : i32
+  %p1 = wave.ptr_add %out, %c1
+      : !wave.ptr<#wave.global, f16>, i32 -> !wave.ptr<#wave.global, f16>
+  %t0 = wave.store %a -> %out after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %t1 = wave.store %b -> %p1 after %dep
+      : (!wave.simd<f16, 32>, !wave.ptr<#wave.global, f16>,
+         !wave.mem.token)
+      -> !wave.mem.token
+  %left = wave.join %t0, %dep
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  %right = wave.join %t1, %dep
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  %barrier = wave.barrier %t0 : (!wave.mem.token) -> !wave.mem.token
+  %completed = wave.join %left, %right, %barrier
+      : !wave.mem.token, !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %completed : !wave.mem.token
+}
+
+// -----
+
 // CHECK-LABEL: func.func @interleaved_dead_store_tokens
 // CHECK-SAME: ([[OUT:%.*]]: !wave.ptr<#wave.global, f16>, [[DEP:%.*]]: !wave.mem.token, [[A0:%.*]]: !wave.simd<f16, 32>, [[A1:%.*]]: !wave.simd<f16, 32>, [[A2:%.*]]: !wave.simd<f16, 32>, [[A3:%.*]]: !wave.simd<f16, 32>)
 // CHECK: [[PACK:%.*]] = wave.pack [[A0]], [[A1]], [[A2]], [[A3]] : !wave.simd<f16, 32>, !wave.simd<f16, 32>, !wave.simd<f16, 32>, !wave.simd<f16, 32> -> !wave.simd<vector<4xf16>, 32>

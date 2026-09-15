@@ -20,6 +20,17 @@
 // ASM: s_barrier
 // ASM: s_endpgm
 
+// IR-LABEL: func.func @nested_observation_joins_coalesce
+// IR: [[NESTED_PACK:%.*]] = wave.pack
+// IR: [[NESTED_STORE:%.*]] = wave.store [[NESTED_PACK]]
+// IR: wave.join [[NESTED_STORE]], %{{.*}}
+// IR: wave.join [[NESTED_STORE]], %{{.*}}
+// ASM-LABEL: nested_observation_joins_coalesce:
+// ASM-NOT: buffer_store_dword {{.*}}
+// ASM: buffer_store_dwordx2
+// ASM-NOT: buffer_store_dword {{.*}}
+// ASM: s_endpgm
+
 // IR-LABEL: func.func @equivalent_empty_dependencies_coalesce
 // IR: [[ROOT:%.*]] = wave.token
 // IR: wave.token
@@ -104,6 +115,42 @@ func.func @live_store_token_stays(
       -> !wave.mem.token
   %barrier = wave.barrier %first : (!wave.mem.token) -> !wave.mem.token
   return %second : !wave.mem.token
+}
+
+func.func @nested_observation_joins_coalesce(
+    %out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel,
+                wave.workgroup_size = array<i32: 64, 1, 1>,
+                wave.waves_per_workgroup = 1 : i64} {
+  %lane = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %bounded_lane = wave.assume %lane as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 63">]
+      : !wave.simd<i32, 64>
+  %off0 = wave.index_expr <"item"> ["item"](%bounded_lane)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %off1 = wave.index_expr <"item + 1"> ["item"](%bounded_lane)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %ptr0 = wave.ptr_add %out, %off0
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %ptr1 = wave.ptr_add %out, %off1
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %root = wave.token : !wave.mem.token
+  %first = wave.store %lane -> %ptr0 after %root
+      : (!wave.simd<i32, 64>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
+      -> !wave.mem.token
+  %second = wave.store %lane -> %ptr1 after %root
+      : (!wave.simd<i32, 64>,
+         !wave.simd<!wave.ptr<#wave.global, i32>, 64>, !wave.mem.token)
+      -> !wave.mem.token
+  %left = wave.join %first, %root
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  %right = wave.join %second, %root
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  %completed = wave.join %left, %right
+      : !wave.mem.token, !wave.mem.token -> !wave.mem.token
+  return %completed : !wave.mem.token
 }
 
 func.func @equivalent_empty_dependencies_coalesce(
