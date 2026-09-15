@@ -121,6 +121,7 @@ def run_session(
     environment = {
         "PATH": f"{sdk / 'bin'}{os.pathsep}{os.environ['PATH']}",
         "LD_LIBRARY_PATH": str(sdk / "lib"),
+        "USER": os.environ["USER"],
         "ROCM_LIB": str(sdk / "lib"),
         "HIP_RUNTIME_LIB": str(sdk / "lib/libamdhip64.so"),
         "MLIR_ROCM_RUNTIME": str(args.build_dir / "simulator/libmlir_rocm_runtime.so"),
