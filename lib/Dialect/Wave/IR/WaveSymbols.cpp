@@ -29,6 +29,15 @@ using namespace mlir::wave::sym;
 
 namespace {
 
+template <typename Fn, typename... Args>
+static auto callFact(Fn fn, Args... args) -> decltype(fn(args..., nullptr)) {
+  ixs_fact_query_status status;
+  decltype(fn(args..., nullptr)) result = fn(args..., &status);
+  if (status == IXS_FACT_QUERY_OOM)
+    llvm::report_bad_alloc_error("ixsimpl fact allocation failed");
+  return result;
+}
+
 static ExprKind getExprKind(ixs_tag tag) {
   static_assert(IXS_CMP == 12 && IXS_NOT == 15 && IXS_PARSE_ERROR == 17 &&
                     IXS_TRUNC == 18,
@@ -452,11 +461,9 @@ Analysis::createDirect(Store &store, ArrayRef<PredHandle> assumptions,
   rawAssumptions.reserve(assumptions.size());
   for (PredHandle assumption : assumptions)
     rawAssumptions.push_back(rawPredNode(assumption));
-  analysis->facts = ixs_facts_create_preds(
-      analysis->session.raw(), rawAssumptions.data(), rawAssumptions.size());
+  analysis->facts = callFact(ixs_facts_create_preds, analysis->session.raw(),
+                             rawAssumptions.data(), rawAssumptions.size());
   if (!analysis->facts) {
-    if (joinSessionErrors(analysis->session.raw()).empty())
-      llvm::report_bad_alloc_error("ixsimpl fact set allocation failed");
     analysis->poison(diagnostic, "failed to ingest symbolic assumptions");
     return failure();
   }
@@ -485,7 +492,7 @@ LogicalResult Analysis::assume(PredHandle pred, std::string *diagnostic) {
     return failure();
   }
   const ixs_node *rawPred = rawPredNode(pred);
-  if (!ixs_facts_assume_pred(facts, rawPred)) {
+  if (!callFact(ixs_facts_assume_pred, facts, rawPred)) {
     poison(diagnostic, "failed to ingest symbolic assumption");
     return failure();
   }
@@ -504,8 +511,8 @@ LogicalResult Analysis::assume(ArrayRef<PredHandle> predicates,
   rawPredicates.reserve(predicates.size());
   for (PredHandle predicate : predicates)
     rawPredicates.push_back(rawPredNode(predicate));
-  if (!ixs_facts_assume_preds(facts, rawPredicates.data(),
-                              rawPredicates.size())) {
+  if (!callFact(ixs_facts_assume_preds, facts, rawPredicates.data(),
+                rawPredicates.size())) {
     poison(diagnostic, "failed to ingest symbolic assumptions");
     return failure();
   }
@@ -527,7 +534,7 @@ LogicalResult Analysis::assumeRange(ExprHandle expr, InferredRange range,
     return failure();
   }
   ixs_range_result rawRange = convertRange(std::move(range));
-  if (!ixs_facts_assume_range(facts, rawExpr, &rawRange)) {
+  if (!callFact(ixs_facts_assume_range, facts, rawExpr, &rawRange)) {
     poison(diagnostic, "failed to ingest symbolic range");
     return failure();
   }
@@ -545,7 +552,8 @@ LogicalResult Analysis::deriveAffine(ExprHandle base, int64_t scale,
   }
   const ixs_node *rawBase = rawExprNode(base);
   const ixs_node *rawDerived = rawExprNode(derived);
-  if (!ixs_facts_derive_affine(facts, rawBase, scale, offset, rawDerived)) {
+  if (!callFact(ixs_facts_derive_affine, facts, rawBase, scale, offset,
+                rawDerived)) {
     poison(diagnostic, "failed to derive symbolic affine range");
     return failure();
   }
@@ -567,9 +575,9 @@ Analysis::substituteFacts(ArrayRef<ExprSubstitution> substitutions,
   ixs_facts *substituted = ixs_facts_create(session.raw());
   if (!substituted)
     llvm::report_bad_alloc_error("ixsimpl fact set allocation failed");
-  if (!ixs_facts_substitute_multi(substituted, facts,
-                                  static_cast<uint32_t>(targets.size()),
-                                  targets.data(), replacements.data())) {
+  if (!callFact(ixs_facts_substitute_multi, substituted, facts,
+                static_cast<uint32_t>(targets.size()), targets.data(),
+                replacements.data())) {
     poison(diagnostic, "failed to substitute symbolic facts");
     return failure();
   }
@@ -798,8 +806,9 @@ CheckResult Analysis::check(PredHandle pred) {
   std::optional<PredCmpOp> op = view.getCmpOp();
   ixs_check_result result;
   if (op == PredCmpOp::Eq || op == PredCmpOp::Ne) {
-    result = ixs_equivalent_facts(facts, rawExprNode(view.getCmpLhs()),
-                                  rawExprNode(view.getCmpRhs()));
+    result =
+        callFact(ixs_equivalent_facts, facts, rawExprNode(view.getCmpLhs()),
+                 rawExprNode(view.getCmpRhs()));
     if (op == PredCmpOp::Ne) {
       if (result == IXS_CHECK_TRUE)
         result = IXS_CHECK_FALSE;
@@ -807,9 +816,9 @@ CheckResult Analysis::check(PredHandle pred) {
         result = IXS_CHECK_TRUE;
     }
   } else if (view.getKind() == PredKind::Cmp) {
-    result = ixs_check_facts(facts, raw);
+    result = callFact(ixs_check_facts, facts, raw);
   } else {
-    result = ixs_check_predicate_facts(facts, raw);
+    result = callFact(ixs_check_predicate_facts, facts, raw);
   }
   return convertCheckResult(result);
 }
@@ -819,7 +828,8 @@ CheckResult Analysis::equivalent(ExprHandle lhs, ExprHandle rhs) {
     return CheckResult::Unknown;
   const ixs_node *rawLhs = rawExprNode(lhs);
   const ixs_node *rawRhs = rawExprNode(rhs);
-  return convertCheckResult(ixs_equivalent_facts(facts, rawLhs, rawRhs));
+  return convertCheckResult(
+      callFact(ixs_equivalent_facts, facts, rawLhs, rawRhs));
 }
 
 enum class ComparisonRounding { Floor, Ceil };
@@ -913,21 +923,24 @@ CheckResult Analysis::equivalent(PredHandle lhs, PredHandle rhs) {
     return CheckResult::Unknown;
   const ixs_node *rawLhs = rawPredNode(lhs);
   const ixs_node *rawRhs = rawPredNode(rhs);
-  return convertCheckResult(ixs_equivalent_facts(facts, rawLhs, rawRhs));
+  return convertCheckResult(
+      callFact(ixs_equivalent_facts, facts, rawLhs, rawRhs));
 }
 
 CheckResult Analysis::integerValued(ExprHandle expr) {
   if (!prepareQuery())
     return CheckResult::Unknown;
   const ixs_node *raw = rawExprNode(expr);
-  return convertCheckResult(ixs_check_integer_valued_facts(facts, raw));
+  return convertCheckResult(
+      callFact(ixs_check_integer_valued_facts, facts, raw));
 }
 
 CheckResult Analysis::divisible(ExprHandle expr, int64_t modulus) {
   if (!prepareQuery())
     return CheckResult::Unknown;
   const ixs_node *raw = rawExprNode(expr);
-  return convertCheckResult(ixs_check_divisible_facts(facts, raw, modulus));
+  return convertCheckResult(
+      callFact(ixs_check_divisible_facts, facts, raw, modulus));
 }
 
 CheckResult Analysis::congruent(ExprHandle expr, int64_t modulus,
@@ -936,7 +949,7 @@ CheckResult Analysis::congruent(ExprHandle expr, int64_t modulus,
     return CheckResult::Unknown;
   const ixs_node *raw = rawExprNode(expr);
   return convertCheckResult(
-      ixs_check_congruent_facts(facts, raw, modulus, residue));
+      callFact(ixs_check_congruent_facts, facts, raw, modulus, residue));
 }
 
 ExactDivideResult Analysis::tryExactDivide(ExprHandle expr, int64_t divisor) {
@@ -948,7 +961,7 @@ ExactDivideResult Analysis::tryExactDivide(ExprHandle expr, int64_t divisor) {
   if (cached != exactDivideCache.end())
     return cached->second;
   ixs_exact_divide_result result =
-      ixs_try_exact_divide_facts(facts, raw, divisor);
+      callFact(ixs_try_exact_divide_facts, facts, raw, divisor);
   ExactDivideResult converted;
   switch (result.status) {
   case IXS_EXACT_DIVIDE_PROVEN:
@@ -971,7 +984,7 @@ Pow2Fact Analysis::getPow2Fact(ExprHandle expr) {
   if (!prepareQuery())
     return Pow2Fact::Unknown;
   const ixs_node *raw = rawExprNode(expr);
-  return convertPow2Fact(ixs_get_pow2_fact_facts(facts, raw));
+  return convertPow2Fact(callFact(ixs_get_pow2_fact_facts, facts, raw));
 }
 
 std::optional<KnownBits> Analysis::getKnownBits(ExprHandle expr) {
@@ -979,7 +992,7 @@ std::optional<KnownBits> Analysis::getKnownBits(ExprHandle expr) {
     return std::nullopt;
   const ixs_node *raw = rawExprNode(expr);
   ixs_known_bits result{};
-  if (!ixs_get_known_bits_facts(facts, raw, &result))
+  if (!callFact(ixs_get_known_bits_facts, facts, raw, &result))
     return std::nullopt;
   return KnownBits{result.known_zero, result.known_one,
                    convertPow2Fact(result.pow2)};
@@ -991,7 +1004,8 @@ std::optional<Congruence> Analysis::getSymbolCongruence(ExprHandle symbol) {
   const ixs_node *raw = rawExprNode(symbol);
   int64_t modulus = 0;
   int64_t residue = 0;
-  if (!ixs_get_symbol_congruence_facts(facts, raw, &modulus, &residue))
+  if (!callFact(ixs_get_symbol_congruence_facts, facts, raw, &modulus,
+                &residue))
     return std::nullopt;
   return Congruence{modulus, residue};
 }
@@ -1001,7 +1015,7 @@ std::optional<InferredRange> Analysis::range(ExprHandle expr) {
     return std::nullopt;
   const ixs_node *raw = rawExprNode(expr);
   ixs_range_result result{};
-  if (!ixs_range_facts(facts, raw, &result))
+  if (!callFact(ixs_range_facts, facts, raw, &result))
     return std::nullopt;
   return convertRange(result);
 }
@@ -1034,8 +1048,8 @@ Analysis::affineDecompose(ExprHandle expr, ExprHandle symbol) {
   const ixs_node *rawSymbol = rawExprNode(symbol);
   const ixs_node *coefficient = nullptr;
   const ixs_node *residual = nullptr;
-  if (!ixs_affine_decompose_facts(facts, rawExpr, rawSymbol, &coefficient,
-                                  &residual))
+  if (!callFact(ixs_affine_decompose_facts, facts, rawExpr, rawSymbol,
+                &coefficient, &residual))
     return std::nullopt;
   return AffineDecomposition{ExprHandle(coefficient), ExprHandle(residual)};
 }
@@ -1062,7 +1076,8 @@ Analysis::splitAdditiveConstant(ExprHandle expr) {
   const ixs_node *raw = rawExprNode(expr);
   const ixs_node *residual = nullptr;
   int64_t constant = 0;
-  if (!ixs_split_additive_constant_facts(facts, raw, &residual, &constant))
+  if (!callFact(ixs_split_additive_constant_facts, facts, raw, &residual,
+                &constant))
     return std::nullopt;
   return SplitAdditiveConstant{ExprHandle(residual), constant};
 }
