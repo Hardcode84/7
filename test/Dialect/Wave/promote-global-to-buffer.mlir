@@ -79,6 +79,68 @@ func.func @preserve_explicit_buffer_offset(
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
+// CHECK-LABEL: func.func @normalize_preexisting_buffer_offset
+// CHECK: [[LANE:%.*]] = wave.lane_id
+// CHECK: [[MOD:%.*]] = wave.index_expr <"Mod(lane, 1073741824)">
+// CHECK: [[PTR:%.*]] = wave.ptr_add {{%.*}}, [[MOD]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+// CHECK: wave.load [[PTR]]
+// MACHINE-LABEL: func.func @normalize_preexisting_buffer_offset
+// MACHINE: waveamdmachine.buffer_load_b32
+func.func @normalize_preexisting_buffer_offset(
+    %buffer: !wave.ptr<#waveamd.buffer, i32>) attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %offset = wave.index_expr <"lane">
+      assuming [#wave.pred<"lane >= 0">, #wave.pred<"lane <= 31">]
+      ["lane"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %buffer, %offset
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %value, %token = wave.load %ptr
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// CHECK-LABEL: func.func @preserve_bounded_buffer_offset
+// CHECK: [[BUFFER:%.*]] = waveamd.make_buffer
+// CHECK: [[OFFSET:%.*]] = wave.index_expr <"lane">
+// CHECK-NOT: Mod(
+// CHECK: [[PTR:%.*]] = wave.ptr_add [[BUFFER]], [[OFFSET]] : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+// CHECK: wave.load [[PTR]]
+// MACHINE-LABEL: func.func @preserve_bounded_buffer_offset
+// MACHINE: waveamdmachine.buffer_load_b32
+func.func @preserve_bounded_buffer_offset(
+    %base: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %range = arith.constant 1024 : i32
+  %buffer = waveamd.make_buffer %base, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %offset = wave.index_expr <"lane">
+      assuming [#wave.pred<"lane >= 0">, #wave.pred<"lane <= 31">]
+      ["lane"](%lane)
+      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %ptr = wave.ptr_add %buffer, %offset
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %value, %token = wave.load %ptr
+      : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
 // Access ending at signed-i32 max fits the descriptor range.
 // CHECK-LABEL: func.func @promote_access_ending_at_signed_i32_max
 // CHECK: waveamd.make_buffer

@@ -47,13 +47,16 @@ permits a carried offset. Fixed-width arithmetic keeps its signed wrapping
 semantics during this proof. The original expression and carried offset are
 equivalent choices.
 
-Buffer normalization must preserve pointer arithmetic. If the compiler proves
-that an element-offset modulus leaves the offset unchanged, use the modular
-offset directly. If the proof fails, keep the full offset. Do not offer a
-wrapped offset as an equivalent choice. Duplicate the memory operations before
-machine selection so that each valid alternative contains a complete address tree.
-Machine selection determines whether the full address fits buffer fields or
-requires an addr64 instruction. No source attribute changes this decision.
+Buffer normalization must preserve pointer arithmetic. Keep the canonical offset
+when the descriptor has a nonnegative constant byte range below 2^31 - 1.
+Follow pointer-add and pointer-cast operations to find this descriptor. This
+choice of materialization does not prove that an access is in bounds. For other
+buffers, use a modular offset only when the compiler proves that the modulus
+leaves the offset unchanged. If the proof fails, keep the full offset. Duplicate
+memory operations before machine selection so that each valid alternative
+contains a complete address tree. Machine selection determines whether the full
+address fits buffer fields or requires an addr64 instruction. No source attribute
+changes this decision.
 
 Each choice result has all integer bounds proven for its equivalent operands.
 Range analysis intersects those bounds and normalizes SIMD ranges to their

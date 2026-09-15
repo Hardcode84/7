@@ -28,6 +28,7 @@
 #include "llvm/Support/CheckedArithmetic.h"
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -448,7 +449,7 @@ private:
       return success();
     std::optional<int64_t> elementBytes =
         getPointerElementBytes(add.getBase().getType());
-    if (!elementBytes)
+    if (!elementBytes || *elementBytes <= 0)
       return add.emitError("cannot determine buffer pointer element size");
     FailureOr<std::optional<SymbolicOffset>> modularOffset =
         getModularBufferOffset(index, *elementBytes);
@@ -474,12 +475,26 @@ private:
   LogicalResult normalizeBufferOffsets() {
     WalkResult result = func.walk([&](PtrAddOp add) {
       std::optional<PtrType> ptr = getPointerType(add.getBase().getType());
-      if (ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr->getAddressSpace()))
+      if (ptr && isa<waveamd::BufferAddressSpaceAttr>(ptr->getAddressSpace()) &&
+          !hasNarrowBufferRange(add.getBase()))
         if (failed(normalizeBufferOffset(add)))
           return WalkResult::interrupt();
       return WalkResult::advance();
     });
     return failure(result.wasInterrupted());
+  }
+
+  static bool hasNarrowBufferRange(Value ptr) {
+    if (auto buffer = ptr.getDefiningOp<waveamd::MakeBufferOp>()) {
+      std::optional<int64_t> range = getConstantIntValue(buffer.getRange());
+      return range && *range >= 0 &&
+             *range < std::numeric_limits<int32_t>::max();
+    }
+    if (auto add = ptr.getDefiningOp<PtrAddOp>())
+      return hasNarrowBufferRange(add.getBase());
+    if (auto cast = ptr.getDefiningOp<PtrCastOp>())
+      return hasNarrowBufferRange(cast.getSource());
+    return false;
   }
 
   FailureOr<bool> promoteOperand(Operation *op, Value ptr,
