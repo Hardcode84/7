@@ -205,34 +205,18 @@ analysis we reject: a local's def-use is fixed by the AST, no approximation.
 
 ## Memory and tokens
 
-Memory ordering is explicit and programmer-threaded, mirroring the IR; the
-compiler never infers it (no `restrict`, no alias analysis -- that is the
-"rediscovery" the model rejects, model md 362). This matches the backend:
-the scheduler derives memory-ordering edges only from token SSA edges in
-`WaveAMDMachineGreedySchedule.cpp`; un-tokened memory ops carry no ordering and
-may be reordered or overlapped freely. Two dependency kinds exist; only one
-needs a token:
+The [Wave memory model](WaveMemoryModel.md) defines ordering, completion, and
+observation. The frontend represents these dependencies with explicit SSA tokens.
+Use `observe(token)` to retain an output write at kernel completion. For a loop,
+observe the returned token at kernel scope.
 
-| Dependency | Carried by | Token? |
-|---|---|---|
-| RAW through a register (`xv = load(...)`, then `a*xv`); store-data readiness | SSA value edge | no |
-| WAW; WAR without a value dep; RAW through memory (LDS); barrier; async completion | nothing in value flow | **yes** |
-
-SAXPY loads need no extra ordering token: the stored value depends on both
-loads. The output store token must reach `observe(token)`. Kernel completion
-consumes these observations. A store or DMA with no observed result can be
-removed by canonicalization. For a loop output, join each store token into an
-explicit token carry and observe the loop result at kernel scope.
-
-Ops (`WaveOps.td` 388-533): `load`/`store` take an optional `$dependency`
-token and always produce one; `token()` (seed -> `wave.token`), `after`
-(happens-after), `join` (merge), `wait` (drain), `barrier` (deps in ->
-token out). `store`/`barrier`/`join`/`token()` return a single token
-(`barrier()` with no deps is still a real workgroup sync; `token()` is an
-inert seed):
+The source builtins are `load`, `store`, `token`, `after`, `join`, `wait`,
+`barrier`, and `observe`. `load` returns data and a token. `store`, `barrier`,
+`join`, and `token` return one token. `token()` creates an empty dependency seed.
 
 ```c
 token t = store(a*xv + yv, y + i);
+observe(t);
 token b = barrier(t0, t1);
 token j = join(t0, t1);
 token z = token();                 // empty seed, e.g. an initial loop-carried token
@@ -254,8 +238,7 @@ C++ feature. Most loads drop the token: `xv = load(x + i);`; a multi-result buil
 q)` -- yields its value and drops the token. Tokens are plain SSA values, so
 they do not touch the no-stringify FFI rule that the `index_expr` offsets do.
 
-LDS round-trip (the canonical multi-token case; mirrors `wave_matmul.py`
-1089-1104):
+LDS transfer syntax:
 
 ```c
 shared half *lds_a = shared_memory_base<half>(0);       // #wave.shared; kernel: [[amdgpu_lds_size(N)]]
@@ -269,10 +252,6 @@ simd<half,32> b = load(lds_b after bar);
 `shared_memory_base<T>(byteOffset)` returns a uniform `shared T*` into kernel
 shared memory; the kernel declares arena size with `[[amdgpu_lds_size(N)]]` (->
 `wave.lds_size`).
-
-Footgun, by design: a forgotten token is a legal reorder -- a silent race,
-the same deal `wave_dsl` makes today. The optional seatbelt is a lint ("two
-stores to one ptr base, no token between"), never analysis in codegen.
 
 ## Why this is tractable
 

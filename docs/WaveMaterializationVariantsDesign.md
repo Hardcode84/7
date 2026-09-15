@@ -59,8 +59,8 @@ make their costs interact even when every combination is semantically valid.
 
 ## Memory effects
 
-Memory ordering is explicit in SSA token edges. Materialization selection does
-not infer alias ordering, insert barriers, or add user memory-token carries.
+The [Wave memory model](WaveMemoryModel.md) defines token ordering and effect
+removal. Materialization selection preserves that contract.
 
 An address choice can require alternative memory operations. Each alternative
 must contain a complete address computation and preserve the required memory
@@ -76,10 +76,9 @@ chain reaches them. Selecting one load must not delete a required preceding
 store. Removing an unselected memory operation must preserve required history
 and all effects used by the retained program.
 
-Token consumers keep required memory choices live. After expansion resolves
-choices, canonicalization removes unobserved stores, DMA, and dead token
-recurrences. Expansion has no special effect-erasure rule. Run candidate cleanup
-before scheduling so scores exclude dead work.
+After expansion resolves choices, apply memory canonicalization before
+scheduling so scores exclude dead work. Expansion has no special effect-erasure
+rule.
 
 ## Search scopes
 

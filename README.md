@@ -5,7 +5,7 @@ for AMDGPU. The dialect preserves uniformity, lane masks, wave size, and
 memory ordering as first-class IR facts, and lowers through an
 inspectable WaveAMDMachine dialect to AMDGPU assembly.
 
-The design rationale is in [`docs/AMDGPUExplicitWaveProgrammingModel.md`].
+The design rationale is in the [programming model](docs/AMDGPUExplicitWaveProgrammingModel.md).
 
 ## What's in here
 

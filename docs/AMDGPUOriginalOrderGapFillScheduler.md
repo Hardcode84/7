@@ -87,12 +87,9 @@ it participates in; do not infer an extra scheduling fence from the opcode.
 Empty-token barriers are movable and must not encode phase intent at this
 stage. If ordering matters, encode it with explicit tokens.
 
-Memory ordering stays explicit:
-
-- SSA def-use edges are dependencies.
-- `!waveamdmachine.mem.token` def-use edges are memory-order dependencies.
-- No implicit memory alias/order edges.
-- Memory ops without token edges are reorderable by this scheduler.
+Scheduling follows the [Wave memory model](WaveMemoryModel.md): ordinary SSA
+and token edges determine legal order. No implicit alias or memory-order edges
+are added.
 
 Memory stalls are modeled separately from ordering. A token edge makes the
 consumer ready only after the producer is scheduled; the token's ready cycle

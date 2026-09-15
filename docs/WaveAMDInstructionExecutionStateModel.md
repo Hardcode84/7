@@ -363,7 +363,8 @@ issue effects stay behind config/arch hooks.
 
 ## Memory Tokens
 
-Token state is structural.
+The [Wave memory model](WaveMemoryModel.md) defines token semantics.
+The execution model represents token state structurally.
 
 For each token result:
 
@@ -371,6 +372,7 @@ For each token result:
 2. If the op issues a wait-counter event, add the new event id.
 3. If the op is a token join or barrier, union input deps without draining.
 4. If the op is an explicit wait, apply drain semantics to the input deps.
+5. For an issue-only token, retain issue edges but clear completion events.
 
 Do not serialize token state through strings or parse printed IR.
 
