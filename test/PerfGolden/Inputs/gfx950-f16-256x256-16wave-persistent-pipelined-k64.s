@@ -20,14 +20,13 @@ gfx950_persistent_f16_gemm:
 		v_and_b32_e32 v1, 63, v0
 		s_mov_b32 s1, 0
 		v_cmp_eq_u32_e64 s[12:13], v1, s1
-		v_mov_b32_e32 v4, 0
+		v_mov_b32_e32 v2, 0
 		v_mov_b32_e32 v1, 0x20000
 		v_cmp_eq_u32_e64 vcc, v0, s1
 		s_and_saveexec_b64 s[24:25], vcc
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_else_0
-		v_mov_b32_e32 v5, 0
-		v_mov_b64_e32 v[6:7], 0
-		ds_write_b128 v1, v[4:7]
+		v_mov_b32_e32 v3, 0
+		ds_write2_b64 v1, v[2:3], v[2:3] offset1:1
 .Lgfx950_persistent_f16_gemm.exec_else_0:
 		s_andn2_b64 exec, s[24:25], vcc
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_endif_0
@@ -90,31 +89,30 @@ gfx950_persistent_f16_gemm:
 		s_mov_b32 s20, s4
 		s_mov_b32 s21, s5
 		s_mov_b32 s0, s1
+		s_mov_b32 s2, s1
 .Lgfx950_persistent_f16_gemm.loop_head_0:
 		s_cmp_ge_u32 s0, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_1
-		s_sub_i32 s2, s0, 2
-		s_lshl_b32 s2, s2, 12
-		s_add_i32 s2, s2, 0xfff
-		s_and_b32 s3, s0, 1
-		s_lshl_b32 s3, s3, 2
-		s_add_i32 s3, s3, 0x20000
-		v_mov_b32_e32 v16, s3
+		s_sub_i32 s3, s0, 2
+		s_lshl_b32 s3, s3, 12
+		s_add_i32 s3, s3, 0xfff
+		s_add_i32 s4, s2, 0x20000
+		v_mov_b32_e32 v16, s4
 		s_mov_b32 s4, 1
 		s_mov_b32 s5, 0
 		s_and_saveexec_b64 s[14:15], s[4:5]
 		s_waitcnt vmcnt(0)
 		ds_read_b32 v17, v16 offset:8
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s3, v17
-		s_cmp_lg_u32 s3, s2
+		v_readfirstlane_b32 s4, v17
+		s_cmp_lg_u32 s4, s3
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_2
 .Lgfx950_persistent_f16_gemm.loop_head_1:
 		ds_read_b32 v17, v16 offset:8
 		s_sleep 1
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s3, v17
-		s_cmp_lg_u32 s3, s2
+		v_readfirstlane_b32 s4, v17
+		s_cmp_lg_u32 s4, s3
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_1
 .Lgfx950_persistent_f16_gemm.loop_exit_1:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_2
@@ -129,105 +127,103 @@ gfx950_persistent_f16_gemm:
 		s_nop 0
 		buffer_load_dwordx4 v2, s[16:19], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0x8000
+		s_add_i32 m0, m0, 0x10000
 		s_nop 0
 		buffer_load_dwordx4 v3, s[20:23], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0xffffa000
+		s_add_i32 m0, m0, 0xffff2000
 		s_nop 0
 		buffer_load_dwordx4 v4, s[16:19], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0x8000
+		s_add_i32 m0, m0, 0x10000
 		s_nop 0
 		buffer_load_dwordx4 v5, s[20:23], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0xffffa000
+		s_add_i32 m0, m0, 0xffff2000
 		s_nop 0
 		buffer_load_dwordx4 v6, s[16:19], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0x8000
+		s_add_i32 m0, m0, 0x10000
 		s_nop 0
 		buffer_load_dwordx4 v7, s[20:23], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0xffffa000
+		s_add_i32 m0, m0, 0xffff2000
 		s_nop 0
 		buffer_load_dwordx4 v1, s[16:19], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0x8000
+		s_add_i32 m0, m0, 0x10000
 		s_nop 0
 		buffer_load_dwordx4 v0, s[20:23], 0 offen lds
-		s_getreg_b32 s2, hwreg(HW_REG_IB_STS)
-		s_and_b32 s3, s2, 15
-		s_lshr_b32 s2, s2, 18
-		s_and_b32 s2, s2, 48
-		s_or_b32 s2, s3, s2
-		s_cmp_lg_u32 s2, 0
+		s_getreg_b32 s3, hwreg(HW_REG_IB_STS)
+		s_and_b32 s4, s3, 15
+		s_lshr_b32 s3, s3, 18
+		s_and_b32 s3, s3, 48
+		s_or_b32 s3, s4, s3
+		s_cmp_lg_u32 s3, 0
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_3
 .Lgfx950_persistent_f16_gemm.loop_head_2:
 		s_sleep 1
-		s_getreg_b32 s2, hwreg(HW_REG_IB_STS)
-		s_and_b32 s3, s2, 15
-		s_lshr_b32 s2, s2, 18
-		s_and_b32 s2, s2, 48
-		s_or_b32 s2, s3, s2
-		s_cmp_lg_u32 s2, 0
+		s_getreg_b32 s3, hwreg(HW_REG_IB_STS)
+		s_and_b32 s4, s3, 15
+		s_lshr_b32 s3, s3, 18
+		s_and_b32 s3, s3, 48
+		s_or_b32 s3, s4, s3
+		s_cmp_lg_u32 s3, 0
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_2
 .Lgfx950_persistent_f16_gemm.loop_exit_2:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_3
 .Lgfx950_persistent_f16_gemm.if_else_3:
 .Lgfx950_persistent_f16_gemm.if_end_3:
 		s_add_i32 m0, s11, 0x400
-		s_add_i32 s2, s11, 0x10000
+		s_add_i32 s3, s11, 0x8000
 		buffer_load_dwordx4 v8, s[16:19], 0 offen lds
-		s_and_b32 s3, s0, 1
-		s_add_i32 m0, m0, 0x8000
-		s_lshl_b32 s4, s0, 4
+		s_add_i32 s4, s2, 4
+		s_add_i32 m0, m0, 0x10000
+		s_add_i32 s2, s2, 0x20000
 		buffer_load_dwordx4 v9, s[20:23], 0 offen lds
-		s_nop 0
-		s_add_i32 m0, m0, 0xffffa000
+		s_lshl_b32 s5, s0, 4
+		s_add_i32 m0, m0, 0xffff2000
 		s_nop 0
 		buffer_load_dwordx4 v10, s[16:19], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0x8000
+		s_add_i32 m0, m0, 0x10000
 		s_nop 0
 		buffer_load_dwordx4 v11, s[20:23], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0xffffa000
+		s_add_i32 m0, m0, 0xffff2000
 		s_nop 0
 		buffer_load_dwordx4 v12, s[16:19], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0x8000
+		s_add_i32 m0, m0, 0x10000
 		s_nop 0
 		buffer_load_dwordx4 v13, s[20:23], 0 offen lds
 		s_nop 0
-		s_add_i32 m0, m0, 0xffffa000
+		s_add_i32 m0, m0, 0xffff2000
 		s_nop 0
 		buffer_load_dwordx4 v14, s[16:19], 0 offen lds
-		s_lshl_b32 s3, s3, 2
-		s_add_i32 m0, m0, 0x8000
-		s_add_i32 s5, s4, 15
+		s_add_i32 s9, s5, 15
+		s_add_i32 m0, m0, 0x10000
+		v_mov_b32_e32 v16, s2
 		buffer_load_dwordx4 v15, s[20:23], 0 offen lds
 		s_cmp_lg_u32 s6, 0
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_4
 		s_cmp_lt_u32 s0, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_5
-		s_mov_b32 s9, s4
+		s_mov_b32 s2, s5
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_5
 .Lgfx950_persistent_f16_gemm.if_else_5:
-		s_mov_b32 s9, 17
+		s_mov_b32 s2, 17
 .Lgfx950_persistent_f16_gemm.if_end_5:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_4
 .Lgfx950_persistent_f16_gemm.if_else_4:
-		s_mov_b32 s9, s1
+		s_mov_b32 s2, s1
 .Lgfx950_persistent_f16_gemm.if_end_4:
-		s_add_i32 s4, s8, s9
-		v_mov_b32_e32 v16, s4
-		s_add_i32 s3, s3, 0x20000
-		v_mov_b32_e32 v17, s3
+		s_add_i32 s2, s8, s2
+		v_mov_b32_e32 v17, s2
 		s_and_saveexec_b64 s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_else_1
 		s_waitcnt vmcnt(0)
-		ds_add_rtn_u32 v18, v17, v16
+		ds_add_rtn_u32 v18, v16, v17
 .Lgfx950_persistent_f16_gemm.exec_else_1:
 		s_andn2_b64 exec, s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_endif_1
@@ -235,15 +231,16 @@ gfx950_persistent_f16_gemm:
 .Lgfx950_persistent_f16_gemm.exec_endif_1:
 		s_mov_b64 exec, s[24:25]
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s3, v18
-		s_add_i32 s3, s3, s4
-		s_cmp_eq_u32 s3, s5
+		v_readfirstlane_b32 s5, v18
+		s_add_i32 s2, s5, s2
+		s_cmp_eq_u32 s2, s9
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_6
 		s_wakeup
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_6
 .Lgfx950_persistent_f16_gemm.if_else_6:
 .Lgfx950_persistent_f16_gemm.if_end_6:
-		s_and_b32 s11, s2, 0x1ffff
+		s_and_b32 s2, s4, 7
+		s_and_b32 s11, s3, 0xffff
 		s_add_u32 s16, s16, 0x80
 		s_addc_u32 s17, s17, 0
 		s_add_u32 s20, s20, 0x80
@@ -272,7 +269,7 @@ gfx950_persistent_f16_gemm:
 		v_bitop3_b32 v3, v1, v3, 3 bitop3:0x78
 		v_lshlrev_b32_e32 v3, 4, v3
 		v_add3_u32 v8, s4, v2, v3
-		v_add_u32_e32 v2, 0xd000, v2
+		v_add_u32_e32 v2, 0x5000, v2
 		v_add_u32_e32 v9, v2, v3
 		s_lshl_b32 s4, 1, s0
 		s_cmp_eq_u32 s0, 0
@@ -325,26 +322,25 @@ gfx950_persistent_f16_gemm:
 		v_mov_b64_e32 v[98:99], 0
 		v_mov_b64_e32 v[100:101], 0
 		v_mov_b64_e32 v[102:103], 0
-		s_cselect_b32 s5, 1, 0
+		s_mov_b32 s5, s1
+		s_cselect_b32 s8, 1, 0
 .Lgfx950_persistent_f16_gemm.loop_head_3:
-		s_lshl_b32 s8, s0, 4
-		s_add_i32 s8, s8, 15
-		s_and_b32 s11, s0, 1
-		s_lshl_b32 s11, s11, 2
-		s_add_i32 s11, s11, 0x20000
-		v_mov_b32_e32 v2, s11
+		s_lshl_b32 s11, s0, 4
+		s_add_i32 s11, s11, 15
+		s_add_i32 s16, s5, 0x20000
+		v_mov_b32_e32 v2, s16
 		ds_read_b32 v3, v2
 		s_and_saveexec_b64 s[16:17], s[14:15]
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s11, v3
-		s_cmp_lg_u32 s11, s8
+		v_readfirstlane_b32 s18, v3
+		s_cmp_lg_u32 s18, s11
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_8
 .Lgfx950_persistent_f16_gemm.loop_head_4:
 		ds_read_b32 v3, v2
 		s_sleep 1
 		s_waitcnt lgkmcnt(0)
-		v_readfirstlane_b32 s11, v3
-		s_cmp_lg_u32 s11, s8
+		v_readfirstlane_b32 s18, v3
+		s_cmp_lg_u32 s18, s11
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_4
 .Lgfx950_persistent_f16_gemm.loop_exit_4:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_8
@@ -355,32 +351,33 @@ gfx950_persistent_f16_gemm:
 		ds_read_b128 v[108:111], v8 offset:2048
 		ds_read_b128 v[112:115], v8 offset:4096
 		ds_read_b128 v[116:119], v8 offset:6144
-		ds_read_b128 v[120:123], v9
-		ds_read_b128 v[124:127], v9 offset:2048
+		v_add_u32_e32 v3, 0x10000, v9
+		ds_read_b128 v[120:123], v3
+		ds_read_b128 v[124:127], v3 offset:2048
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[104:107], v[120:123], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[32:35], v[108:111], v[120:123], v[32:35]
 		v_mfma_f32_16x16x32_f16 v[56:59], v[112:115], v[120:123], v[56:59]
 		v_mfma_f32_16x16x32_f16 v[80:83], v[116:119], v[120:123], v[80:83]
-		ds_read_b128 v[120:123], v9 offset:4096
+		ds_read_b128 v[120:123], v3 offset:4096
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[12:15], v[104:107], v[124:127], v[12:15]
 		v_mfma_f32_16x16x32_f16 v[36:39], v[108:111], v[124:127], v[36:39]
 		v_mfma_f32_16x16x32_f16 v[60:63], v[112:115], v[124:127], v[60:63]
 		v_mfma_f32_16x16x32_f16 v[84:87], v[116:119], v[124:127], v[84:87]
-		ds_read_b128 v[124:127], v9 offset:6144
+		ds_read_b128 v[124:127], v3 offset:6144
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[16:19], v[104:107], v[120:123], v[16:19]
 		v_mfma_f32_16x16x32_f16 v[40:43], v[108:111], v[120:123], v[40:43]
 		v_mfma_f32_16x16x32_f16 v[64:67], v[112:115], v[120:123], v[64:67]
 		v_mfma_f32_16x16x32_f16 v[88:91], v[116:119], v[120:123], v[88:91]
-		ds_read_b128 v[120:123], v9 offset:8192
+		ds_read_b128 v[120:123], v3 offset:8192
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[20:23], v[104:107], v[124:127], v[20:23]
 		v_mfma_f32_16x16x32_f16 v[44:47], v[108:111], v[124:127], v[44:47]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[112:115], v[124:127], v[68:71]
 		v_mfma_f32_16x16x32_f16 v[92:95], v[116:119], v[124:127], v[92:95]
-		ds_read_b128 v[124:127], v9 offset:10240
+		ds_read_b128 v[124:127], v3 offset:10240
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[24:27], v[104:107], v[120:123], v[24:27]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[108:111], v[120:123], v[48:51]
@@ -395,54 +392,54 @@ gfx950_persistent_f16_gemm:
 		ds_read_b128 v[108:111], v8 offset:3072
 		ds_read_b128 v[112:115], v8 offset:5120
 		ds_read_b128 v[116:119], v8 offset:7168
-		ds_read_b128 v[120:123], v9 offset:1024
-		ds_read_b128 v[124:127], v9 offset:3072
-		s_cmp_lg_u32 s5, 0
+		ds_read_b128 v[120:123], v3 offset:1024
+		ds_read_b128 v[124:127], v3 offset:3072
+		s_cmp_lg_u32 s8, 0
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_9
 		s_cmp_lt_u32 s0, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_10
-		s_lshl_b32 s8, s0, 12
+		s_lshl_b32 s11, s0, 12
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_10
 .Lgfx950_persistent_f16_gemm.if_else_10:
-		s_mov_b32 s8, 0x1001
+		s_mov_b32 s11, 0x1001
 .Lgfx950_persistent_f16_gemm.if_end_10:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_9
 .Lgfx950_persistent_f16_gemm.if_else_9:
-		s_mov_b32 s8, s1
+		s_mov_b32 s11, s1
 .Lgfx950_persistent_f16_gemm.if_end_9:
-		s_add_i32 s8, s4, s8
-		s_lshl_b32 s11, s0, 12
-		s_add_i32 s11, s11, 0xfff
+		s_add_i32 s11, s4, s11
+		s_lshl_b32 s16, s0, 12
+		s_add_i32 s16, s16, 0xfff
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[104:107], v[120:123], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[32:35], v[108:111], v[120:123], v[32:35]
 		v_mfma_f32_16x16x32_f16 v[56:59], v[112:115], v[120:123], v[56:59]
 		v_mfma_f32_16x16x32_f16 v[80:83], v[116:119], v[120:123], v[80:83]
-		ds_read_b128 v[120:123], v9 offset:5120
+		ds_read_b128 v[120:123], v3 offset:5120
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[12:15], v[104:107], v[124:127], v[12:15]
 		v_mfma_f32_16x16x32_f16 v[36:39], v[108:111], v[124:127], v[36:39]
 		v_mfma_f32_16x16x32_f16 v[60:63], v[112:115], v[124:127], v[60:63]
 		v_mfma_f32_16x16x32_f16 v[84:87], v[116:119], v[124:127], v[84:87]
-		ds_read_b128 v[124:127], v9 offset:7168
+		ds_read_b128 v[124:127], v3 offset:7168
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[16:19], v[104:107], v[120:123], v[16:19]
 		v_mfma_f32_16x16x32_f16 v[40:43], v[108:111], v[120:123], v[40:43]
 		v_mfma_f32_16x16x32_f16 v[64:67], v[112:115], v[120:123], v[64:67]
 		v_mfma_f32_16x16x32_f16 v[88:91], v[116:119], v[120:123], v[88:91]
-		ds_read_b128 v[120:123], v9 offset:9216
+		ds_read_b128 v[120:123], v3 offset:9216
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[20:23], v[104:107], v[124:127], v[20:23]
 		v_mfma_f32_16x16x32_f16 v[44:47], v[108:111], v[124:127], v[44:47]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[112:115], v[124:127], v[68:71]
 		v_mfma_f32_16x16x32_f16 v[92:95], v[116:119], v[124:127], v[92:95]
-		ds_read_b128 v[124:127], v9 offset:11264
+		ds_read_b128 v[124:127], v3 offset:11264
 		s_waitcnt lgkmcnt(1)
 		v_mfma_f32_16x16x32_f16 v[24:27], v[104:107], v[120:123], v[24:27]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[108:111], v[120:123], v[48:51]
 		v_mfma_f32_16x16x32_f16 v[72:75], v[112:115], v[120:123], v[72:75]
 		v_mfma_f32_16x16x32_f16 v[96:99], v[116:119], v[120:123], v[96:99]
-		v_mov_b32_e32 v3, s8
+		v_mov_b32_e32 v3, s11
 		s_and_saveexec_b64 s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_else_2
 		s_waitcnt lgkmcnt(0)
@@ -458,18 +455,20 @@ gfx950_persistent_f16_gemm:
 		v_mfma_f32_16x16x32_f16 v[52:55], v[108:111], v[124:127], v[52:55]
 		v_mfma_f32_16x16x32_f16 v[76:79], v[112:115], v[124:127], v[76:79]
 		v_mfma_f32_16x16x32_f16 v[100:103], v[116:119], v[124:127], v[100:103]
-		v_readfirstlane_b32 s16, v10
-		s_add_i32 s8, s16, s8
-		s_cmp_eq_u32 s8, s11
+		v_readfirstlane_b32 s17, v10
+		s_add_i32 s11, s17, s11
+		s_cmp_eq_u32 s11, s16
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_11
 		s_wakeup
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_11
 .Lgfx950_persistent_f16_gemm.if_else_11:
 .Lgfx950_persistent_f16_gemm.if_end_11:
-		v_add_u32_e32 v2, 0x10000, v8
-		v_and_b32_e32 v8, 0x1ffff, v2
-		v_add_u32_e32 v2, 0x10000, v9
-		v_and_b32_e32 v9, 0x1ffff, v2
+		v_add_u32_e32 v2, 0x8000, v8
+		s_add_i32 s5, s5, 4
+		v_and_b32_e32 v8, 0xffff, v2
+		s_and_b32 s5, s5, 7
+		v_add_u32_e32 v2, 0x8000, v9
+		v_and_b32_e32 v9, 0xffff, v2
 		s_add_i32 s0, s0, 1
 		s_cmp_lt_i32 s0, s3
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_3
@@ -602,10 +601,11 @@ gfx950_persistent_f16_gemm:
 		s_mov_b32 s15, 0
 		v_add_u32_e32 v2, v2, v3
 		s_mul_i32 s5, 0xffff8800, s2
-		s_mul_i32 s8, 0x2800, s0
-		s_cselect_b32 s11, 1, 0
-		s_add_i32 s5, s5, s8
-		s_mov_b32 s8, s1
+		s_cselect_b32 s8, 1, 0
+		s_add_i32 s5, s5, 0x10000
+		s_mul_i32 s11, 0x2800, s0
+		s_add_i32 s5, s5, s11
+		s_mov_b32 s11, s1
 		v_mov_b64_e32 v[12:13], 0
 		v_mov_b64_e32 v[14:15], 0
 		v_mov_b64_e32 v[16:17], 0
@@ -644,25 +644,24 @@ gfx950_persistent_f16_gemm:
 		v_mov_b64_e32 v[82:83], 0
 		v_mov_b64_e32 v[84:85], 0
 		v_mov_b64_e32 v[86:87], 0
+		s_mov_b32 s16, s1
 .Lgfx950_persistent_f16_gemm.loop_head_5:
-		s_lshl_b32 s16, s8, 4
-		s_add_i32 s16, s16, 15
-		s_and_b32 s17, s8, 1
-		s_lshl_b32 s18, s17, 2
-		s_add_i32 s18, s18, 0x20000
+		s_lshl_b32 s17, s11, 4
+		s_add_i32 s17, s17, 15
+		s_add_i32 s18, s16, 0x20000
 		v_mov_b32_e32 v3, s18
 		ds_read_b32 v9, v3
 		s_and_saveexec_b64 s[18:19], s[14:15]
 		s_waitcnt lgkmcnt(0)
 		v_readfirstlane_b32 s20, v9
-		s_cmp_lg_u32 s20, s16
+		s_cmp_lg_u32 s20, s17
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_12
 .Lgfx950_persistent_f16_gemm.loop_head_6:
 		ds_read_b32 v9, v3
 		s_sleep 1
 		s_waitcnt lgkmcnt(0)
 		v_readfirstlane_b32 s20, v9
-		s_cmp_lg_u32 s20, s16
+		s_cmp_lg_u32 s20, s17
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_6
 .Lgfx950_persistent_f16_gemm.loop_exit_6:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_12
@@ -673,19 +672,20 @@ gfx950_persistent_f16_gemm:
 		ds_read_b128 v[92:95], v8 offset:2048
 		ds_read_b128 v[96:99], v8 offset:4096
 		ds_read_b128 v[100:103], v8 offset:6144
-		s_lshl_b32 s16, s17, 16
-		s_add_i32 s16, s5, s16
-		v_add_u32_e32 v9, s16, v2
-		ds_read_b128 v[104:107], v9 offset:32768
-		ds_read_b128 v[108:111], v9 offset:34816
-		ds_read_b128 v[112:115], v9 offset:36864
-		ds_read_b128 v[116:119], v9 offset:38912
+		s_and_b32 s17, s11, 1
+		s_lshl_b32 s17, s17, 15
+		s_add_i32 s17, s5, s17
+		v_add_u32_e32 v9, s17, v2
+		ds_read_b128 v[104:107], v9
+		ds_read_b128 v[108:111], v9 offset:2048
+		ds_read_b128 v[112:115], v9 offset:4096
+		ds_read_b128 v[116:119], v9 offset:6144
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[88:91], v[104:107], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[28:31], v[92:95], v[104:107], v[28:31]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[96:99], v[104:107], v[48:51]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[100:103], v[104:107], v[68:71]
-		ds_read_b128 v[104:107], v9 offset:40960
+		ds_read_b128 v[104:107], v9 offset:8192
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[12:15], v[88:91], v[108:111], v[12:15]
 		v_mfma_f32_16x16x32_f16 v[32:35], v[92:95], v[108:111], v[32:35]
@@ -710,32 +710,32 @@ gfx950_persistent_f16_gemm:
 		ds_read_b128 v[92:95], v8 offset:3072
 		ds_read_b128 v[96:99], v8 offset:5120
 		ds_read_b128 v[100:103], v8 offset:7168
-		ds_read_b128 v[104:107], v9 offset:33792
-		ds_read_b128 v[108:111], v9 offset:35840
-		ds_read_b128 v[112:115], v9 offset:37888
-		ds_read_b128 v[116:119], v9 offset:39936
-		s_cmp_lg_u32 s11, 0
+		ds_read_b128 v[104:107], v9 offset:1024
+		ds_read_b128 v[108:111], v9 offset:3072
+		ds_read_b128 v[112:115], v9 offset:5120
+		ds_read_b128 v[116:119], v9 offset:7168
+		s_cmp_lg_u32 s8, 0
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_13
-		s_cmp_lt_u32 s8, 2
+		s_cmp_lt_u32 s11, 2
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_14
-		s_lshl_b32 s16, s8, 12
+		s_lshl_b32 s17, s11, 12
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_14
 .Lgfx950_persistent_f16_gemm.if_else_14:
-		s_mov_b32 s16, 0x1001
+		s_mov_b32 s17, 0x1001
 .Lgfx950_persistent_f16_gemm.if_end_14:
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_13
 .Lgfx950_persistent_f16_gemm.if_else_13:
-		s_mov_b32 s16, s1
+		s_mov_b32 s17, s1
 .Lgfx950_persistent_f16_gemm.if_end_13:
-		s_add_i32 s16, s4, s16
-		s_lshl_b32 s17, s8, 12
-		s_add_i32 s17, s17, 0xfff
+		s_add_i32 s17, s4, s17
+		s_lshl_b32 s18, s11, 12
+		s_add_i32 s18, s18, 0xfff
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[4:7], v[88:91], v[104:107], v[4:7]
 		v_mfma_f32_16x16x32_f16 v[28:31], v[92:95], v[104:107], v[28:31]
 		v_mfma_f32_16x16x32_f16 v[48:51], v[96:99], v[104:107], v[48:51]
 		v_mfma_f32_16x16x32_f16 v[68:71], v[100:103], v[104:107], v[68:71]
-		ds_read_b128 v[104:107], v9 offset:41984
+		ds_read_b128 v[104:107], v9 offset:9216
 		s_waitcnt lgkmcnt(3)
 		v_mfma_f32_16x16x32_f16 v[12:15], v[88:91], v[108:111], v[12:15]
 		v_mfma_f32_16x16x32_f16 v[32:35], v[92:95], v[108:111], v[32:35]
@@ -751,7 +751,7 @@ gfx950_persistent_f16_gemm:
 		v_mfma_f32_16x16x32_f16 v[20:23], v[88:91], v[116:119], v[20:23]
 		v_mfma_f32_16x16x32_f16 v[40:43], v[92:95], v[116:119], v[40:43]
 		v_mfma_f32_16x16x32_f16 v[80:83], v[100:103], v[116:119], v[80:83]
-		v_mov_b32_e32 v9, s16
+		v_mov_b32_e32 v9, s17
 		s_and_saveexec_b64 s[24:25], s[12:13]
 		s_cbranch_execz .Lgfx950_persistent_f16_gemm.exec_else_3
 		s_waitcnt lgkmcnt(0)
@@ -767,18 +767,20 @@ gfx950_persistent_f16_gemm:
 		v_mfma_f32_16x16x32_f16 v[44:47], v[92:95], v[104:107], v[44:47]
 		v_mfma_f32_16x16x32_f16 v[64:67], v[96:99], v[104:107], v[64:67]
 		v_mfma_f32_16x16x32_f16 v[84:87], v[100:103], v[104:107], v[84:87]
-		v_readfirstlane_b32 s18, v10
-		s_add_i32 s16, s18, s16
-		s_cmp_eq_u32 s16, s17
+		v_readfirstlane_b32 s19, v10
+		s_add_i32 s17, s19, s17
+		s_cmp_eq_u32 s17, s18
 		s_cbranch_scc0 .Lgfx950_persistent_f16_gemm.if_else_15
 		s_wakeup
 		s_branch .Lgfx950_persistent_f16_gemm.if_end_15
 .Lgfx950_persistent_f16_gemm.if_else_15:
 .Lgfx950_persistent_f16_gemm.if_end_15:
-		v_add_u32_e32 v3, 0x10000, v8
-		v_and_b32_e32 v8, 0x1ffff, v3
-		s_add_i32 s8, s8, 1
-		s_cmp_lt_i32 s8, s3
+		v_add_u32_e32 v3, 0x8000, v8
+		s_add_i32 s16, s16, 4
+		v_and_b32_e32 v8, 0xffff, v3
+		s_and_b32 s16, s16, 7
+		s_add_i32 s11, s11, 1
+		s_cmp_lt_i32 s11, s3
 		s_cbranch_scc1 .Lgfx950_persistent_f16_gemm.loop_head_5
 .Lgfx950_persistent_f16_gemm.loop_exit_5:
 		v_cvt_pk_f16_f32 v2, v4, v5
@@ -980,7 +982,7 @@ gfx950_persistent_f16_gemm:
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
 	.amdhsa_kernel gfx950_persistent_f16_gemm
-		.amdhsa_group_segment_fixed_size 0
+		.amdhsa_group_segment_fixed_size 131088
 		.amdhsa_private_segment_fixed_size 0
 		.amdhsa_kernarg_size 32
 		.amdhsa_user_sgpr_count 9
@@ -1039,7 +1041,7 @@ amdhsa.kernels:
         .offset:         24
         .size:           4
         .value_kind:     by_value
-    .group_segment_fixed_size: 0
+    .group_segment_fixed_size: 131088
     .kernarg_segment_align: 8
     .kernarg_segment_size: 32
     .max_flat_workgroup_size: 1024

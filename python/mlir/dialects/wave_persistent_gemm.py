@@ -55,8 +55,16 @@ class _PersistentConfig:
         return 2 * _TILES_PER_PANEL * self.dwords_per_tile
 
     @property
+    def operand_stage_dwords(self) -> int:
+        return _TILES_PER_PANEL * self.dwords_per_tile
+
+    @property
+    def operand_dwords(self) -> int:
+        return self.ring_stages * self.operand_stage_dwords
+
+    @property
     def data_dwords(self) -> int:
-        return self.ring_stages * self.dwords_per_stage
+        return 2 * self.operand_dwords
 
     @property
     def ready_dword(self) -> int:
@@ -83,6 +91,25 @@ class _PersistentConfig:
 
 _DEFAULT_CONFIG = _PersistentConfig(k_slices=1, ring_stages=3)
 LDS_BYTES = _DEFAULT_CONFIG.lds_bytes
+
+
+@dataclass(frozen=True)
+class _PersistentLds:
+    a_data: dsl.Value
+    b_data: dsl.Value
+    ready: dsl.Value
+    done: dsl.Value
+
+
+def _allocate_lds(
+    bld: dsl.FunctionBuilder, config: _PersistentConfig
+) -> _PersistentLds:
+    return _PersistentLds(
+        a_data=bld.workgroup_alloc(config.operand_dwords * 4, 16, dsl.i32()),
+        b_data=bld.workgroup_alloc(config.operand_dwords * 4, 16, dsl.i32()),
+        ready=bld.workgroup_alloc(config.ring_stages * 4, 4, dsl.i32()),
+        done=bld.workgroup_alloc(config.ring_stages * 4, 4, dsl.i32()),
+    )
 
 
 def _persistent_config(k_slices: int) -> _PersistentConfig:
@@ -164,21 +191,20 @@ def _lane_zero_mask(bld: dsl.FunctionBuilder, wi: dsl.Value) -> dsl.Value:
 
 def _mailbox_ptr(
     bld: dsl.FunctionBuilder,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     stage: dsl.Value,
     config: _PersistentConfig,
     *,
     done: bool,
 ) -> dsl.Value:
     s = dsl.sym("persistent_mailbox_stage")
-    base = config.done_dword if done else config.ready_dword
-    offset = bld.index_expr(base + s, {s: stage})
-    return bld.ptr_add(lds, offset)
+    offset = bld.index_expr(s, {s: stage})
+    return bld.ptr_add(lds.done if done else lds.ready, offset)
 
 
 def _initialize_mailboxes(
     bld: dsl.FunctionBuilder,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     wi: dsl.Value,
     config: _PersistentConfig,
 ) -> dsl.Value:
@@ -189,10 +215,11 @@ def _initialize_mailboxes(
         stores = [
             bld.store(
                 zero,
-                bld.ptr_add(lds, bld.constant(dsl.i32(), config.ready_dword + i)),
+                bld.ptr_add(base, bld.constant(dsl.i32(), i)),
                 after=root,
             )
-            for i in range(2 * config.ring_stages)
+            for base in (lds.ready, lds.done)
+            for i in range(config.ring_stages)
         ]
         bld.yield_([bld.join(*stores)])
         with active.otherwise():
@@ -412,7 +439,7 @@ def _issue_producer_slice(
     wi: dsl.Value,
     wg_m: dsl.Value,
     wg_n: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     stage: dsl.Value,
     dependency: dsl.Value,
 ) -> dsl.Value:
@@ -453,21 +480,21 @@ def _issue_producer_slice(
         s = dsl.sym(f"persistent_dma_stage_{index}_{k_slice}")
         t = dsl.sym(f"persistent_dma_tile_{index}_{k_slice}")
         a_offset = bld.index_expr(
-            s * config.dwords_per_stage
+            s * config.operand_stage_dwords
             + t * config.dwords_per_tile
             + k_slice * _DWORDS_PER_TILE,
             {s: stage, t: slot},
         )
         b_offset = bld.index_expr(
-            s * config.dwords_per_stage
-            + (_TILES_PER_PANEL + t) * config.dwords_per_tile
+            s * config.operand_stage_dwords
+            + t * config.dwords_per_tile
             + k_slice * _DWORDS_PER_TILE,
             {s: stage, t: slot},
         )
         tokens.append(
             bld.dma_load_lds(
                 a_src,
-                bld.ptr_add(lds, a_offset),
+                bld.ptr_add(lds.a_data, a_offset),
                 after=dependency,
                 bytes=16,
             )
@@ -475,7 +502,7 @@ def _issue_producer_slice(
         tokens.append(
             bld.dma_load_lds(
                 b_src,
-                bld.ptr_add(lds, b_offset),
+                bld.ptr_add(lds.b_data, b_offset),
                 after=dependency,
                 bytes=16,
             )
@@ -494,7 +521,7 @@ def _emit_producer(
     wave_id: dsl.Value,
     wg_m: dsl.Value,
     wg_n: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     startup: dsl.Value,
     lane_zero: dsl.Value,
     trip_count: dsl.Value,
@@ -554,7 +581,7 @@ def _emit_producer(
 
 def _consumer_read_ptr(
     bld: dsl.FunctionBuilder,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     config: _PersistentConfig,
     *,
     stage: dsl.Value,
@@ -570,15 +597,17 @@ def _consumer_read_ptr(
     row = dsl.mod(lane, 16)
     physical_col = dsl.floor(lane / 16)
     logical_col = dsl.xor(dsl.mod(dsl.floor(row / 2), 4), physical_col)
-    panel = _TILES_PER_PANEL if is_b else 0
     offset = (
-        s * config.dwords_per_stage
-        + (panel + t) * config.dwords_per_tile
+        s * config.operand_stage_dwords
+        + t * config.dwords_per_tile
         + k_slice * _DWORDS_PER_TILE
         + row * 16
         + logical_col * 4
     )
-    return bld.ptr_add(lds, bld.index_expr(offset, {s: stage, t: slot, w: wi}))
+    return bld.ptr_add(
+        lds.b_data if is_b else lds.a_data,
+        bld.index_expr(offset, {s: stage, t: slot, w: wi}),
+    )
 
 
 def _consumer_contribution(
@@ -613,7 +642,7 @@ def _load_consumer_b(
     stage: dsl.Value,
     k_slice: int,
     wi: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     ready: dsl.Value,
     load_type: Type,
     b_type: Type,
@@ -659,7 +688,7 @@ def _append_consumer_b(
     stage: dsl.Value,
     k_slice: int,
     wi: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     ready: dsl.Value,
     load_type: Type,
     b_type: Type,
@@ -737,7 +766,7 @@ def _consume_b_baseline(
     k_slice: int,
     publish_done: bool,
     wi: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     lane_zero: dsl.Value,
     stage: dsl.Value,
     ready: dsl.Value,
@@ -798,7 +827,7 @@ def _consume_b_pipelined(
     k_slice: int,
     publish_done: bool,
     wi: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     lane_zero: dsl.Value,
     stage: dsl.Value,
     ready: dsl.Value,
@@ -893,7 +922,7 @@ def _consume_stage(
     consumer: dsl.Value,
     row_group: dsl.Value,
     wi: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     lane_zero: dsl.Value,
     generation: dsl.Value,
     accs: list[dsl.Value],
@@ -1050,7 +1079,7 @@ def _emit_consumer_width(
     wg_m: dsl.Value,
     wg_n: dsl.Value,
     wi: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     startup: dsl.Value,
     lane_zero: dsl.Value,
     trip_count: dsl.Value,
@@ -1143,7 +1172,7 @@ def _emit_consumer(
     wave_id: dsl.Value,
     wg_m: dsl.Value,
     wg_n: dsl.Value,
-    lds: dsl.Value,
+    lds: _PersistentLds,
     startup: dsl.Value,
     lane_zero: dsl.Value,
     trip_count: dsl.Value,
@@ -1248,7 +1277,7 @@ def _emit_kernel(
         _WORKGROUP_WAVES - 1,
     )
     wg_m, wg_n = _cta_coords(bld, M, N)
-    lds = bld.shared_memory_base(dsl.i32())
+    lds = _allocate_lds(bld, config)
     lane_zero = _lane_zero_mask(bld, wi)
     startup = _initialize_mailboxes(bld, lds, wi, config)
     producer = bld.scalar_cmpi("uge", wave_id, bld.constant(dsl.i32(), _CONSUMER_WAVES))
@@ -1309,10 +1338,7 @@ def build_gfx950_persistent_f16_gemm_module(
     _validate_shape(M, N, K, poll_sleep_cycles, config)
     bld = dsl.ModuleBuilder()
     with bld:
-        attrs = {
-            "wave.dynamic_lds_size": dsl.i64_attr(config.lds_bytes),
-            "waveamdmachine.target_waves": dsl.i64_attr(4),
-        }
+        attrs = {"waveamdmachine.target_waves": dsl.i64_attr(4)}
         with (
             bld.gpu_module(GPU_MODULE_NAME) as gpu_module,
             gpu_module.kernel(
