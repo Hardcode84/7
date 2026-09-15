@@ -63,6 +63,27 @@ Good:
 
 Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome, fluff is not. Neither is acceptable.
 
+## Design documentation
+
+- Define durable semantics, invariants, ownership boundaries, and the reasons for
+  them. Keep temporary implementation state, migration history, removed features,
+  and rollout status in commit messages or issue tracking.
+- Describe the contract directly. Cut redundant statements and descriptions of
+  absent machinery, such as "there is no separate pass". Keep a negative rule
+  only when it defines a necessary semantic boundary.
+- Keep one authoritative design document per topic. Link to shared contracts;
+  do not repeat them in frontend, target, or transform docs. Those docs retain
+  only their specific syntax, mechanisms, and constraints.
+- Keep pass APIs, algorithm details, and test procedures out of semantic contracts
+  unless they explain a required invariant or tradeoff. Link to implementation,
+  conformance tests, or operational guides instead of copying their contents.
+- Keep README design navigation to a reference to the root design document.
+  Add topic links in that document, not more design summaries or links in README.
+- Before replacing a design document, write the replacement and compare both
+  versions for lost contracts. Then remove superseded text and update links.
+- Review the whole edited section for repetition and temporary state. Preserve
+  correctness distinctions; shorter text must not weaken the contract.
+
 ## FFI boundaries
 
 - **Never round-trip structural data through strings.** When a Python /
