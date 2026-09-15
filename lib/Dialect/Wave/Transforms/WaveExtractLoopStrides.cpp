@@ -379,11 +379,34 @@ expandShiftLeftExpr(BinaryOp op, StringRef stem, scf::ForOp loop,
 }
 
 static FailureOr<sym::ExprHandle>
+expandNonnegativeRemainderExpr(BinaryOp op, StringRef stem, scf::ForOp loop,
+                               sym::Store &store, DataFlowSolver &solver,
+                               ExpansionState &state, unsigned depth) {
+  std::optional<int64_t> divisor = getConstantIntValue(op.getRhs());
+  std::optional<std::pair<int64_t, int64_t>> dividend =
+      finiteSignedI64Range(solver, op.getLhs());
+  if (!divisor || *divisor <= 0 || !dividend || dividend->first < 0)
+    return bindExpandedValue(op.getResult(), stem, store, state);
+
+  FailureOr<sym::ExprHandle> lhs =
+      expandValueExpr(op.getLhs(), stem, loop, store, solver, state, depth);
+  if (failed(lhs))
+    return failure();
+  FailureOr<sym::ExprHandle> modulus = sym::composeExprInt(store, *divisor);
+  if (failed(modulus))
+    return failure();
+  return sym::composeExprBinary(store, *lhs, sym::ExprBinaryOp::Mod, *modulus);
+}
+
+static FailureOr<sym::ExprHandle>
 expandBinaryExpr(BinaryOp op, StringRef stem, scf::ForOp loop,
                  sym::Store &store, DataFlowSolver &solver,
                  ExpansionState &state, unsigned depth) {
   if (op.getKind() == BinaryKind::ShLI)
     return expandShiftLeftExpr(op, stem, loop, store, solver, state, depth);
+  if (op.getKind() == BinaryKind::RemSI || op.getKind() == BinaryKind::RemUI)
+    return expandNonnegativeRemainderExpr(op, stem, loop, store, solver, state,
+                                          depth);
   return expandOrdinaryBinaryExpr(op, stem, loop, store, solver, state, depth);
 }
 

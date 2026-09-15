@@ -403,6 +403,36 @@ func.func @extract_cyclic_offset_carry(%a: !wave.ptr<#wave.global, i32>)
 
 // -----
 
+// CHECK-LABEL: func.func @extract_proven_nonnegative_remainder_carry
+// CHECK: %[[INIT:.*]] = wave.index_expr <"0"> {{.*}}[]() : () -> index
+// CHECK: scf.for %[[IV:.*]] = {{.*}} iter_args(%[[OFF:.*]] = %[[INIT]])
+// CHECK-NOT: wave.index_expr <"4*slot">
+// CHECK: wave.ptr_add %arg0, %[[OFF]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(4 + offset, 16)"> ["offset"](%[[OFF]]) : (index) -> index
+// CHECK: scf.yield %[[NEXT]]
+func.func @extract_proven_nonnegative_remainder_carry(
+    %a: !wave.ptr<#wave.global, i32>) attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c4 = arith.constant 4 : i32
+  %c8 = arith.constant 8 : i32
+  scf.for %i = %c0 to %c8 step %c1 : i32 {
+    %bounded = wave.assume %i as "i"
+        [#wave.pred<"i >= 0">, #wave.pred<"i <= 7">] : i32
+    %slot = wave.binary remsi %bounded, %c4 : i32, i32 -> i32
+    %off = wave.index_expr <"4*slot"> ["slot"](%slot)
+        : (i32) -> index
+    %p = wave.ptr_add %a, %off
+        : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %v, %t = wave.load %p
+        : (!wave.ptr<#wave.global, i32>)
+        -> (!wave.simd<i32, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @extract_cyclic_offset_with_invariant_base
 // CHECK: %[[W:.*]] = wave.assume
 // CHECK: %[[INIT:.*]] = wave.index_expr <"65536 + 1024*w"> {{.*}}["w"](%[[W]]) : (i32) -> index

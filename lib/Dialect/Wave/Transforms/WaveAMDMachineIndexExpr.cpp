@@ -467,6 +467,10 @@ static unsigned termKindRank(TermKind kind, IndexExprAddOrder addOrder) {
 
 static bool orderedBefore(TermKind lhsKind, unsigned lhsDepth, TermKind rhsKind,
                           unsigned rhsDepth, IndexExprAddOrder addOrder) {
+  if (addOrder == IndexExprAddOrder::LoopDepthFirst && lhsDepth != rhsDepth)
+    return lhsDepth < rhsDepth;
+  if (addOrder == IndexExprAddOrder::LoopDepthFirst)
+    addOrder = IndexExprAddOrder::UniformFirst;
   unsigned lhsRank = termKindRank(lhsKind, addOrder);
   unsigned rhsRank = termKindRank(rhsKind, addOrder);
   if (lhsRank != rhsRank)
@@ -615,9 +619,10 @@ materializeAddLaneFirst(WaveAMDMachineSelector &S, sym::ExprHandle expr,
 // ADD = coeff + sum(term_coeff[i] * term[i]). Skip materializing coeff
 // when it's 0 and term_coeff[i] when it's 1.
 static FailureOr<Value>
-materializeAddUniformFirst(WaveAMDMachineSelector &S, sym::ExprHandle expr,
-                           Operation *user, const llvm::StringMap<Value> &subs,
-                           ArrayRef<sym::PredHandle> assumptions) {
+materializeAddSequential(WaveAMDMachineSelector &S, sym::ExprHandle expr,
+                         Operation *user, const llvm::StringMap<Value> &subs,
+                         ArrayRef<sym::PredHandle> assumptions,
+                         IndexExprAddOrder addOrder) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   sym::ExprHandle coeff = view.getAddConstant();
@@ -630,12 +635,11 @@ materializeAddUniformFirst(WaveAMDMachineSelector &S, sym::ExprHandle expr,
       return failure();
     acc = *seed;
   }
-  SmallVector<OrderedAddTerm, 8> terms = collectOrderedAddTerms(
-      S, expr, user, subs, IndexExprAddOrder::UniformFirst);
+  SmallVector<OrderedAddTerm, 8> terms =
+      collectOrderedAddTerms(S, expr, user, subs, addOrder);
   for (const OrderedAddTerm &ordered : terms) {
     FailureOr<Value> scaled =
-        materializeAddTerm(S, ordered.term, user, subs, assumptions,
-                           IndexExprAddOrder::UniformFirst);
+        materializeAddTerm(S, ordered.term, user, subs, assumptions, addOrder);
     if (failed(scaled))
       return failure();
     if (!acc) {
@@ -707,7 +711,7 @@ FailureOr<Value> materializeAdd(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                                           assumptions);
   if (addOrder == IndexExprAddOrder::LaneFirst)
     return materializeAddLaneFirst(S, expr, user, subs, assumptions);
-  return materializeAddUniformFirst(S, expr, user, subs, assumptions);
+  return materializeAddSequential(S, expr, user, subs, assumptions, addOrder);
 }
 
 FailureOr<Value> materializeMulFactor(WaveAMDMachineSelector &S,

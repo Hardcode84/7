@@ -2720,6 +2720,8 @@ static IndexExprAddOrder
 indexExprAddOrder(waveamdmachine::VOffsetAddOrder order) {
   if (order == waveamdmachine::VOffsetAddOrder::LaneFirst)
     return IndexExprAddOrder::LaneFirst;
+  if (order == waveamdmachine::VOffsetAddOrder::LoopDepthFirst)
+    return IndexExprAddOrder::LoopDepthFirst;
   return IndexExprAddOrder::UniformFirst;
 }
 
@@ -2901,7 +2903,10 @@ FailureOr<MaterializedLdsAddress>
 materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
                       const PointerOffset &offset,
                       const waveamdmachine::AddressFieldSpec &spec) {
-  FailureOr<AddressPlan> plan = planMemoryAddress(S, user, offset, spec);
+  waveamdmachine::AddressFieldSpec ldsSpec = spec;
+  // Accumulate shallower terms first so LICM sees a complete address.
+  ldsSpec.voffsetAddOrder = waveamdmachine::VOffsetAddOrder::LoopDepthFirst;
+  FailureOr<AddressPlan> plan = planMemoryAddress(S, user, offset, ldsSpec);
   if (failed(plan))
     return failure();
   if (plan->fullAddressRemainderExpr) {
@@ -2913,7 +2918,7 @@ materializeLdsAddress(WaveAMDMachineSelector &S, Operation *user, Value base,
     return MaterializedLdsAddress{addr, plan->instOffset};
   }
   FailureOr<WaveAMDMachineSelector::BucketedOperands> buckets =
-      materializePlanBuckets(S, user, *plan, spec);
+      materializePlanBuckets(S, user, *plan, ldsSpec);
   if (failed(buckets))
     return failure();
   Value lowAddress = buckets->voffset;
@@ -8822,7 +8827,7 @@ materializeSelectedDmaPlans(WaveAMDMachineSelector &S, waveamd::DmaLoadLdsOp op,
                             const SelectedBufferSources &pointers,
                             AddressPlan &activePlan,
                             AddressPlan &inactivePlan) {
-  if (failed(rebaseSelectedBufferPlan(S, activePlan, inactivePlan)))
+  if (failed(normalizeSelectedBufferPlans(S, activePlan, inactivePlan)))
     return failure();
   FailureOr<WaveAMDMachineSelector::BucketedOperands> active =
       materializePlanBuckets(S, op, activePlan, spec);

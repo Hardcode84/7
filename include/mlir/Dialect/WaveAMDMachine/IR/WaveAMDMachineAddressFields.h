@@ -15,7 +15,11 @@
 namespace mlir::waveamdmachine {
 
 enum class SOffsetImmPolicy : uint8_t { AnyImm, ZeroImmOnly };
-enum class VOffsetAddOrder : uint8_t { UniformFirst, LaneFirst };
+enum class VOffsetAddOrder : uint8_t {
+  UniformFirst,
+  LaneFirst,
+  LoopDepthFirst
+};
 
 /// Per-op layout for the V / S / inst-offset address fields.
 /// `voffset` is always present on a memory op, so it is not modeled

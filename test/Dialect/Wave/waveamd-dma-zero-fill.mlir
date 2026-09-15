@@ -391,15 +391,15 @@ func.func @wrapped_layout_offset_uses_i32(
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
-// Address-field selection precedes zero-fill pointer selection.  The active
-// scalar field remains an instruction soffset; only the lane field is selected
-// against the rebased OOB address.
-// CHECK-LABEL: func.func @selected_buffer_preserves_soffset
+// Select complete wrapping i32 buffer offsets, including unbounded components.
+// CHECK-LABEL: func.func @selected_buffer_folds_wrapping_soffset
 // CHECK: wave.select
-// MACHINE-LABEL: func.func @selected_buffer_preserves_soffset
-// MACHINE: %[[SELECTED:.*]] = waveamdmachine.v_cndmask_b32_tuple {{.*}} : (!waveamdmachine.reg<vgpr, 1>,
-// MACHINE: waveamdmachine.buffer_load_lds_b128 %[[SELECTED]], {{[^:]+}} : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>, !waveamdmachine.reg<sgpr, 1>,
-func.func @selected_buffer_preserves_soffset(
+// MACHINE-LABEL: func.func @selected_buffer_folds_wrapping_soffset
+// MACHINE: %[[ACTIVE:.*]] = waveamdmachine.v_add_u32
+// MACHINE: %[[ZERO:.*]] = waveamdmachine.imm 0
+// MACHINE: %[[SELECTED:.*]] = waveamdmachine.v_cndmask_b32_tuple {{.*}}, %[[ACTIVE]],
+// MACHINE: waveamdmachine.buffer_load_lds_b128 %[[SELECTED]], {{[^,]+}}, %[[ZERO]],
+func.func @selected_buffer_folds_wrapping_soffset(
     %in: !wave.ptr<#wave.global, i32>, %base: i32, %limit: i32)
     attributes {wave.kernel, wave.lds_size = 128 : i64} {
   %range = arith.constant 2147483647 : i32
@@ -410,6 +410,52 @@ func.func @selected_buffer_preserves_soffset(
       <"Mod(2*base, 1073741824) + Mod(item, 1073741824)">
       assuming [#wave.pred<"item >= 0 & -31 + item <= 0">]
       ["base", "item"](%base, %item)
+      : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+  %source = wave.ptr_add %buffer, %offset
+      : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>
+      -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+  %vlimit = wave.splat %limit : i32 -> !wave.simd<i32, 32>
+  %active = wave.cmpi ult %item, %vlimit
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.mask<32>
+  %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
+  %dependency = wave.token : !wave.mem.token
+  %token = wave.where %active {
+    %loaded = waveamd.dma_load_lds %source -> %lds after %dependency
+        {bytes = 16 : i64, zero_fill_inactive}
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>,
+           !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
+    wave.yield %loaded : !wave.mem.token
+  } : !wave.mask<32> -> !wave.mem.token
+  %complete = wave.barrier %token : (!wave.mem.token) -> !wave.mem.token
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+
+// Select complete offsets instead of compensating a common soffset.
+// MACHINE-LABEL: func.func @selected_buffer_folds_complete_offsets
+// MACHINE: waveamdmachine.v_cndmask_b32_tuple
+// MACHINE: %[[SUM:.*]] = waveamdmachine.v_add_u32
+// MACHINE: %[[ACTIVE:.*]] = waveamdmachine.v_lshlrev_b32 %[[SUM]]
+// MACHINE: %[[ZERO:.*]] = waveamdmachine.imm 0
+// MACHINE: %[[SELECTED:.*]] = waveamdmachine.v_cndmask_b32_tuple {{.*}}, %[[ACTIVE]],
+// MACHINE: waveamdmachine.buffer_load_lds_b128 %[[SELECTED]], {{[^,]+}}, %[[ZERO]],
+func.func @selected_buffer_folds_complete_offsets(
+    %in: !wave.ptr<#wave.global, i32>, %base: i32, %limit: i32)
+    attributes {wave.kernel, wave.lds_size = 128 : i64} {
+  %range = arith.constant 2147483647 : i32
+  %buffer = waveamd.make_buffer %in, %range
+      : !wave.ptr<#wave.global, i32>, i32 -> !wave.ptr<#waveamd.buffer, i32>
+  %bounded_base = wave.assume %base as "base"
+      [#wave.pred<"base >= 0">, #wave.pred<"base <= 1024">] : i32
+  %item = wave.lane_id : !wave.simd<i32, 32>
+  %offset = wave.index_expr <"base + item">
+      assuming [#wave.pred<"item >= 0 & -31 + item <= 0">]
+      ["base", "item"](%bounded_base, %item)
       : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
   %source = wave.ptr_add %buffer, %offset
       : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32>

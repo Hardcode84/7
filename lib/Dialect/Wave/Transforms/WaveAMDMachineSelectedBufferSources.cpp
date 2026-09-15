@@ -150,61 +150,22 @@ bool hasOnlyVOffsetField(const AddressPlan &plan) {
          plan.instOffset == 0;
 }
 
-static LogicalResult mergeSelectedPlanDomain(const AddressPlan &active,
-                                             AddressPlan &inactive) {
-  for (const PointerOffsetBinding &binding : active.bindings) {
-    auto existing = llvm::find_if(inactive.bindings,
-                                  [&](const PointerOffsetBinding &candidate) {
-                                    return candidate.name == binding.name;
-                                  });
-    if (existing != inactive.bindings.end()) {
-      if (existing->value != binding.value || existing->kind != binding.kind)
-        return failure();
-      continue;
-    }
-    inactive.bindings.push_back(binding);
-  }
-  for (sym::PredHandle assumption : active.assumptions)
-    if (!llvm::is_contained(inactive.assumptions, assumption))
-      inactive.assumptions.push_back(assumption);
-  return success();
-}
-
-static FailureOr<sym::ExprHandle>
-composeSelectedPlanOffset(sym::Store &store, sym::ExprHandle base,
-                          const AddressPlan &plan,
-                          sym::ExprBinaryOp operation) {
-  if (plan.soffsetExpr) {
-    FailureOr<sym::ExprHandle> result =
-        sym::composeExprBinary(store, base, operation, plan.soffsetExpr);
-    if (failed(result))
-      return failure();
-    base = *result;
-  }
-  if (plan.instOffset == 0)
-    return base;
-  FailureOr<sym::ExprHandle> inst = sym::composeExprInt(store, plan.instOffset);
-  if (failed(inst))
+static LogicalResult foldSelectedPlanIntoVOffset(WaveAMDMachineSelector &S,
+                                                 AddressPlan &plan) {
+  FailureOr<sym::ExprHandle> complete =
+      composeFoldedVOffset(S, plan, /*includeInstOffset=*/true);
+  if (failed(complete))
     return failure();
-  return sym::composeExprBinary(store, base, operation, *inst);
-}
-
-static FailureOr<sym::ExprHandle> getSelectedPlanBase(sym::Store &store,
-                                                      const AddressPlan &plan) {
-  if (plan.voffsetExpr)
-    return plan.voffsetExpr;
-  return sym::composeExprInt(store, 0);
-}
-
-static LogicalResult finishSelectedPlanRebase(WaveAMDMachineSelector &S,
-                                              sym::ExprHandle rebased,
-                                              AddressPlan &plan) {
+  if (!*complete) {
+    clearFoldedAddressFields(plan, /*includeInstOffset=*/true);
+    return success();
+  }
   FailureOr<sym::ExprHandle> modulus =
       sym::composeExprInt(S.symbolStore(), int64_t{1} << 32);
   if (failed(modulus))
     return failure();
   FailureOr<sym::ExprHandle> wrapped = sym::composeExprBinary(
-      S.symbolStore(), rebased, sym::ExprBinaryOp::Mod, *modulus);
+      S.symbolStore(), *complete, sym::ExprBinaryOp::Mod, *modulus);
   if (failed(wrapped))
     return failure();
   plan.voffsetExpr = *wrapped;
@@ -216,28 +177,11 @@ static LogicalResult finishSelectedPlanRebase(WaveAMDMachineSelector &S,
   return success();
 }
 
-LogicalResult rebaseSelectedBufferPlan(WaveAMDMachineSelector &S,
-                                       const AddressPlan &active,
-                                       AddressPlan &inactive) {
-  if (!active.soffsetExpr && active.instOffset == 0 && !inactive.soffsetExpr &&
-      inactive.instOffset == 0)
-    return success();
-  if (failed(mergeSelectedPlanDomain(active, inactive)))
-    return failure();
-
-  FailureOr<sym::ExprHandle> rebased =
-      getSelectedPlanBase(S.symbolStore(), inactive);
-  if (failed(rebased))
-    return failure();
-  FailureOr<sym::ExprHandle> withInactive = composeSelectedPlanOffset(
-      S.symbolStore(), *rebased, inactive, sym::ExprBinaryOp::Add);
-  if (failed(withInactive))
-    return failure();
-  FailureOr<sym::ExprHandle> withoutActive = composeSelectedPlanOffset(
-      S.symbolStore(), *withInactive, active, sym::ExprBinaryOp::Sub);
-  if (failed(withoutActive))
-    return failure();
-  return finishSelectedPlanRebase(S, *withoutActive, inactive);
+LogicalResult normalizeSelectedBufferPlans(WaveAMDMachineSelector &S,
+                                           AddressPlan &active,
+                                           AddressPlan &inactive) {
+  return failure(failed(foldSelectedPlanIntoVOffset(S, active)) ||
+                 failed(foldSelectedPlanIntoVOffset(S, inactive)));
 }
 
 std::optional<Value> lookupSelectedPointerVOffset(WaveAMDMachineSelector &S,

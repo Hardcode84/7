@@ -136,7 +136,7 @@ planSelectedBufferSources(WaveAMDMachineSelector &S, Operation *user, Value ptr,
     return failure();
   if (!*activePlan || !*inactivePlan)
     return std::optional<SelectedBufferSourcePlans>{};
-  if (failed(rebaseSelectedBufferPlan(S, **activePlan, **inactivePlan)))
+  if (failed(normalizeSelectedBufferPlans(S, **activePlan, **inactivePlan)))
     return failure();
   return std::optional<SelectedBufferSourcePlans>{
       SelectedBufferSourcePlans{**sources, **activePlan, **inactivePlan}};
