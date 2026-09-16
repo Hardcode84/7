@@ -1097,9 +1097,13 @@ bool InstructionScheduleModel::canSelectReadyFiller(
     const ReadyCandidateMetrics &baseline) const {
   if (readyPressureWaveCohort <= 1)
     return canSelectReadyCandidate(current, candidateThenBaseline, baseline);
+  // A candidate that reduces live SGPR pressure cannot accumulate the
+  // over-budget pressure seen at its transient peak. Other candidates can
+  // carry that pressure into later ready selections and remain inadmissible.
   if (raisesOverBudgetReadyRegisterClass(
           candidate.pressureCeiling.sgpr, candidate.pressurePeakDelta.sgpr,
-          pressureLimits.sgpr, pressureLimits.sgprAllocGranule))
+          pressureLimits.sgpr, pressureLimits.sgprAllocGranule) &&
+      candidate.pressureDelta.sgpr >= 0)
     return false;
   if (pressureLimits.vgprFamily != 0) {
     unsigned familyGranule = std::max(pressureLimits.vgprAllocGranule,
