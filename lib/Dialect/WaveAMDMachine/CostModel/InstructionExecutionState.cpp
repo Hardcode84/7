@@ -1112,9 +1112,9 @@ bool InstructionScheduleModel::canSelectReadyStallFiller(
     return false;
   if (!canSelectReadyCandidate(current, candidateThenBaseline, baseline))
     return false;
-  return issueStreams > 1 || canUseReadyVectorCandidateAgainstBaseline(
-                                 current, candidateThenBaseline, baseline,
-                                 pressureLimits);
+  return issueStreams > 1 ||
+         canUseReadyVectorCandidateAgainstBaseline(
+             current, candidateThenBaseline, baseline, pressureLimits);
 }
 
 bool InstructionScheduleModel::canSelectReadyFiller(
