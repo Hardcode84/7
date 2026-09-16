@@ -216,6 +216,10 @@ public:
   canSelectReadyFullPrefix(ReadyRegisterPressure current,
                            const ReadyCandidateMetrics &candidateThenBaseline,
                            const ReadyCandidateMetrics &baseline) const;
+  bool canSelectReadyStallFiller(
+      ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+      const ReadyCandidateMetrics &candidateThenBaseline,
+      const ReadyCandidateMetrics &baseline, bool hasReorderedPrefix) const;
   bool canSelectReadyFiller(ReadyRegisterPressure current,
                             const ReadyCandidateMetrics &candidate,
                             const ReadyCandidateMetrics &candidateThenBaseline,

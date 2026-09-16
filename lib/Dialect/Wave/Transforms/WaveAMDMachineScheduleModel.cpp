@@ -1767,13 +1767,32 @@ struct RegionScheduleSession::Impl {
 
   bool hasSafeFullPrefix(
       const llvm::BitVector &scheduled, unsigned candidate, unsigned baseline,
-      const ReadyScheduleState &state,
+      const ReadyScheduleState &state, ReadyScheduleSelectionKind kind,
+      const waveamdmachine::ReadyCandidateMetrics *candidateMetrics,
       const waveamdmachine::InstructionScheduleModel &policy) const {
     if (candidate <= baseline)
       return true;
     std::pair<waveamdmachine::ReadyCandidateMetrics,
               waveamdmachine::ReadyCandidateMetrics>
         metrics = getFullPrefixMetrics(scheduled, candidate, baseline, state);
+    // A direct stall filler must satisfy the same target-or-baseline contract
+    // over the complete reordered prefix. The region ceiling is reserved for
+    // speculative moves because it can include pressure from a disjoint part
+    // of the schedule.
+    if (kind == ReadyScheduleSelectionKind::GenericStallFiller) {
+      assert(candidateMetrics && "stall filler is missing candidate metrics");
+      bool hasReorderedPrefix = false;
+      for (int index = scheduled.find_next(baseline); index >= 0;
+           index = scheduled.find_next(index)) {
+        if (noInstructions.test(index))
+          continue;
+        hasReorderedPrefix = true;
+        break;
+      }
+      return policy.canSelectReadyStallFiller(state.pressure, *candidateMetrics,
+                                              metrics.first, metrics.second,
+                                              hasReorderedPrefix);
+    }
     return policy.canSelectReadyFullPrefix(state.pressure, metrics.first,
                                            metrics.second);
   }
@@ -1883,6 +1902,9 @@ struct RegionScheduleSession::Impl {
       const waveamdmachine::ReadyCandidateMetrics &baselineMetrics,
       const waveamdmachine::InstructionScheduleModel &policy,
       ProposalWinner &winner) {
+    // The model has identified a current stall, so evaluate this direct move
+    // against the baseline order. Ranked speculative fillers additionally use
+    // the region-wide accumulated-pressure guard in considerFillerProposal.
     if (!policy.canSelectReadyCandidate(state.pressure, candidateFirst,
                                         baselineMetrics))
       return;
@@ -1907,6 +1929,25 @@ struct RegionScheduleSession::Impl {
       return;
     setProposalWinner(proposal.candidate, candidateMetrics, /*rank=*/0, kind,
                       winner);
+  }
+
+  static void considerStallFillerProposal(
+      const ReadyScheduleProposal &proposal,
+      const waveamdmachine::ReadyCandidateMetrics &candidateMetrics,
+      const waveamdmachine::ReadyCandidateMetrics &candidateFirst,
+      const ReadyScheduleState &state,
+      const waveamdmachine::ReadyCandidateMetrics &baselineMetrics,
+      const waveamdmachine::InstructionScheduleModel &policy,
+      ProposalWinner &winner) {
+    if (!policy.canSelectReadyCandidate(state.pressure, candidateFirst,
+                                        baselineMetrics))
+      return;
+    if (winner.metrics &&
+        !policy.shouldPreferReadyFiller(state.pressure, candidateMetrics,
+                                        *winner.metrics))
+      return;
+    setProposalWinner(proposal.candidate, candidateMetrics, /*rank=*/0,
+                      ReadyScheduleSelectionKind::GenericStallFiller, winner);
   }
 
   static void considerComputeResourceProposal(
@@ -1969,9 +2010,9 @@ struct RegionScheduleSession::Impl {
           proposal, candidateMetrics, candidateFirst, state, baselineMetrics,
           policy, ReadyScheduleSelectionKind::LatencyPriority, winner);
     case ReadyScheduleProposalKind::GenericStallFiller:
-      return considerFillerProposal(
-          proposal, candidateMetrics, candidateFirst, state, baselineMetrics,
-          policy, ReadyScheduleSelectionKind::GenericStallFiller, winner);
+      return considerStallFillerProposal(proposal, candidateMetrics,
+                                         candidateFirst, state, baselineMetrics,
+                                         policy, winner);
     }
     llvm_unreachable("unknown ready proposal kind");
   }
@@ -2807,7 +2848,8 @@ ReadyScheduleDecision RegionScheduleSession::selectNext(
                                     state, baselineMetrics, policy);
   if (pressureWinner) {
     if (impl->hasSafeFullPrefix(scheduled, *pressureWinner, baseline, state,
-                                policy)) {
+                                ReadyScheduleSelectionKind::Pressure,
+                                /*candidateMetrics=*/nullptr, policy)) {
       ++impl->work.pressureSelections;
       return {*pressureWinner, /*suppressFallback=*/false,
               ReadyScheduleSelectionKind::Pressure};
@@ -2827,11 +2869,11 @@ ReadyScheduleDecision RegionScheduleSession::selectNext(
         proposals, policy);
     if (!winner.candidate)
       continue;
+    ReadyScheduleSelectionKind kind = Impl::getProposalSelectionKind(winner);
     if (impl->hasSafeFullPrefix(scheduled, *winner.candidate, baseline, state,
-                                policy)) {
+                                kind, &*winner.metrics, policy)) {
       ++impl->work.proposalSelections;
-      return {*winner.candidate, /*suppressFallback=*/false,
-              Impl::getProposalSelectionKind(winner)};
+      return {*winner.candidate, /*suppressFallback=*/false, kind};
     }
     ++impl->work.proposalRejections;
     rejectedProposalWinner = true;

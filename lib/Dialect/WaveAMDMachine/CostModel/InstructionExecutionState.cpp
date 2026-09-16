@@ -869,16 +869,10 @@ static bool canUseReadyRegisterClassAgainstOriginalCeiling(
   return candidatePressure <= ceiling;
 }
 
-static bool
-canUseReadyCandidateAgainstBaseline(ReadyRegisterPressure current,
-                                    const ReadyCandidateMetrics &candidate,
-                                    const ReadyCandidateMetrics &baseline,
-                                    const ReadyRegisterPressureLimits &limits) {
-  if (!canUseReadyRegisterClassAgainstBaseline(
-          current.sgpr, candidate.pressurePeakDelta.sgpr,
-          baseline.pressurePeakDelta.sgpr, limits.sgpr,
-          limits.sgprAllocGranule))
-    return false;
+static bool canUseReadyVectorCandidateAgainstBaseline(
+    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &baseline,
+    const ReadyRegisterPressureLimits &limits) {
   if (!canUseReadyRegisterClassAgainstBaseline(
           current.vgpr, candidate.pressurePeakDelta.vgpr,
           baseline.pressurePeakDelta.vgpr, limits.vgpr,
@@ -896,6 +890,20 @@ canUseReadyCandidateAgainstBaseline(ReadyRegisterPressure current,
         baseline.vgprFamilyPeakDelta, limits.vgprFamily, familyGranule);
   }
   return true;
+}
+
+static bool
+canUseReadyCandidateAgainstBaseline(ReadyRegisterPressure current,
+                                    const ReadyCandidateMetrics &candidate,
+                                    const ReadyCandidateMetrics &baseline,
+                                    const ReadyRegisterPressureLimits &limits) {
+  if (!canUseReadyRegisterClassAgainstBaseline(
+          current.sgpr, candidate.pressurePeakDelta.sgpr,
+          baseline.pressurePeakDelta.sgpr, limits.sgpr,
+          limits.sgprAllocGranule))
+    return false;
+  return canUseReadyVectorCandidateAgainstBaseline(current, candidate, baseline,
+                                                   limits);
 }
 
 static bool canUseReadySGPRCandidateOrder(
@@ -1089,6 +1097,24 @@ bool InstructionScheduleModel::canSelectReadyFullPrefix(
       baseline.vgprFamilyPeakDelta,
       candidateThenBaseline.pressureCeiling.vgprFamily,
       pressureLimits.vgprFamily, familyGranule);
+}
+
+bool InstructionScheduleModel::canSelectReadyStallFiller(
+    ReadyRegisterPressure current, const ReadyCandidateMetrics &candidate,
+    const ReadyCandidateMetrics &candidateThenBaseline,
+    const ReadyCandidateMetrics &baseline, bool hasReorderedPrefix) const {
+  int64_t candidateSgprPeak = current.sgpr + candidate.pressurePeakDelta.sgpr;
+  if (hasReorderedPrefix && pressureLimits.sgpr != 0 &&
+      candidateSgprPeak >
+          getReadyRegisterPressureLimit(pressureLimits.sgpr,
+                                        pressureLimits.sgprAllocGranule) &&
+      candidate.pressureDelta.sgpr > 0)
+    return false;
+  if (!canSelectReadyCandidate(current, candidateThenBaseline, baseline))
+    return false;
+  return issueStreams > 1 || canUseReadyVectorCandidateAgainstBaseline(
+                                 current, candidateThenBaseline, baseline,
+                                 pressureLimits);
 }
 
 bool InstructionScheduleModel::canSelectReadyFiller(

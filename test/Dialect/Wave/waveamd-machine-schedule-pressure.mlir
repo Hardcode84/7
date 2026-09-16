@@ -9,7 +9,7 @@ func.func @no_inst_closure_peak(
     %dep: !waveamdmachine.mem.token)
     -> (!waveamdmachine.reg<vgpr, 42>, !waveamdmachine.reg<vgpr, 1>,
         !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 2>)
-    attributes {waveamdmachine.target_waves = 2 : i64,
+    attributes {waveamdmachine.target_waves = 1 : i64,
                 waveamdmachine.vgpr_count_max = 56 : i64} {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
   %keep = waveamdmachine.v_mov_b32_tuple %zero {registers = 42 : i64}
