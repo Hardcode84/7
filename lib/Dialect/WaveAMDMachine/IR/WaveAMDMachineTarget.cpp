@@ -20,6 +20,7 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -224,12 +225,56 @@ mlir::waveamdmachine::createAMDGPUMCSubtargetInfo(Operation *op,
 
 unsigned mlir::waveamdmachine::getAMDGPULocalMemoryBankCount(
     const llvm::MCSubtargetInfo &sti) {
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  // CDNA4 and gfx12.5 expose 64 LDS banks. LLVM does not have a 64-bank
+  // subtarget feature, so its legacy 32-bank feature is not authoritative for
+  // these targets.
+  if ((isa.Major == 9 && isa.Minor == 5) || (isa.Major == 12 && isa.Minor == 5))
+    return 64;
   // MC exposes LDS bank count through feature bits only.
   if (sti.hasFeature(llvm::AMDGPU::FeatureLDSBankCount32))
     return 32;
   if (sti.hasFeature(llvm::AMDGPU::FeatureLDSBankCount16))
     return 16;
   return 0;
+}
+
+AMDGPULDSAccessTopology mlir::waveamdmachine::getAMDGPULDSAccessTopology(
+    const llvm::MCSubtargetInfo &sti, unsigned accessBits) {
+  AMDGPULDSAccessTopology topology;
+  topology.bankCount = getAMDGPULocalMemoryBankCount(sti);
+  topology.dwordsPerLane = std::max(1u, (accessBits + 31) / 32);
+
+  llvm::AMDGPU::IsaVersion isa = llvm::AMDGPU::getIsaVersion(sti.getCPU());
+  bool hasPermutedB128Read =
+      (isa.Major == 9 && isa.Minor == 5) || (isa.Major == 12 && isa.Minor == 5);
+  if (hasPermutedB128Read && accessBits == 128)
+    topology.loadLaneGrouping =
+        AMDGPULDSLoadLaneGrouping::DsReadB128CombinedQuads;
+  return topology;
+}
+
+unsigned mlir::waveamdmachine::getAMDGPULDSLanePhase(
+    const AMDGPULDSAccessTopology &topology, bool load, unsigned lane) {
+  assert(topology.bankCount && topology.dwordsPerLane);
+  if (load && topology.loadLaneGrouping ==
+                  AMDGPULDSLoadLaneGrouping::DsReadB128CombinedQuads) {
+    // Use the combined CDNA4 groups for replacement generation. This is the
+    // conservative form of Triton's {0, 1, 3, 4} load tile: quads 0, 3, 5,
+    // and 6 share one group, and quads 1, 2, 4, and 7 share the other group.
+    unsigned quarter = (lane & 31) >> 2;
+    return 2 * (lane >> 5) + (llvm::popcount(quarter) & 1);
+  }
+  if (load && topology.loadLaneGrouping ==
+                  AMDGPULDSLoadLaneGrouping::DsReadB128QuadPairs) {
+    // A conventional layout is safe to retain only if each of the four
+    // hardware quad-pair phases is conflict-free across the full wave.
+    unsigned quarter = (lane & 31) >> 2;
+    return (quarter & 3) ^ (quarter >> 2);
+  }
+  unsigned lanesPerPhase =
+      std::max(1u, topology.bankCount / topology.dwordsPerLane);
+  return lane / lanesPerPhase;
 }
 
 static std::optional<unsigned>

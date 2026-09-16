@@ -88,6 +88,20 @@ struct AMDGPUTargetCapabilities {
   bool scratchBaseForwardingHazard = false;
 };
 
+enum class AMDGPULDSLoadLaneGrouping : uint8_t {
+  Contiguous,
+  DsReadB128CombinedQuads,
+  DsReadB128QuadPairs,
+};
+
+/// The bank and lane-phase topology of one vector LDS access.
+struct AMDGPULDSAccessTopology {
+  unsigned bankCount = 0;
+  unsigned dwordsPerLane = 0;
+  AMDGPULDSLoadLaneGrouping loadLaneGrouping =
+      AMDGPULDSLoadLaneGrouping::Contiguous;
+};
+
 struct AMDGPUMmaCapabilities {
   RegClass operandBank;
   RegClass accumulatorBank;
@@ -140,6 +154,13 @@ bool isAMDGPUOpcodeAvailable(unsigned opcode,
                              const llvm::FeatureBitset &features);
 
 unsigned getAMDGPULocalMemoryBankCount(const llvm::MCSubtargetInfo &sti);
+
+AMDGPULDSAccessTopology
+getAMDGPULDSAccessTopology(const llvm::MCSubtargetInfo &sti,
+                           unsigned accessBits);
+
+unsigned getAMDGPULDSLanePhase(const AMDGPULDSAccessTopology &topology,
+                               bool load, unsigned lane);
 
 unsigned getAMDGPUAddressableAGPRs(const llvm::MCSubtargetInfo &sti);
 

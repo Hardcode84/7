@@ -557,7 +557,7 @@ module attributes {
 // -----
 
 // CHECK-LABEL: func.func @cross_wave_swizzled_gfx1250(
-// CHECK: wave.index_expr <"128 + 2*xor(8, item)">
+// CHECK: wave.index_expr <"128 + 2*xor(16, item)">
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
@@ -596,8 +596,12 @@ func.func @cross_wave_vector_select(
 // -----
 
 // CHECK-LABEL: func.func @cross_wave_permuted_bf16_packet(
+// CHECK: wave.index_expr <"8*xor(item, 4 & floor(1/16*item), 8 & floor(1/8*item))">
 // CHECK: wave.store {{.*}} : (!wave.simd<vector<8xbf16>, 64>
 // CHECK: wave.load {{.*}} -> (!wave.simd<vector<8xbf16>, 64>, !wave.mem.token)
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"
+} {
 func.func @cross_wave_permuted_bf16_packet(
     %source: !wave.simd<vector<32xbf16>, 64>)
     -> !wave.simd<vector<128xbf16>, 64>
@@ -609,6 +613,7 @@ func.func @cross_wave_permuted_bf16_packet(
       : !wave.simd<vector<32xbf16>, 64>
         -> !wave.simd<vector<128xbf16>, 64>
   return %result : !wave.simd<vector<128xbf16>, 64>
+}
 }
 
 // -----
