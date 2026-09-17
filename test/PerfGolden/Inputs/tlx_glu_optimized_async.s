@@ -1169,41 +1169,38 @@ tlx_addmm_glu_kernel_optimized_async:
 		v_lshlrev_b32_e32 v6, 13, v6
 		s_lshl_b32 s4, s5, 8
 		s_lshl_b32 s6, s37, 3
-		s_add_i32 s7, s4, s6
-		s_lshl_b32 s8, s24, 2
-		s_add_i32 s7, s7, s8
+		s_add_i32 s4, s4, s6
+		s_lshl_b32 s6, s24, 2
+		s_add_i32 s4, s4, s6
 		v_and_b32_e32 v7, 7, v42
 		v_lshlrev_b32_e32 v9, 5, v7
-		v_add3_u32 v13, s7, v36, v9
-		s_lshl_b32 s7, s5, 1
+		v_add3_u32 v13, s4, v36, v9
+		s_lshl_b32 s6, s5, 1
 		v_lshrrev_b32_e32 v14, 2, v7
-		v_add_u32_e32 v14, s7, v14
+		v_add_u32_e32 v14, s6, v14
 		v_and_b32_e32 v14, 1, v14
-		s_lshl_b32 s7, s5, 3
-		v_add_u32_e32 v18, s7, v7
+		s_lshl_b32 s6, s5, 3
+		v_add_u32_e32 v18, s6, v7
 		v_and_b32_e32 v18, 2, v18
-		s_lshl_b32 s7, s5, 5
-		s_add_i32 s9, s7, s37
-		v_lshl_add_u32 v22, v7, 2, s9
+		s_lshl_b32 s6, s5, 5
+		s_add_i32 s6, s6, s37
+		v_lshlrev_b32_e32 v22, 2, v7
+		v_add_u32_e32 v23, s6, v22
 		s_lshl_b32 s5, s5, 4
-		v_lshlrev_b32_e32 v23, 1, v7
-		v_add_u32_e32 v24, s5, v23
-		v_add3_u32 v23, s5, 1, v23
+		v_lshlrev_b32_e32 v7, 1, v7
+		v_add_u32_e32 v24, s5, v7
 		v_and_b32_e32 v24, 8, v24
-		v_bitop3_b32 v22, 4, v22, v24 bitop3:0x6a
-		v_xor_b32_e32 v22, v18, v22
-		v_bitop3_b32 v13, v13, v14, v22 bitop3:0x96
+		v_bitop3_b32 v23, 4, v23, v24 bitop3:0x6a
+		v_xor_b32_e32 v23, v18, v23
+		v_bitop3_b32 v13, v13, v14, v23 bitop3:0x96
 		v_lshl_add_u32 v13, v13, 4, v6
 		ds_read_b128 v[24:27], v13
 		s_add_i32 s4, s4, 16
-		s_add_i32 s4, s4, s6
-		s_add_i32 s4, s4, s8
 		v_add3_u32 v9, s4, v36, v9
-		s_add_i32 s4, s7, 2
-		s_add_i32 s4, s4, s37
-		v_lshl_add_u32 v7, v7, 2, s4
-		v_and_b32_e32 v22, 8, v23
-		v_bitop3_b32 v7, 4, v7, v22 bitop3:0x6a
+		v_add3_u32 v22, s6, 2, v22
+		v_add3_u32 v7, s5, 1, v7
+		v_and_b32_e32 v7, 8, v7
+		v_bitop3_b32 v7, 4, v22, v7 bitop3:0x6a
 		v_xor_b32_e32 v7, v18, v7
 		v_bitop3_b32 v7, v9, v14, v7 bitop3:0x96
 		v_lshl_add_u32 v6, v7, 4, v6

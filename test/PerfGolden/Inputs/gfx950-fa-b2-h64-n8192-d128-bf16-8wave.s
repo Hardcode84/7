@@ -417,18 +417,18 @@ flash_attention_bf16_gfx950:
 .Lflash_attention_bf16_gfx950.loop_head_0:
 		s_add_i32 s0, s8, 2
 		s_add_i32 s9, s8, 3
-		s_add_i32 s13, s8, 5
+		s_add_i32 s11, s8, 5
 		s_add_i32 s8, s8, 4
 		s_cmp_lt_u32 s0, 0x80
 		s_cselect_b32 s0, s0, 0x7f
 		s_cmp_lt_u32 s9, 0x80
 		s_cselect_b32 s9, s9, 0x7f
 		s_cmp_lt_u32 s8, 0x80
-		s_cselect_b32 s14, s8, 0x7f
-		s_cmp_lt_u32 s13, 0x80
-		s_cselect_b32 s13, s13, 0x7f
+		s_cselect_b32 s13, s8, 0x7f
+		s_cmp_lt_u32 s11, 0x80
+		s_cselect_b32 s11, s11, 0x7f
 		s_add_i32 m0, s3, 0x18c00
-		s_lshl_b32 s14, s14, 14
+		s_lshl_b32 s13, s13, 14
 		buffer_load_dwordx4 v3, s[24:27], 0 offen lds
 		s_lshl_b32 s9, s9, 14
 		s_add_i32 m0, m0, 0x2200
@@ -515,12 +515,12 @@ flash_attention_bf16_gfx950:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_mov_b32 m0, s10
-		s_add_i32 s15, s1, s0
-		v_add_u32_e32 v51, s15, v6
+		s_add_i32 s0, s1, s0
+		v_add_u32_e32 v51, s0, v6
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_cvt_pk_bf16_f32 v150, v100, v101
 		s_add_i32 m0, m0, 0x2080
-		s_add_i32 s0, s11, s0
+		s_add_i32 s0, s0, 0x80
 		v_add_u32_e32 v51, s0, v6
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[160:175], v[52:55], v[8:11], 0
@@ -727,7 +727,7 @@ flash_attention_bf16_gfx950:
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_cvt_pk_bf16_f32 v86, v53, v54
 		s_add_i32 m0, m0, 0x2080
-		s_add_i32 s0, s11, s9
+		s_add_i32 s0, s0, 0x80
 		v_add_u32_e32 v51, s0, v6
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[64:79], v[88:91], v[8:11], 0
@@ -929,12 +929,12 @@ flash_attention_bf16_gfx950:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0x8200
-		s_add_i32 s0, s1, s14
+		s_add_i32 s0, s1, s13
 		v_add_u32_e32 v51, s0, v6
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_cvt_pk_bf16_f32 v90, v53, v54
 		s_add_i32 m0, m0, 0x2080
-		s_add_i32 s0, s11, s14
+		s_add_i32 s0, s0, 0x80
 		v_add_u32_e32 v51, s0, v6
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_mfma_f32_32x32x16_bf16 v[160:175], v[60:63], v[8:11], 0
@@ -1137,11 +1137,11 @@ flash_attention_bf16_gfx950:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0xc300
-		s_lshl_b32 s0, s13, 14
-		s_add_i32 s9, s1, s0
-		v_add_u32_e32 v50, s9, v6
+		s_lshl_b32 s0, s11, 14
+		s_add_i32 s0, s1, s0
+		v_add_u32_e32 v50, s0, v6
 		buffer_load_dwordx4 v50, s[20:23], 0 offen lds
-		s_add_i32 s0, s11, s0
+		s_add_i32 s0, s0, 0x80
 		v_add_u32_e32 v50, s0, v6
 		s_add_i32 m0, m0, 0x2080
 		v_cvt_pk_bf16_f32 v90, v53, v54
@@ -1273,18 +1273,18 @@ flash_attention_bf16_gfx950:
 .Lflash_attention_bf16_gfx950.loop_head_1:
 		s_add_i32 s0, s8, 2
 		s_add_i32 s9, s8, 3
-		s_add_i32 s13, s8, 5
+		s_add_i32 s11, s8, 5
 		s_add_i32 s8, s8, 4
 		s_cmp_lt_u32 s0, 0x80
 		s_cselect_b32 s0, s0, 0x7f
 		s_cmp_lt_u32 s9, 0x80
 		s_cselect_b32 s9, s9, 0x7f
 		s_cmp_lt_u32 s8, 0x80
-		s_cselect_b32 s14, s8, 0x7f
-		s_cmp_lt_u32 s13, 0x80
-		s_cselect_b32 s13, s13, 0x7f
+		s_cselect_b32 s13, s8, 0x7f
+		s_cmp_lt_u32 s11, 0x80
+		s_cselect_b32 s11, s11, 0x7f
 		s_add_i32 m0, s3, 0x18c00
-		s_lshl_b32 s14, s14, 14
+		s_lshl_b32 s13, s13, 14
 		buffer_load_dwordx4 v3, s[24:27], 0 offen lds
 		s_lshl_b32 s9, s9, 14
 		s_add_i32 m0, m0, 0x2200
@@ -1370,9 +1370,9 @@ flash_attention_bf16_gfx950:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_mov_b32 m0, s10
-		s_add_i32 s15, s1, s0
-		v_add_u32_e32 v51, s15, v6
-		s_add_i32 s0, s11, s0
+		s_add_i32 s0, s1, s0
+		v_add_u32_e32 v51, s0, v6
+		s_add_i32 s0, s0, 0x80
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_add_u32_e32 v51, s0, v6
 		s_add_i32 m0, m0, 0x2080
@@ -1579,7 +1579,7 @@ flash_attention_bf16_gfx950:
 		s_add_i32 m0, s10, 0x4100
 		s_add_i32 s0, s1, s9
 		v_add_u32_e32 v51, s0, v6
-		s_add_i32 s0, s11, s9
+		s_add_i32 s0, s0, 0x80
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_add_u32_e32 v51, s0, v6
 		s_add_i32 m0, m0, 0x2080
@@ -1784,9 +1784,9 @@ flash_attention_bf16_gfx950:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0x8200
-		s_add_i32 s0, s1, s14
+		s_add_i32 s0, s1, s13
 		v_add_u32_e32 v51, s0, v6
-		s_add_i32 s0, s11, s14
+		s_add_i32 s0, s0, 0x80
 		buffer_load_dwordx4 v51, s[20:23], 0 offen lds
 		v_add_u32_e32 v51, s0, v6
 		s_add_i32 m0, m0, 0x2080
@@ -1993,10 +1993,10 @@ flash_attention_bf16_gfx950:
 		s_waitcnt lgkmcnt(0)
 		s_barrier
 		s_add_i32 m0, s10, 0xc300
-		s_lshl_b32 s0, s13, 14
-		s_add_i32 s9, s1, s0
-		v_add_u32_e32 v50, s9, v6
-		s_add_i32 s0, s11, s0
+		s_lshl_b32 s0, s11, 14
+		s_add_i32 s0, s1, s0
+		v_add_u32_e32 v50, s0, v6
+		s_add_i32 s0, s0, 0x80
 		buffer_load_dwordx4 v50, s[20:23], 0 offen lds
 		v_add_u32_e32 v50, s0, v6
 		s_add_i32 m0, m0, 0x2080

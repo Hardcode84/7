@@ -979,4 +979,39 @@ func.func @rational_integer_bitwise(
   return %off : index
 }
 
+// The symbolic scalar sum is materialized before the constant.
+// CHECK-LABEL: func.func @scalar_constant_after_terms
+// CHECK: %[[BASE:[^,]+]], %{{.*}} = waveamdmachine.s_add_i32 %{{.*}}, %{{.*}}
+// CHECK: %[[C:.*]] = waveamdmachine.imm 4096
+// CHECK: waveamdmachine.s_add_i32 %[[BASE]], %[[C]]
+func.func @scalar_constant_after_terms(%x_raw: i32, %y_raw: i32) -> index {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %y = wave.assume %y_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">] : i32
+  %result = wave.index_expr <"4096 + x + y"> ["x", "y"](%x, %y)
+      : (i32, i32) -> index
+  return %result : index
+}
+
+// A constant is uniform and therefore precedes lane-varying SIMD terms.
+// CHECK-LABEL: func.func @simd_constant_before_lane_terms
+// CHECK: %[[C:.*]] = waveamdmachine.imm 4096
+// CHECK: %[[FIRST:.*]] = waveamdmachine.v_add_u32 %[[C]], %{{.*}}
+// CHECK: waveamdmachine.v_add_u32 %[[FIRST]], %{{.*}}
+func.func @simd_constant_before_lane_terms(
+    %x_raw: !wave.simd<i32, 32>, %y_raw: !wave.simd<i32, 32>)
+    -> !wave.simd<index, 32> {
+  %x = wave.assume %x_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">]
+      : !wave.simd<i32, 32>
+  %y = wave.assume %y_raw as "x"
+      [#wave.pred<"x >= 0">, #wave.pred<"x <= 1023">]
+      : !wave.simd<i32, 32>
+  %result = wave.index_expr <"4096 + x + y"> ["x", "y"](%x, %y)
+      : (!wave.simd<i32, 32>, !wave.simd<i32, 32>)
+      -> !wave.simd<index, 32>
+  return %result : !wave.simd<index, 32>
+}
+
 }
