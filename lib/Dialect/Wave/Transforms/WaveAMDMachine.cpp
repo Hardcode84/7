@@ -1718,23 +1718,6 @@ static Value createWideZero(WaveAMDMachineSelector &S, Location loc) {
       .getResult();
 }
 
-static LogicalResult materializeWideLaneFirstAddConstant(
-    WaveAMDMachineSelector &S, WideMaterializationContext &context,
-    Operation *user, sym::ExprHandle coeff,
-    ArrayRef<WideSymbolBinding> bindings, bool symbolsAreUniform,
-    std::optional<Value> &uniformAcc) {
-  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
-  if (!coeffInt || *coeffInt != 0) {
-    FailureOr<Value> seed = materializeWideIndexExprNode(
-        S, context, coeff, user, bindings, symbolsAreUniform,
-        IndexExprAddOrder::LaneFirst);
-    if (failed(seed))
-      return failure();
-    appendWideAdd(S, user->getLoc(), *seed, uniformAcc);
-  }
-  return success();
-}
-
 static LogicalResult appendWideLaneFirstAddTerm(
     WaveAMDMachineSelector &S, WideMaterializationContext &context,
     Operation *user, const OrderedWideAddTerm &ordered,
@@ -1771,10 +1754,6 @@ static FailureOr<Value> materializeWideAddLaneFirst(
   sym::ExprView view(expr);
   std::optional<Value> laneAcc;
   std::optional<Value> uniformAcc;
-  if (failed(materializeWideLaneFirstAddConstant(
-          S, context, user, view.getAddConstant(), bindings, symbolsAreUniform,
-          uniformAcc)))
-    return failure();
   SmallVector<OrderedWideAddTerm, 8> terms = collectOrderedWideAddTerms(
       S, expr, user, bindings, symbolsAreUniform, IndexExprAddOrder::LaneFirst);
   for (const OrderedWideAddTerm &ordered : terms)
@@ -1782,6 +1761,16 @@ static FailureOr<Value> materializeWideAddLaneFirst(
                                           symbolsAreUniform, laneAcc,
                                           uniformAcc)))
       return failure();
+  sym::ExprHandle constant = view.getAddConstant();
+  std::optional<int64_t> constantInt = staticIntLiteral(constant);
+  if (!constantInt || *constantInt != 0) {
+    FailureOr<Value> materialized = materializeWideIndexExprNode(
+        S, context, constant, user, bindings, symbolsAreUniform,
+        IndexExprAddOrder::LaneFirst);
+    if (failed(materialized))
+      return failure();
+    appendWideAdd(S, user->getLoc(), *materialized, uniformAcc);
+  }
   return finalizeWideLaneFirstAdd(S, user->getLoc(), laneAcc, uniformAcc);
 }
 
@@ -1792,26 +1781,37 @@ static FailureOr<Value> materializeWideAddUniformFirst(
   Location loc = user->getLoc();
   sym::ExprView view(expr);
   std::optional<Value> acc;
-  sym::ExprHandle coeff = view.getAddConstant();
-  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
-  if (!coeffInt || *coeffInt != 0) {
-    FailureOr<Value> seed = materializeWideIndexExprNode(
-        S, context, coeff, user, bindings, symbolsAreUniform);
-    if (failed(seed))
-      return failure();
-    acc = *seed;
-  }
   SmallVector<OrderedWideAddTerm, 8> terms =
       collectOrderedWideAddTerms(S, expr, user, bindings, symbolsAreUniform,
                                  IndexExprAddOrder::UniformFirst);
+  sym::ExprHandle constant = view.getAddConstant();
+  std::optional<int64_t> constantInt = staticIntLiteral(constant);
+  bool hasConstant = !constantInt || *constantInt != 0;
+  bool emittedConstant = false;
+  auto appendConstant = [&]() -> LogicalResult {
+    if (!hasConstant || emittedConstant)
+      return success();
+    FailureOr<Value> materialized = materializeWideIndexExprNode(
+        S, context, constant, user, bindings, symbolsAreUniform,
+        IndexExprAddOrder::UniformFirst);
+    if (failed(materialized))
+      return failure();
+    appendWideAdd(S, loc, *materialized, acc);
+    emittedConstant = true;
+    return success();
+  };
   for (const OrderedWideAddTerm &ordered : terms) {
+    if (ordered.kind == TermKind::Lane && failed(appendConstant()))
+      return failure();
     FailureOr<Value> term = materializeWideAddTerm(
         S, context, ordered.term, user, bindings, symbolsAreUniform,
         IndexExprAddOrder::UniformFirst);
     if (failed(term))
       return failure();
-    acc = acc ? addWide(S, loc, *acc, *term) : std::optional<Value>{*term};
+    appendWideAdd(S, loc, *term, acc);
   }
+  if (failed(appendConstant()))
+    return failure();
   if (acc)
     return *acc;
   return createWideZero(S, loc);

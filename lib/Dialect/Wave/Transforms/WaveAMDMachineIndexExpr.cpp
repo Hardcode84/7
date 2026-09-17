@@ -555,21 +555,6 @@ static void appendUniformAdd(WaveAMDMachineSelector &S, Location loc,
   acc = acc ? S.addUniformBytes(loc, *acc, value) : value;
 }
 
-static LogicalResult materializeLaneFirstAddConstant(
-    WaveAMDMachineSelector &S, Operation *user, sym::ExprHandle coeff,
-    const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
-    std::optional<Value> &uniformAcc) {
-  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
-  if (!coeffInt || *coeffInt != 0) {
-    FailureOr<Value> seed = materializeIndexExprNode(
-        S, coeff, user, subs, assumptions, IndexExprAddOrder::LaneFirst);
-    if (failed(seed))
-      return failure();
-    appendUniformAdd(S, user->getLoc(), *seed, uniformAcc);
-  }
-  return success();
-}
-
 static LogicalResult appendLaneFirstAddTerm(
     WaveAMDMachineSelector &S, Operation *user, const OrderedAddTerm &ordered,
     const llvm::StringMap<Value> &subs, ArrayRef<sym::PredHandle> assumptions,
@@ -604,20 +589,46 @@ materializeAddLaneFirst(WaveAMDMachineSelector &S, sym::ExprHandle expr,
   sym::ExprView view(expr);
   std::optional<Value> laneAcc;
   std::optional<Value> uniformAcc;
-  if (failed(materializeLaneFirstAddConstant(S, user, view.getAddConstant(),
-                                             subs, assumptions, uniformAcc)))
-    return failure();
   SmallVector<OrderedAddTerm, 8> terms =
       collectOrderedAddTerms(S, expr, user, subs, IndexExprAddOrder::LaneFirst);
   for (const OrderedAddTerm &ordered : terms)
     if (failed(appendLaneFirstAddTerm(S, user, ordered, subs, assumptions,
                                       laneAcc, uniformAcc)))
       return failure();
+  sym::ExprHandle constant = view.getAddConstant();
+  std::optional<int64_t> constantInt = staticIntLiteral(constant);
+  if (!constantInt || *constantInt != 0) {
+    FailureOr<Value> materialized = materializeIndexExprNode(
+        S, constant, user, subs, assumptions, IndexExprAddOrder::LaneFirst);
+    if (failed(materialized))
+      return failure();
+    appendUniformAdd(S, user->getLoc(), *materialized, uniformAcc);
+  }
   return finalizeLaneFirstAdd(S, user->getLoc(), laneAcc, uniformAcc);
 }
 
-// ADD = coeff + sum(term_coeff[i] * term[i]). Skip materializing coeff
-// when it's 0 and term_coeff[i] when it's 1.
+static void appendSequentialAdd(WaveAMDMachineSelector &S, Location loc,
+                                Value value, std::optional<Value> &acc) {
+  if (!acc) {
+    acc = value;
+    return;
+  }
+  acc = S.isUniformValue(*acc) && S.isUniformValue(value)
+            ? S.addUniformBytes(loc, *acc, value)
+            : S.addByteOffsets(loc, *acc, value);
+}
+
+// An add constant is a uniform, loop-invariant term. Keep it after the other
+// terms in that component so CSE can share their symbolic prefix, but before
+// lane-varying or loop-carried terms.
+static bool constantPrecedes(const OrderedAddTerm &term,
+                             IndexExprAddOrder addOrder) {
+  if (addOrder == IndexExprAddOrder::UniformFirst)
+    return term.kind == TermKind::Lane;
+  assert(addOrder == IndexExprAddOrder::LoopDepthFirst);
+  return term.loopDepth != 0 || term.kind == TermKind::Lane;
+}
+
 static FailureOr<Value>
 materializeAddSequential(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                          Operation *user, const llvm::StringMap<Value> &subs,
@@ -625,31 +636,35 @@ materializeAddSequential(WaveAMDMachineSelector &S, sym::ExprHandle expr,
                          IndexExprAddOrder addOrder) {
   Location loc = user->getLoc();
   sym::ExprView view(expr);
-  sym::ExprHandle coeff = view.getAddConstant();
-  std::optional<int64_t> coeffInt = staticIntLiteral(coeff);
   std::optional<Value> acc;
-  if (!coeffInt || *coeffInt != 0) {
-    FailureOr<Value> seed =
-        materializeIndexExprNode(S, coeff, user, subs, assumptions);
-    if (failed(seed))
-      return failure();
-    acc = *seed;
-  }
   SmallVector<OrderedAddTerm, 8> terms =
       collectOrderedAddTerms(S, expr, user, subs, addOrder);
+  sym::ExprHandle constant = view.getAddConstant();
+  std::optional<int64_t> constantInt = staticIntLiteral(constant);
+  bool hasConstant = !constantInt || *constantInt != 0;
+  bool emittedConstant = false;
+  auto appendConstant = [&]() -> LogicalResult {
+    if (!hasConstant || emittedConstant)
+      return success();
+    FailureOr<Value> materialized = materializeIndexExprNode(
+        S, constant, user, subs, assumptions, addOrder);
+    if (failed(materialized))
+      return failure();
+    appendSequentialAdd(S, loc, *materialized, acc);
+    emittedConstant = true;
+    return success();
+  };
   for (const OrderedAddTerm &ordered : terms) {
+    if (constantPrecedes(ordered, addOrder) && failed(appendConstant()))
+      return failure();
     FailureOr<Value> scaled =
         materializeAddTerm(S, ordered.term, user, subs, assumptions, addOrder);
     if (failed(scaled))
       return failure();
-    if (!acc) {
-      acc = *scaled;
-    } else if (S.isUniformValue(*acc) && S.isUniformValue(*scaled)) {
-      acc = S.addUniformBytes(loc, *acc, *scaled);
-    } else {
-      acc = S.addByteOffsets(loc, *acc, *scaled);
-    }
+    appendSequentialAdd(S, loc, *scaled, acc);
   }
+  if (failed(appendConstant()))
+    return failure();
   return acc ? *acc : createImm(S.builder, loc, 0);
 }
 
