@@ -91,7 +91,6 @@ struct AMDGPUTargetCapabilities {
 enum class AMDGPULDSLoadLaneGrouping : uint8_t {
   Contiguous,
   DsReadB128CombinedQuads,
-  DsReadB128QuadPairs,
 };
 
 /// The bank and lane-phase topology of one vector LDS access.

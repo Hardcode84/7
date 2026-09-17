@@ -432,11 +432,13 @@ static ScoredLayout selectItemXorLayout(
     const PacketPlan &packet, const GroupWindow &window, int64_t waveWidth,
     int64_t elementBits, const ScratchAccessShape &shape,
     const waveamdmachine::AMDGPULDSAccessTopology &topology, unsigned itemBits,
-    ScratchLayoutWorkBudget &budget, ScoredLayout best) {
+    ScratchLayoutWorkBudget &budget, ScoredLayout best,
+    bool preferWidePeriod = false) {
   bool improved = true;
   while (improved) {
     improved = false;
     ScoredLayout iterationBest = best;
+    std::optional<std::pair<unsigned, unsigned>> iterationXor;
     for (unsigned sourceBit = 1; sourceBit < itemBits; ++sourceBit)
       for (unsigned targetBit = 0; targetBit < sourceBit; ++targetBit) {
         std::pair<unsigned, unsigned> itemXor{sourceBit, targetBit};
@@ -450,11 +452,22 @@ static ScoredLayout selectItemXorLayout(
             scoreScratchLayout(candidate, op, pattern, packet, window,
                                waveWidth, elementBits, shape, topology);
         ScoredLayout scored{candidate, conflicts};
-        if (isBetter(scored, iterationBest)) {
+        // For the same conflict reduction, prefer the least disruptive
+        // permutation: change addresses at the widest period, then move them
+        // by the smallest distance.
+        std::pair<unsigned, unsigned> candidateXor{sourceBit, targetBit};
+        bool betterTie =
+            preferWidePeriod && conflicts == iterationBest.conflicts &&
+            conflicts < best.conflicts &&
+            (!iterationXor || candidateXor.first > iterationXor->first ||
+             (candidateXor.first == iterationXor->first &&
+              candidateXor.second < iterationXor->second));
+        if (isBetter(scored, iterationBest) || betterTie) {
           iterationBest = std::move(scored);
-          improved = true;
+          iterationXor = candidateXor;
         }
       }
+    improved = iterationBest.conflicts < best.conflicts;
     best = std::move(iterationBest);
   }
   return best;
@@ -464,25 +477,6 @@ static FailureOr<sym::ExprHandle>
 composeItemXors(sym::Store &store, sym::ExprHandle item,
                 const ScratchPhysicalLayout &layout) {
   sym::ExprHandle physical = item;
-  if (!layout.compactItemXors) {
-    for (auto [sourceBit, targetBit] : layout.itemXors) {
-      FailureOr<sym::ExprHandle> bit =
-          floorDiv(store, item, int64_t{1} << sourceBit);
-      if (succeeded(bit))
-        bit = composeWithInt(store, *bit, sym::ExprBinaryOp::Mod, 2);
-      if (succeeded(bit) && targetBit)
-        bit = composeWithInt(store, *bit, sym::ExprBinaryOp::Mul,
-                             int64_t{1} << targetBit);
-      if (failed(bit))
-        return failure();
-      FailureOr<sym::ExprHandle> swizzled =
-          sym::composeExprBinary(store, physical, sym::ExprBinaryOp::Xor, *bit);
-      if (failed(swizzled))
-        return failure();
-      physical = *swizzled;
-    }
-    return physical;
-  }
   std::map<unsigned, int64_t> masksByShift;
   for (auto [sourceBit, targetBit] : layout.itemXors) {
     assert(sourceBit > targetBit && "item XOR must move a higher bit down");
@@ -534,9 +528,9 @@ FailureOr<ScratchPhysicalLayout> mlir::wave::selectScratchPhysicalLayout(
       waveamdmachine::AMDGPULDSLoadLaneGrouping::Contiguous;
   if (targetSpecificGrouping) {
     // First reconstruct the conventional 32-bank layout. CDNA4 issues a B128
-    // read in four quad-pair phases across the full wave. Preserve the layout
-    // only when every phase is conflict-free. Otherwise, use the conservative
-    // combined-quad topology below to find a replacement.
+    // read in four phases across the full wave. Preserve the layout only when
+    // it is conflict-free under that target topology. Otherwise, keep it as a
+    // candidate while finding a replacement under the same topology.
     waveamdmachine::AMDGPULDSAccessTopology contiguousTopology{
         32, prepared.topology.dwordsPerLane,
         waveamdmachine::AMDGPULDSLoadLaneGrouping::Contiguous};
@@ -552,32 +546,17 @@ FailureOr<ScratchPhysicalLayout> mlir::wave::selectScratchPhysicalLayout(
     contiguous =
         selectItemXorLayout(op, prepared.pattern, packet, window, waveWidth,
                             elementBits, prepared.shape, contiguousTopology,
-                            itemBits, contiguousBudget, std::move(contiguous));
-    waveamdmachine::AMDGPULDSAccessTopology preservationTopology =
-        prepared.topology;
-    preservationTopology.loadLaneGrouping =
-        waveamdmachine::AMDGPULDSLoadLaneGrouping::DsReadB128QuadPairs;
+                            itemBits, contiguousBudget, std::move(contiguous),
+                            true);
     ScoredLayout targetScored{
         contiguous.layout,
         scoreScratchLayout(contiguous.layout, op, prepared.pattern, packet,
                            window, waveWidth, elementBits, prepared.shape,
-                           preservationTopology)};
+                           prepared.topology)};
     if (targetScored.conflicts == 0)
       return std::move(targetScored.layout);
-
-    // Keep the conventional layout in the replacement search, but compare it
-    // with other candidates only after scoring it under the replacement
-    // topology. The preservation and replacement scores model different lane
-    // groupings and are not comparable.
-    if (budget.consumeScore()) {
-      ScoredLayout replacementScored{
-          contiguous.layout,
-          scoreScratchLayout(contiguous.layout, op, prepared.pattern, packet,
-                             window, waveWidth, elementBits, prepared.shape,
-                             prepared.topology)};
-      if (isBetter(replacementScored, best))
-        best = std::move(replacementScored);
-    }
+    if (isBetter(targetScored, best))
+      best = std::move(targetScored);
   }
 
   best = selectPhaseLayout(op, prepared.pattern, packet, window, waveWidth,
@@ -585,12 +564,8 @@ FailureOr<ScratchPhysicalLayout> mlir::wave::selectScratchPhysicalLayout(
                            groupBits, itemBits, budget, std::move(best));
   best = selectItemXorLayout(op, prepared.pattern, packet, window, waveWidth,
                              elementBits, prepared.shape, prepared.topology,
-                             itemBits, budget, std::move(best));
-  // Topology-selected layouts can need several XORs to remove conflicts.
-  // Combine equal-distance bit moves so the replacement does not add a serial
-  // address operation for each moved bit. Keep the established expression
-  // tree when the conventional layout is already conflict-free.
-  best.layout.compactItemXors = targetSpecificGrouping;
+                             itemBits, budget, std::move(best),
+                             targetSpecificGrouping);
   return std::move(best.layout);
 }
 

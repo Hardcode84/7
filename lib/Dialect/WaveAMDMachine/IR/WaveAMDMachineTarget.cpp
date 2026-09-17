@@ -265,13 +265,6 @@ unsigned mlir::waveamdmachine::getAMDGPULDSLanePhase(
     unsigned quarter = (lane & 31) >> 2;
     return 2 * (lane >> 5) + (llvm::popcount(quarter) & 1);
   }
-  if (load && topology.loadLaneGrouping ==
-                  AMDGPULDSLoadLaneGrouping::DsReadB128QuadPairs) {
-    // A conventional layout is safe to retain only if each of the four
-    // hardware quad-pair phases is conflict-free across the full wave.
-    unsigned quarter = (lane & 31) >> 2;
-    return (quarter & 3) ^ (quarter >> 2);
-  }
   unsigned lanesPerPhase =
       std::max(1u, topology.bankCount / topology.dwordsPerLane);
   return lane / lanesPerPhase;

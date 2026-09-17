@@ -33,7 +33,6 @@ struct GroupWindow {
 struct ScratchPhysicalLayout {
   SmallVector<std::pair<unsigned, unsigned>, 4> itemXors;
   int64_t groupShift = 0, phaseBits = 0, itemShift = 0;
-  bool compactItemXors = false;
 };
 
 int64_t packedToLogicalSlot(uint64_t withinMask, int64_t slots,

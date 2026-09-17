@@ -556,6 +556,30 @@ module attributes {
 
 // -----
 
+// Lanes 0 and 24 load distinct words from bank 0 in the same gfx950
+// ds_read_b128 phase when the physical layout is the identity. The target
+// topology therefore requires a non-identity item XOR.
+// CHECK-LABEL: func.func @cross_wave_gfx950_b128_phase_conflict(
+// CHECK: wave.index_expr <"4*xor(item, 8 & floor(1/8*item))">
+module attributes {
+  waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"
+} {
+  func.func @cross_wave_gfx950_b128_phase_conflict(
+      %source: !wave.simd<vector<4xf32>, 64>)
+      -> !wave.simd<vector<4xf32>, 64>
+      attributes {wave.workgroup_size = array<i32: 128, 1, 1>} {
+    %result = wave.redistribute %source,
+        <blocks = 1, items = 128, source_block = "block",
+         source_item = "xor(item, 72*Mod(floor(item/8) + floor(item/64), 2))",
+         source_slot = "slot">
+        : !wave.simd<vector<4xf32>, 64>
+          -> !wave.simd<vector<4xf32>, 64>
+    return %result : !wave.simd<vector<4xf32>, 64>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @cross_wave_swizzled_gfx1250(
 // CHECK: wave.index_expr <"128 + 2*xor(16, item)">
 module attributes {
