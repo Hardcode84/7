@@ -21,6 +21,7 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -76,24 +77,19 @@ floorDiv(sym::Store &store, sym::ExprHandle value, int64_t divisor) {
   return sym::composeExprFloor(store, *divided);
 }
 
-static FailureOr<int64_t> getSharedMemoryBankCount(Operation *op) {
+static FailureOr<waveamdmachine::AMDGPULDSAccessTopology>
+getSharedMemoryAccessTopology(Operation *op, unsigned accessBits) {
   ModuleOp targetModule = waveamdmachine::findAMDGPUTargetModule(op);
   if (!targetModule)
-    return 32;
+    return waveamdmachine::AMDGPULDSAccessTopology{
+        32, std::max(1u, (accessBits + 31) / 32),
+        waveamdmachine::AMDGPULDSLoadLaneGrouping::Contiguous};
   FailureOr<std::unique_ptr<llvm::MCSubtargetInfo>> subtarget =
       waveamdmachine::createAMDGPUMCSubtargetInfo(
           op, "wave-lower-redistribute layout planning");
   if (failed(subtarget))
     return failure();
-  if (std::optional<waveamdmachine::AMDGPUTargetCapabilities> capabilities =
-          waveamdmachine::getAMDGPUTargetCapabilities(**subtarget))
-    return capabilities->localMemoryBankCount;
-  FailureOr<llvm::AMDGPU::IsaVersion> isa =
-      waveamdmachine::getAMDGPUTargetIsaVersion(
-          op, "wave-lower-redistribute layout planning");
-  if (failed(isa))
-    return failure();
-  return isa->Major == 9 && isa->Minor == 5 ? 64 : 32;
+  return waveamdmachine::getAMDGPULDSAccessTopology(**subtarget, accessBits);
 }
 
 struct ScratchLoadPoint {
@@ -210,7 +206,6 @@ struct ScratchLayoutWorkBudget {
 
 struct ScratchAccessShape {
   int64_t vectorBits;
-  int64_t dwords;
   uint64_t workPerScore;
 };
 
@@ -229,7 +224,7 @@ getScratchAccessShape(uint64_t points, const PacketPlan &packet,
   uint64_t unsignedDwords = static_cast<uint64_t>(dwords);
   if (points > std::numeric_limits<uint64_t>::max() / unsignedDwords)
     return std::nullopt;
-  return ScratchAccessShape{*vectorBits, dwords, points * unsignedDwords};
+  return ScratchAccessShape{*vectorBits, points * unsignedDwords};
 }
 
 static std::optional<ScratchAccessShape>
@@ -250,7 +245,7 @@ getScratchLayoutShape(RedistributeOp op, const PacketPlan &packet,
 struct ScratchLayoutInputs {
   ScratchAccessPattern pattern;
   ScratchAccessShape shape;
-  int64_t banks;
+  waveamdmachine::AMDGPULDSAccessTopology topology;
 };
 
 static FailureOr<std::optional<ScratchLayoutInputs>> buildScratchLayoutInputs(
@@ -262,15 +257,16 @@ static FailureOr<std::optional<ScratchLayoutInputs>> buildScratchLayoutInputs(
     return std::optional<ScratchLayoutInputs>{};
   FailureOr<ScratchAccessPattern> pattern =
       buildScratchAccessPattern(store, op, carrier, packet, window);
-  FailureOr<int64_t> banks = getSharedMemoryBankCount(op);
-  if (failed(pattern) || failed(banks))
+  FailureOr<waveamdmachine::AMDGPULDSAccessTopology> topology =
+      getSharedMemoryAccessTopology(op, shape->vectorBits);
+  if (failed(pattern) || failed(topology))
     return failure();
-  if (*banks <= 0) {
+  if (!topology->bankCount) {
     op.emitOpError("target reports no LDS banks");
     return failure();
   }
   return std::optional<ScratchLayoutInputs>{
-      ScratchLayoutInputs{std::move(*pattern), std::move(*shape), *banks}};
+      ScratchLayoutInputs{std::move(*pattern), std::move(*shape), *topology}};
 }
 
 static int64_t physicalItem(const ScratchPhysicalLayout &layout, int64_t item,
@@ -295,21 +291,27 @@ static int64_t physicalVectorAddress(const ScratchPhysicalLayout &layout,
 
 enum class ScratchAccessKind { Load, Store };
 
-static int64_t scoreScratchBankAccesses(ArrayRef<int64_t> addresses,
-                                        int64_t elementBits, int64_t banks,
-                                        const ScratchAccessShape &shape,
-                                        ScratchAccessKind kind) {
-  int64_t phaseLanes = std::max<int64_t>(1, banks / shape.dwords);
+static int64_t scoreScratchBankAccesses(
+    ArrayRef<int64_t> addresses, int64_t elementBits,
+    const ScratchAccessShape &shape, ScratchAccessKind kind,
+    const waveamdmachine::AMDGPULDSAccessTopology &topology) {
+  bool load = kind == ScratchAccessKind::Load;
+  int64_t banks = topology.bankCount;
+  unsigned phases = 0;
+  for (unsigned lane = 0; lane < addresses.size(); ++lane)
+    phases = std::max(
+        phases,
+        waveamdmachine::getAMDGPULDSLanePhase(topology, load, lane) + 1);
   int64_t score = 0;
-  for (int64_t start = 0; start < static_cast<int64_t>(addresses.size());
-       start += phaseLanes) {
+  for (unsigned phase = 0; phase < phases; ++phase) {
     // Loads of one dword broadcast even when lanes select different B8/B16
     // subwords. Stores do not: contiguous B8 addresses 0..3 contribute four
     // uses of bank 0 (cost 3), and B16 addresses 0..1 contribute two (cost 1).
     DenseSet<int64_t> loadedWords;
     SmallVector<int64_t, 64> bankUse(banks, 0);
-    int64_t end = std::min<int64_t>(start + phaseLanes, addresses.size());
-    for (int64_t address : addresses.slice(start, end - start)) {
+    for (auto [lane, address] : llvm::enumerate(addresses)) {
+      if (waveamdmachine::getAMDGPULDSLanePhase(topology, load, lane) != phase)
+        continue;
       int64_t firstBit = address * elementBits;
       int64_t firstWord = firstBit / 32;
       int64_t lastWord = (firstBit + shape.vectorBits - 1) / 32;
@@ -322,11 +324,12 @@ static int64_t scoreScratchBankAccesses(ArrayRef<int64_t> addresses,
   return score;
 }
 
-static int64_t scoreStoreLayout(const ScratchPhysicalLayout &layout,
-                                RedistributeOp op, const PacketPlan &packet,
-                                const GroupWindow &window, int64_t waveWidth,
-                                int64_t elementBits, int64_t banks,
-                                const ScratchAccessShape &shape) {
+static int64_t
+scoreStoreLayout(const ScratchPhysicalLayout &layout, RedistributeOp op,
+                 const PacketPlan &packet, const GroupWindow &window,
+                 int64_t waveWidth, int64_t elementBits,
+                 const ScratchAccessShape &shape,
+                 const waveamdmachine::AMDGPULDSAccessTopology &topology) {
   int64_t items = op.getRelation().getItems();
   int64_t score = 0;
   for (int64_t block : llvm::seq<int64_t>(0, op.getRelation().getBlocks())) {
@@ -340,19 +343,20 @@ static int64_t scoreStoreLayout(const ScratchPhysicalLayout &layout,
         for (int64_t lane : llvm::seq<int64_t>(0, lanes))
           addresses.push_back(physicalVectorAddress(
               layout, items, packet.vectorElements, wave + lane, localGroup));
-        score += scoreScratchBankAccesses(addresses, elementBits, banks, shape,
-                                          ScratchAccessKind::Store);
+        score += scoreScratchBankAccesses(addresses, elementBits, shape,
+                                          ScratchAccessKind::Store, topology);
       }
     }
   }
   return score;
 }
 
-static int64_t scoreLoadLayout(const ScratchPhysicalLayout &layout,
-                               const ScratchAccessPattern &pattern,
-                               const PacketPlan &packet, int64_t waveWidth,
-                               int64_t elementBits, int64_t banks,
-                               const ScratchAccessShape &shape) {
+static int64_t
+scoreLoadLayout(const ScratchPhysicalLayout &layout,
+                const ScratchAccessPattern &pattern, const PacketPlan &packet,
+                int64_t waveWidth, int64_t elementBits,
+                const ScratchAccessShape &shape,
+                const waveamdmachine::AMDGPULDSAccessTopology &topology) {
   int64_t score = 0;
   for (int64_t block : llvm::seq<int64_t>(0, pattern.blocks))
     for (int64_t group : llvm::seq<int64_t>(0, pattern.resultGroups))
@@ -367,23 +371,23 @@ static int64_t scoreLoadLayout(const ScratchPhysicalLayout &layout,
               layout, pattern.items, packet.vectorElements, point.item,
               point.localGroup));
         }
-        score += scoreScratchBankAccesses(addresses, elementBits, banks, shape,
-                                          ScratchAccessKind::Load);
+        score += scoreScratchBankAccesses(addresses, elementBits, shape,
+                                          ScratchAccessKind::Load, topology);
       }
   return score;
 }
 
-static int64_t scoreScratchLayout(const ScratchPhysicalLayout &layout,
-                                  RedistributeOp op,
-                                  const ScratchAccessPattern &pattern,
-                                  const PacketPlan &packet,
-                                  const GroupWindow &window, int64_t waveWidth,
-                                  int64_t elementBits, int64_t banks,
-                                  const ScratchAccessShape &shape) {
+static int64_t
+scoreScratchLayout(const ScratchPhysicalLayout &layout, RedistributeOp op,
+                   const ScratchAccessPattern &pattern,
+                   const PacketPlan &packet, const GroupWindow &window,
+                   int64_t waveWidth, int64_t elementBits,
+                   const ScratchAccessShape &shape,
+                   const waveamdmachine::AMDGPULDSAccessTopology &topology) {
   return scoreStoreLayout(layout, op, packet, window, waveWidth, elementBits,
-                          banks, shape) +
-         scoreLoadLayout(layout, pattern, packet, waveWidth, elementBits, banks,
-                         shape);
+                          shape, topology) +
+         scoreLoadLayout(layout, pattern, packet, waveWidth, elementBits, shape,
+                         topology);
 }
 
 struct ScoredLayout {
@@ -391,13 +395,16 @@ struct ScoredLayout {
   int64_t conflicts;
 };
 
-static ScoredLayout
-selectPhaseLayout(RedistributeOp op, const ScratchAccessPattern &pattern,
-                  const PacketPlan &packet, const GroupWindow &window,
-                  int64_t waveWidth, int64_t elementBits, int64_t banks,
-                  const ScratchAccessShape &shape, unsigned groupBits,
-                  unsigned itemBits, ScratchLayoutWorkBudget &budget,
-                  ScoredLayout best) {
+static bool isBetter(const ScoredLayout &candidate, const ScoredLayout &best) {
+  return candidate.conflicts < best.conflicts;
+}
+
+static ScoredLayout selectPhaseLayout(
+    RedistributeOp op, const ScratchAccessPattern &pattern,
+    const PacketPlan &packet, const GroupWindow &window, int64_t waveWidth,
+    int64_t elementBits, const ScratchAccessShape &shape,
+    const waveamdmachine::AMDGPULDSAccessTopology &topology, unsigned groupBits,
+    unsigned itemBits, ScratchLayoutWorkBudget &budget, ScoredLayout best) {
   for (unsigned groupShift = 0; groupShift < groupBits; ++groupShift) {
     unsigned maxPhaseBits = std::min(groupBits - groupShift, itemBits);
     for (unsigned phaseBits = 1; phaseBits <= maxPhaseBits; ++phaseBits)
@@ -411,24 +418,37 @@ selectPhaseLayout(RedistributeOp op, const ScratchAccessPattern &pattern,
           return best;
         int64_t conflicts =
             scoreScratchLayout(candidate, op, pattern, packet, window,
-                               waveWidth, elementBits, banks, shape);
-        if (conflicts < best.conflicts)
-          best = ScoredLayout{std::move(candidate), conflicts};
+                               waveWidth, elementBits, shape, topology);
+        ScoredLayout scored{candidate, conflicts};
+        if (isBetter(scored, best))
+          best = std::move(scored);
       }
   }
   return best;
 }
 
+static bool prefersItemXor(std::pair<unsigned, unsigned> candidate,
+                           std::optional<std::pair<unsigned, unsigned>> best,
+                           int64_t conflicts, int64_t iterationConflicts,
+                           int64_t baselineConflicts) {
+  return conflicts == iterationConflicts && conflicts < baselineConflicts &&
+         (!best || candidate.first > best->first ||
+          (candidate.first == best->first && candidate.second < best->second));
+}
+
 static ScoredLayout
 selectItemXorLayout(RedistributeOp op, const ScratchAccessPattern &pattern,
                     const PacketPlan &packet, const GroupWindow &window,
-                    int64_t waveWidth, int64_t elementBits, int64_t banks,
-                    const ScratchAccessShape &shape, unsigned itemBits,
-                    ScratchLayoutWorkBudget &budget, ScoredLayout best) {
+                    int64_t waveWidth, int64_t elementBits,
+                    const ScratchAccessShape &shape,
+                    const waveamdmachine::AMDGPULDSAccessTopology &topology,
+                    unsigned itemBits, ScratchLayoutWorkBudget &budget,
+                    ScoredLayout best, bool preferWidePeriod = false) {
   bool improved = true;
   while (improved) {
     improved = false;
     ScoredLayout iterationBest = best;
+    std::optional<std::pair<unsigned, unsigned>> iterationXor;
     for (unsigned sourceBit = 1; sourceBit < itemBits; ++sourceBit)
       for (unsigned targetBit = 0; targetBit < sourceBit; ++targetBit) {
         std::pair<unsigned, unsigned> itemXor{sourceBit, targetBit};
@@ -440,12 +460,20 @@ selectItemXorLayout(RedistributeOp op, const ScratchAccessPattern &pattern,
           return iterationBest;
         int64_t conflicts =
             scoreScratchLayout(candidate, op, pattern, packet, window,
-                               waveWidth, elementBits, banks, shape);
-        if (conflicts < iterationBest.conflicts) {
-          iterationBest = ScoredLayout{std::move(candidate), conflicts};
-          improved = true;
+                               waveWidth, elementBits, shape, topology);
+        ScoredLayout scored{candidate, conflicts};
+        // Equal improvement: prefer widest period, then smallest displacement.
+        std::pair<unsigned, unsigned> candidateXor{sourceBit, targetBit};
+        bool betterTie =
+            preferWidePeriod &&
+            prefersItemXor(candidateXor, iterationXor, conflicts,
+                           iterationBest.conflicts, best.conflicts);
+        if (isBetter(scored, iterationBest) || betterTie) {
+          iterationBest = std::move(scored);
+          iterationXor = candidateXor;
         }
       }
+    improved = iterationBest.conflicts < best.conflicts;
     best = std::move(iterationBest);
   }
   return best;
@@ -455,18 +483,20 @@ static FailureOr<sym::ExprHandle>
 composeItemXors(sym::Store &store, sym::ExprHandle item,
                 const ScratchPhysicalLayout &layout) {
   sym::ExprHandle physical = item;
+  std::map<unsigned, int64_t> masksByShift;
   for (auto [sourceBit, targetBit] : layout.itemXors) {
-    FailureOr<sym::ExprHandle> bit =
-        floorDiv(store, item, int64_t{1} << sourceBit);
-    if (succeeded(bit))
-      bit = composeWithInt(store, *bit, sym::ExprBinaryOp::Mod, 2);
-    if (succeeded(bit) && targetBit)
-      bit = composeWithInt(store, *bit, sym::ExprBinaryOp::Mul,
-                           int64_t{1} << targetBit);
-    if (failed(bit))
+    assert(sourceBit > targetBit && "item XOR must move a higher bit down");
+    masksByShift[sourceBit - targetBit] |= int64_t{1} << targetBit;
+  }
+  for (auto [shift, mask] : masksByShift) {
+    FailureOr<sym::ExprHandle> bits =
+        floorDiv(store, item, int64_t{1} << shift);
+    if (succeeded(bits))
+      bits = composeWithInt(store, *bits, sym::ExprBinaryOp::And, mask);
+    if (failed(bits))
       return failure();
     FailureOr<sym::ExprHandle> swizzled =
-        sym::composeExprBinary(store, physical, sym::ExprBinaryOp::Xor, *bit);
+        sym::composeExprBinary(store, physical, sym::ExprBinaryOp::Xor, *bits);
     if (failed(swizzled))
       return failure();
     physical = *swizzled;
@@ -493,17 +523,54 @@ FailureOr<ScratchPhysicalLayout> mlir::wave::selectScratchPhysicalLayout(
   ScoredLayout best{identity,
                     scoreScratchLayout(identity, op, prepared.pattern, packet,
                                        window, waveWidth, elementBits,
-                                       prepared.banks, prepared.shape)};
+                                       prepared.shape, prepared.topology)};
   unsigned groupBits =
       window.localGroups > 1 ? llvm::Log2_64_Ceil(window.localGroups) : 0;
   unsigned itemBits =
       llvm::countr_zero(static_cast<uint64_t>(op.getRelation().getItems()));
+
+  bool targetSpecificGrouping =
+      prepared.topology.loadLaneGrouping !=
+      waveamdmachine::AMDGPULDSLoadLaneGrouping::Contiguous;
+  if (targetSpecificGrouping) {
+    // First reconstruct the conventional 32-bank layout. CDNA4 issues a B128
+    // read in four phases across the full wave. Preserve the layout only when
+    // it is conflict-free under that target topology. Otherwise, keep it as a
+    // candidate while finding a replacement under the same topology.
+    waveamdmachine::AMDGPULDSAccessTopology contiguousTopology{
+        32, prepared.topology.dwordsPerLane,
+        waveamdmachine::AMDGPULDSLoadLaneGrouping::Contiguous};
+    ScratchLayoutWorkBudget contiguousBudget{prepared.shape.workPerScore};
+    ScoredLayout contiguous{
+        identity, scoreScratchLayout(identity, op, prepared.pattern, packet,
+                                     window, waveWidth, elementBits,
+                                     prepared.shape, contiguousTopology)};
+    contiguous = selectPhaseLayout(op, prepared.pattern, packet, window,
+                                   waveWidth, elementBits, prepared.shape,
+                                   contiguousTopology, groupBits, itemBits,
+                                   contiguousBudget, std::move(contiguous));
+    contiguous = selectItemXorLayout(
+        op, prepared.pattern, packet, window, waveWidth, elementBits,
+        prepared.shape, contiguousTopology, itemBits, contiguousBudget,
+        std::move(contiguous), true);
+    ScoredLayout targetScored{
+        contiguous.layout,
+        scoreScratchLayout(contiguous.layout, op, prepared.pattern, packet,
+                           window, waveWidth, elementBits, prepared.shape,
+                           prepared.topology)};
+    if (targetScored.conflicts == 0)
+      return std::move(targetScored.layout);
+    if (isBetter(targetScored, best))
+      best = std::move(targetScored);
+  }
+
   best = selectPhaseLayout(op, prepared.pattern, packet, window, waveWidth,
-                           elementBits, prepared.banks, prepared.shape,
+                           elementBits, prepared.shape, prepared.topology,
                            groupBits, itemBits, budget, std::move(best));
   best = selectItemXorLayout(op, prepared.pattern, packet, window, waveWidth,
-                             elementBits, prepared.banks, prepared.shape,
-                             itemBits, budget, std::move(best));
+                             elementBits, prepared.shape, prepared.topology,
+                             itemBits, budget, std::move(best),
+                             targetSpecificGrouping);
   return std::move(best.layout);
 }
 

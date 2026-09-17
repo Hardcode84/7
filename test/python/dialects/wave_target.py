@@ -26,7 +26,7 @@ assert capabilities.chip == "gfx1250"
 assert profile.wave_size == 32
 assert profile.local_memory_bytes == 320 * 1024
 assert profile.addressable_local_memory_bytes == 320 * 1024
-assert profile.local_memory_bank_count == 32
+assert profile.local_memory_bank_count == 64
 assert profile.addressable_agprs == 0
 assert profile.max_waves_per_eu == 16
 assert profile.static_lds_limit_bytes == 320 * 1024
@@ -79,4 +79,4 @@ print(
 # CHECK: rejected gfx1251 auto no matrix intrinsic profile for target gfx1251
 # CHECK: rejected gfx1200 auto no matrix intrinsic profile for target gfx1200
 # CHECK: rejected gfx1100 wmma_gfx1250 matrix intrinsic wmma_gfx1250 is incompatible with gfx1100
-# CHECK: profile gfx1250 32 327680 32 base vgpr
+# CHECK: profile gfx1250 32 327680 64 base vgpr
