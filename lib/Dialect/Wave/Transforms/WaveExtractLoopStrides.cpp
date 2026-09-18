@@ -29,6 +29,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 
+#include <array>
 #include <optional>
 #include <string>
 
@@ -1413,19 +1414,21 @@ buildMemoryOffsetCandidate(scf::ForOp loop, PtrAddOp ptrAdd,
   return std::optional<LoopMemoryOffsetCandidate>{std::move(candidate)};
 }
 
-static FailureOr<std::optional<LoopMemoryOffsetCandidate>>
-findMemoryOffsetCandidate(scf::ForOp loop, WaveDialect &dialect,
-                          sym::Store &store) {
+static LogicalResult collectMemoryOffsetCandidates(
+    scf::ForOp loop, WaveDialect &dialect, sym::Store &store,
+    SmallVectorImpl<LoopMemoryOffsetCandidate> &candidates) {
   for (Operation &op : loop.getBody()->without_terminator()) {
     PtrAddOp ptrAdd = dyn_cast<PtrAddOp>(&op);
     if (!ptrAdd || !canRewritePtrAddInLoop(loop, ptrAdd))
       continue;
     FailureOr<std::optional<LoopMemoryOffsetCandidate>> candidate =
         buildMemoryOffsetCandidate(loop, ptrAdd, dialect, store);
-    if (failed(candidate) || *candidate)
-      return candidate;
+    if (failed(candidate))
+      return failure();
+    if (*candidate)
+      candidates.push_back(std::move(**candidate));
   }
-  return std::optional<LoopMemoryOffsetCandidate>{};
+  return success();
 }
 
 static FailureOr<bool>
@@ -2156,49 +2159,56 @@ static LogicalResult cloneBodyWithCarriedCyclicOffset(
 
 static LogicalResult cloneBodyWithMemoryOffsetVariants(
     IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
-    LoopMemoryOffsetCandidate candidate, sym::Store &store,
+    ArrayRef<LoopMemoryOffsetCandidate> candidates, sym::Store &store,
     MaterializationAlternatives &alternatives) {
   Block &srcBody = *src.getBody();
   Block &dstBody = *dst.getBody();
-  Value offsetCarry = dstBody.getArgument(srcBody.getNumArguments());
+  Block::BlockArgListType carries =
+      dst.getRegionIterArgs().take_back(candidates.size());
+  DenseMap<Operation *, Value> offsets;
+  for (auto [candidate, carry] : llvm::zip_equal(candidates, carries))
+    offsets[candidate.ptrAdd] = carry;
 
   IRMapping map;
   map.map(src.getInductionVar(), dst.getInductionVar());
   for (auto [oldArg, newArg] :
-       llvm::zip(src.getRegionIterArgs(), dst.getRegionIterArgs().drop_back()))
+       llvm::zip_equal(src.getRegionIterArgs(),
+                       dst.getRegionIterArgs().drop_back(candidates.size())))
     map.map(oldArg, newArg);
 
   rewriter.setInsertionPointToStart(&dstBody);
   for (Operation &op : srcBody.without_terminator()) {
-    if (&op != candidate.ptrAdd.getOperation()) {
+    Value carry = offsets.lookup(&op);
+    if (!carry) {
       rewriter.clone(op, map);
       continue;
     }
 
-    Value originalOffset = map.lookupOrDefault(candidate.ptrAdd.getOffset());
-    assert(originalOffset.getType() == offsetCarry.getType() &&
+    auto ptrAdd = cast<PtrAddOp>(op);
+    Value originalOffset = map.lookupOrDefault(ptrAdd.getOffset());
+    assert(originalOffset.getType() == carry.getType() &&
            "offset carry must preserve the original type");
-    SmallVector<Value, 2> choices{originalOffset, offsetCarry};
+    std::array<Value, 2> choices{originalOffset, carry};
     auto variants = MaterializationVariantsOp::create(
-        rewriter, candidate.ptrAdd.getLoc(), originalOffset.getType(), choices);
-    IRMapping ptrMap = map;
-    ptrMap.map(candidate.ptrAdd.getOffset(), variants.getResult());
-    Operation *cloned = rewriter.clone(op, ptrMap);
-    for (auto [source, replacement] :
-         llvm::zip_equal(op.getResults(), cloned->getResults()))
-      map.map(source, replacement);
+        rewriter, ptrAdd.getLoc(), originalOffset.getType(), choices);
+    auto cloned = cast<PtrAddOp>(rewriter.clone(op, map));
+    // Override only this use; shared offset users keep the original value.
+    cloned.getOffsetMutable().assign(variants.getResult());
   }
 
   SmallVector<Value> yielded;
   scf::YieldOp srcYield = cast<scf::YieldOp>(srcBody.getTerminator());
   for (Value value : srcYield.getOperands())
     yielded.push_back(map.lookupOrDefault(value));
-  FailureOr<Value> nextOffset = createCyclicOffsetUpdate(
-      rewriter, candidate.ptrAdd.getLoc(), store, offsetCarry,
-      candidate.increment, candidate.ring);
-  if (failed(nextOffset))
-    return failure();
-  yielded.push_back(*nextOffset);
+  for (auto [candidate, carry] : llvm::zip_equal(candidates, carries)) {
+    PtrAddOp ptrAdd = candidate.ptrAdd;
+    FailureOr<Value> nextOffset =
+        createCyclicOffsetUpdate(rewriter, ptrAdd.getLoc(), store, carry,
+                                 candidate.increment, candidate.ring);
+    if (failed(nextOffset))
+      return failure();
+    yielded.push_back(*nextOffset);
+  }
   scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
   return remapMaterializationAlternatives(src, map, alternatives);
 }
@@ -2295,23 +2305,24 @@ static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
 }
 
 static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
-                                 LoopMemoryOffsetCandidate candidate,
+                                 ArrayRef<LoopMemoryOffsetCandidate> candidates,
                                  sym::Store &store,
                                  MaterializationAlternatives &alternatives) {
   rewriter.setInsertionPoint(loop);
-  Value base =
-      createOffsetExpr(rewriter, candidate.ptrAdd.getLoc(), candidate.base,
-                       candidate.ptrAdd.getOffset().getType());
+  SmallVector<Value> initArgs(loop.getInitArgs());
+  for (const LoopMemoryOffsetCandidate &candidate : candidates) {
+    PtrAddOp ptrAdd = candidate.ptrAdd;
+    initArgs.push_back(createOffsetExpr(rewriter, ptrAdd.getLoc(),
+                                        candidate.base,
+                                        ptrAdd.getOffset().getType()));
+  }
 
-  SmallVector<Value> initArgs(loop.getInitArgs().begin(),
-                              loop.getInitArgs().end());
-  initArgs.push_back(base);
   scf::ForOp newLoop =
       scf::ForOp::create(rewriter, loop.getLoc(), loop.getLowerBound(),
                          loop.getUpperBound(), loop.getStep(), initArgs);
   copyLoopAttrs(loop, newLoop);
-  if (failed(cloneBodyWithMemoryOffsetVariants(rewriter, loop, newLoop,
-                                               candidate, store, alternatives)))
+  if (failed(cloneBodyWithMemoryOffsetVariants(
+          rewriter, loop, newLoop, candidates, store, alternatives)))
     return failure();
 
   rewriter.replaceOp(loop,
@@ -2451,16 +2462,15 @@ rewriteOneCyclicOffset(IRRewriter &rewriter, scf::ForOp loop, sym::Store &store,
 }
 
 static FailureOr<bool>
-rewriteOneMemoryOffset(IRRewriter &rewriter, scf::ForOp loop,
-                       WaveDialect &dialect, sym::Store &store,
-                       MaterializationAlternatives &alternatives) {
-  FailureOr<std::optional<LoopMemoryOffsetCandidate>> candidate =
-      findMemoryOffsetCandidate(loop, dialect, store);
-  if (failed(candidate))
+rewriteMemoryOffsets(IRRewriter &rewriter, scf::ForOp loop,
+                     WaveDialect &dialect, sym::Store &store,
+                     MaterializationAlternatives &alternatives) {
+  SmallVector<LoopMemoryOffsetCandidate, 0> candidates;
+  if (failed(collectMemoryOffsetCandidates(loop, dialect, store, candidates)))
     return failure();
-  if (!*candidate)
+  if (candidates.empty())
     return false;
-  if (failed(rewriteLoop(rewriter, loop, **candidate, store, alternatives)))
+  if (failed(rewriteLoop(rewriter, loop, candidates, store, alternatives)))
     return failure();
   return true;
 }
@@ -2495,8 +2505,8 @@ rewriteOneStrideExtraction(IRRewriter &rewriter, scf::ForOp loop,
   if (failed(rewritten) || *rewritten)
     return rewritten;
 
-  rewritten = rewriteOneMemoryOffset(rewriter, loop, *dialect,
-                                     dialect->getSymbolStore(), alternatives);
+  rewritten = rewriteMemoryOffsets(rewriter, loop, *dialect,
+                                   dialect->getSymbolStore(), alternatives);
   if (failed(rewritten) || *rewritten)
     return rewritten;
 
@@ -2506,6 +2516,68 @@ rewriteOneStrideExtraction(IRRewriter &rewriter, scf::ForOp loop,
     return rewritten;
 
   return rewriteOneOffsetCarry(rewriter, loop, alternatives);
+}
+
+static void collectAnalysisScopes(Operation *root,
+                                  SmallVectorImpl<Operation *> &scopes) {
+  bool hasLoops = false;
+  root->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (op != root && op->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+      collectAnalysisScopes(op, scopes);
+      return WalkResult::skip();
+    }
+    hasLoops |= isa<scf::ForOp>(op);
+    return WalkResult::advance();
+  });
+  if (hasLoops)
+    scopes.push_back(root);
+}
+
+static FailureOr<bool>
+rewriteOneScope(IRRewriter &rewriter, Operation *root, WaveDialect &dialect,
+                DataFlowSolver &solver,
+                MaterializationAlternatives &alternatives) {
+  bool changed = false;
+  WalkResult result = root->walk([&](Operation *op, const WalkStage &stage) {
+    if (op != root && op->hasTrait<OpTrait::IsIsolatedFromAbove>())
+      return WalkResult::skip();
+    auto loop = dyn_cast<scf::ForOp>(op);
+    if (!loop || !stage.isAfterAllRegions())
+      return WalkResult::advance();
+    FailureOr<bool> rewritten = rewriteOneStrideExtraction(
+        rewriter, loop, &dialect, solver, alternatives);
+    if (failed(rewritten))
+      return WalkResult::interrupt();
+    changed = *rewritten;
+    return changed ? WalkResult::interrupt() : WalkResult::advance();
+  });
+  if (result.wasInterrupted() && !changed)
+    return failure();
+  return changed;
+}
+
+static LogicalResult extractStridesInScope(Operation *root,
+                                           WaveDialect &dialect) {
+  IRRewriter rewriter(root->getContext());
+  MaterializationAlternatives alternatives;
+  root->walk([&](IndexExprOp op) {
+    if (op->hasAttr(kRematerializationAlternativeAttr))
+      alternatives.insert(op);
+  });
+  while (true) {
+    DataFlowSolver solver;
+    dataflow::loadBaselineAnalyses(solver);
+    solver.load<dataflow::IntegerRangeAnalysis>();
+    if (failed(solver.initializeAndRun(root)))
+      return root->emitError(
+          "IntegerRangeAnalysis failed for loop stride extraction pass");
+    FailureOr<bool> rewritten =
+        rewriteOneScope(rewriter, root, dialect, solver, alternatives);
+    if (failed(rewritten))
+      return failure();
+    if (!*rewritten)
+      return success();
+  }
 }
 
 struct WaveExtractLoopStridesPass
@@ -2518,39 +2590,11 @@ struct WaveExtractLoopStridesPass
       root->emitError("Wave dialect is not loaded");
       return signalPassFailure();
     }
-
-    IRRewriter rewriter(root->getContext());
-    MaterializationAlternatives materializationAlternatives;
-    root->walk([&](IndexExprOp op) {
-      if (op->hasAttr(kRematerializationAlternativeAttr))
-        materializationAlternatives.insert(op);
-    });
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      DataFlowSolver solver;
-      dataflow::loadBaselineAnalyses(solver);
-      solver.load<dataflow::IntegerRangeAnalysis>();
-      if (failed(solver.initializeAndRun(root))) {
-        root->emitError(
-            "IntegerRangeAnalysis failed for loop stride extraction pass");
+    SmallVector<Operation *> scopes;
+    collectAnalysisScopes(root, scopes);
+    for (Operation *scope : scopes)
+      if (failed(extractStridesInScope(scope, *dialect)))
         return signalPassFailure();
-      }
-      WalkResult result = root->walk([&](scf::ForOp loop) {
-        FailureOr<bool> rewritten = rewriteOneStrideExtraction(
-            rewriter, loop, dialect, solver, materializationAlternatives);
-        if (failed(rewritten)) {
-          signalPassFailure();
-          return WalkResult::interrupt();
-        }
-        if (!*rewritten)
-          return WalkResult::advance();
-        changed = true;
-        return WalkResult::interrupt();
-      });
-      if (result.wasInterrupted() && !changed)
-        return;
-    }
   }
 };
 
