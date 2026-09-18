@@ -52,11 +52,44 @@ using namespace mlir::wave;
 #include "mlir/Dialect/Wave/IR/WaveOpsDialect.cpp.inc"
 #include "mlir/Dialect/Wave/IR/WaveOpsEnums.cpp.inc"
 
+namespace {
+
+struct FoldConstantWhere : public OpRewritePattern<WhereOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(WhereOp where,
+                                PatternRewriter &rewriter) const override {
+    if (where.getConditions().size() != 1)
+      return failure();
+
+    std::optional<int64_t> value = getSplatOrConstantInt(where.getCondition());
+    if (!value)
+      return failure();
+
+    Region *selected = nullptr;
+    if (*value != 0)
+      selected = &where.getThenRegion();
+    else if (!where.getElseRegion().empty())
+      selected = &where.getElseRegion();
+    else
+      return failure();
+
+    auto yield = cast<YieldOp>(selected->front().getTerminator());
+    SmallVector<Value> results(yield.getValues());
+    rewriter.inlineBlockBefore(&selected->front(), where);
+    rewriter.eraseOp(yield);
+    rewriter.replaceOp(where, results);
+    return success();
+  }
+};
+
+} // namespace
+
 void WaveDialect::getCanonicalizationPatterns(
     RewritePatternSet &patterns) const {
   patterns.add<EraseUnobservedMemory,
-               EraseUnobservedRegionMemory<TokenOp, MemTokenType>>(
-      getContext());
+               EraseUnobservedRegionMemory<TokenOp, MemTokenType>,
+               FoldConstantWhere>(getContext());
 }
 
 void WaveDialect::initialize() {

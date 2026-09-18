@@ -8,13 +8,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // MACHINE-LABEL: func.func @proven_true_wave32_where
 // MACHINE-NOT: waveamdmachine.v_cmp
-// MACHINE: waveamdmachine.s_mov_b32_value
-// MACHINE: waveamdmachine.exec_if
+// MACHINE-NOT: waveamdmachine.exec_if
 // MACHINE: waveamdmachine.buffer_store_b32
 // ASM-LABEL: proven_true_wave32_where:
 // ASM-NOT: v_cmp
-// ASM: s_mov_b32 [[COND:s[0-9]+]], -1
-// ASM: s_and_saveexec_b32 {{s[0-9]+}}, [[COND]]
+// ASM-NOT: s_and_saveexec_b32
+// ASM: buffer_store_b32
 func.func @proven_true_wave32_where(%dst: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32
   %buffer = waveamd.make_buffer %dst, %range

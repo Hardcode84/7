@@ -269,6 +269,39 @@ func.func @constant_mask_select(%true: !wave.simd<i32, 32>,
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
 }
 
+// CHECK-LABEL: func.func @constant_where
+// CHECK-SAME: (%[[LHS:.*]]: !wave.simd<i32, 32>, %[[RHS:.*]]: !wave.simd<i32, 32>)
+// CHECK-NOT: wave.where
+// CHECK: %[[ADD:.*]] = wave.binary addi %[[LHS]], %[[RHS]]
+// CHECK: %[[SUB:.*]] = wave.binary subi %[[LHS]], %[[RHS]]
+// CHECK: return %[[ADD]], %[[SUB]]
+func.func @constant_where(%lhs: !wave.simd<i32, 32>,
+                          %rhs: !wave.simd<i32, 32>)
+    -> (!wave.simd<i32, 32>, !wave.simd<i32, 32>) {
+  %all = wave.constant true -> !wave.mask<32>
+  %none = wave.constant false -> !wave.mask<32>
+  %selected_true = wave.where %all {
+    %sum = wave.binary addi %lhs, %rhs
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    wave.yield %sum : !wave.simd<i32, 32>
+  } otherwise {
+    %difference = wave.binary subi %lhs, %rhs
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    wave.yield %difference : !wave.simd<i32, 32>
+  } : !wave.mask<32> -> !wave.simd<i32, 32>
+  %selected_false = wave.where %none {
+    %sum = wave.binary addi %rhs, %lhs
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    wave.yield %sum : !wave.simd<i32, 32>
+  } otherwise {
+    %difference = wave.binary subi %lhs, %rhs
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
+    wave.yield %difference : !wave.simd<i32, 32>
+  } : !wave.mask<32> -> !wave.simd<i32, 32>
+  return %selected_true, %selected_false
+      : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+}
+
 // CHECK-LABEL: func.func @constant_select_splats
 // CHECK-SAME: (%[[TRUE:.*]]: i32, %[[FALSE:.*]]: i32, %[[TRUE_VEC:.*]]: vector<2xi32>, %[[FALSE_VEC:.*]]: vector<2xi32>)
 // CHECK: %[[TRUE_SPLAT:.*]] = wave.splat %[[TRUE]] : i32 -> !wave.simd<i32, 32>
@@ -790,4 +823,45 @@ func.func @mma_scale_repack_from_upper_dword(
         !waveamd.fragment<2, f32, 16, 16, 64, 4>
       -> !waveamd.fragment<2, f32, 16, 16, 64, 4>
   return %result : !waveamd.fragment<2, f32, 16, 16, 64, 4>
+}
+
+func.func private @where_effect(i32)
+
+// CHECK-LABEL: func.func @constant_where_effects
+// CHECK-SAME: ([[A:%.*]]: i32, [[B:%.*]]: i32)
+// CHECK-NOT: wave.where
+// CHECK: call @where_effect([[A]])
+// CHECK-NEXT: call @where_effect([[B]])
+// CHECK-NEXT: return
+func.func @constant_where_effects(%a: i32, %b: i32) {
+  %all = wave.constant true -> !wave.mask<32>
+  %none = wave.constant false -> !wave.mask<32>
+  wave.where %all {
+    func.call @where_effect(%a) : (i32) -> ()
+    wave.yield
+  } otherwise {
+    func.call @where_effect(%b) : (i32) -> ()
+    wave.yield
+  } : !wave.mask<32>
+  wave.where %none {
+    func.call @where_effect(%a) : (i32) -> ()
+    wave.yield
+  } otherwise {
+    func.call @where_effect(%b) : (i32) -> ()
+    wave.yield
+  } : !wave.mask<32>
+  return
+}
+
+// CHECK-LABEL: func.func @constant_packet_where
+// CHECK: wave.where {{%.*}}, {{%.*}}
+// CHECK: func.call @where_effect
+func.func @constant_packet_where(%a: i32) {
+  %all = wave.constant true -> !wave.mask<32>
+  %none = wave.constant false -> !wave.mask<32>
+  wave.where %all, %none {
+    func.call @where_effect(%a) : (i32) -> ()
+    wave.yield
+  } : !wave.mask<32>, !wave.mask<32>
+  return
 }
