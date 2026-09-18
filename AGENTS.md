@@ -102,6 +102,11 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 
 ## Implementation Discipline
 
+- **Review superlinear algorithms especially carefully.** State the input sizes
+  and worst-case time and memory complexity. Include repeated scans, nested
+  traversals, and work across iterations. Check production input bounds and
+  alternatives with lower complexity. Require a clear reason for the higher
+  cost; small tests alone do not establish acceptable scaling.
 - **No shortcuts, never overfit.** Implement the general mechanism, not a
   known input. Goldens are conformance tests, not templates. Unsupported
   features return clear errors; no fabricated ops or canned output.
