@@ -5,11 +5,12 @@
 // RUN: diff %t.extracted %t.twice
 // RUN: wave-opt %t.twice --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void
+// RUN: sed 's/"wave-extract-loop-strides"/"canonicalize"/' %wave_pipelines > %t.pipeline.mlir
 // RUN: env PYTHONPATH=%wave_obj_root/python_packages/wave_mlir %python %S/Inputs/select_materialization_variant.py %t.twice 0 > %t.choice0
-// RUN: wave-opt %t.choice0 --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
+// RUN: wave-opt %t.choice0 --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%t.pipeline.mlir},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void
 // RUN: env PYTHONPATH=%wave_obj_root/python_packages/wave_mlir %python %S/Inputs/select_materialization_variant.py %t.twice 1 > %t.choice1
-// RUN: wave-opt %t.choice1 --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
+// RUN: wave-opt %t.choice1 --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%t.pipeline.mlir},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void
 
 // CHECK-LABEL: func.func @uniform_stride

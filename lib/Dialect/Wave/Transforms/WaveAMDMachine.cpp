@@ -1908,10 +1908,9 @@ static bool isSignedNarrowBinding(Value source) {
   return intType && intType.isSignless() && intType.getWidth() < 64;
 }
 
-static FailureOr<Value> materializeWideBinding(WaveAMDMachineSelector &S,
-                                               Location loc,
-                                               const WideSymbolBinding &binding,
-                                               bool symbolsAreUniform) {
+static Value materializeWideBinding(WaveAMDMachineSelector &S, Location loc,
+                                    const WideSymbolBinding &binding,
+                                    bool symbolsAreUniform) {
   if (!isSignedNarrowBinding(binding.source) ||
       isWideBindingNonNegative(S, binding)) {
     if (symbolsAreUniform)
@@ -3612,11 +3611,60 @@ LogicalResult WaveAMDMachineSelector::selectAssume(AssumeOp op) {
   return success();
 }
 
+static waveamdmachine::RegType
+getMaterializationRegisterType(MLIRContext *ctx, ValueRange choices) {
+  unsigned width = 1;
+  bool divergent = false;
+  for (Value choice : choices) {
+    if (auto type = dyn_cast<waveamdmachine::RegType>(choice.getType())) {
+      width = std::max<unsigned>(width, type.getWidth());
+      divergent |= type.getRegClass() == waveamdmachine::RegClass::VGPR;
+    }
+  }
+  return getRegType(ctx,
+                    divergent ? waveamdmachine::RegClass::VGPR
+                              : waveamdmachine::RegClass::SGPR,
+                    width);
+}
+
+static Value widenMaterializationChoice(WaveAMDMachineSelector &S, Location loc,
+                                        Value source, Value selected,
+                                        bool divergent) {
+  if (isOneDwordReg(selected))
+    return materializeWideBinding(S, loc, {"", source, selected}, !divergent);
+  return divergent ? ensureVGPR2(S, loc, selected)
+                   : ensureSGPR2(S, loc, selected);
+}
+
+static void normalizeMaterializationChoices(WaveAMDMachineSelector &S,
+                                            MaterializationVariantsOp op,
+                                            SmallVectorImpl<Value> &choices) {
+  if (llvm::all_equal(ValueRange(choices).getTypes()))
+    return;
+  waveamdmachine::RegType type =
+      getMaterializationRegisterType(S.builder.getContext(), choices);
+  bool divergent = type.getRegClass() == waveamdmachine::RegClass::VGPR;
+  Location loc = op.getLoc();
+  for (auto [source, choice] : llvm::zip_equal(op.getChoices(), choices)) {
+    if (type.getWidth() == 2)
+      choice = widenMaterializationChoice(S, loc, source, choice, divergent);
+    if (choice.getType() == type)
+      continue;
+    if (divergent)
+      choice =
+          waveamdmachine::VMovB32TupleOp::create(S.builder, loc, type, choice);
+    else
+      choice =
+          waveamdmachine::SMovB32TupleOp::create(S.builder, loc, type, choice);
+  }
+}
+
 LogicalResult WaveAMDMachineSelector::selectMaterializationVariants(
     MaterializationVariantsOp op) {
   SmallVector<Value> choices;
   for (Value choice : op.getChoices())
     choices.push_back(expect(choice, op));
+  normalizeMaterializationChoices(*this, op, choices);
   auto selected = waveamdmachine::MaterializationVariantsOp::create(
       builder, op.getLoc(), choices.front().getType(), choices);
   values[op.getResult()] = selected;

@@ -1204,3 +1204,62 @@ func.func @negative_divisor_remainder_stays(
   }
   return
 }
+
+// -----
+
+// CHECK-LABEL: func.func @sibling_assume_does_not_bound_remainder
+// CHECK: scf.for
+// CHECK-NOT: iter_args
+// CHECK: wave.assume
+// CHECK: wave.binary remsi
+// CHECK-NOT: wave.materialization_variants
+// CHECK: return
+func.func @sibling_assume_does_not_bound_remainder(
+    %a: !wave.ptr<#wave.global, i32>, %lower: i32, %upper: i32) {
+  %one = arith.constant 1 : i32
+  %four = arith.constant 4 : i32
+  scf.for %i = %lower to %upper step %one : i32 {
+    %sibling = wave.assume %i as "i" [#wave.pred<"i >= 0">] : i32
+    %other_use = wave.binary addi %sibling, %one : i32, i32 -> i32
+    %slot = wave.binary remsi %i, %four : i32, i32 -> i32
+    %offset = wave.index_expr <"4*slot"> ["slot"](%slot) : (i32) -> index
+    %ptr = wave.ptr_add %a, %offset : !wave.ptr<#wave.global, i32>, index -> !wave.ptr<#wave.global, i32>
+    %value, %token = wave.load %ptr : (!wave.ptr<#wave.global, i32>) -> (!wave.simd<i32, 32>, !wave.mem.token)
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @clone_nested_cyclic_alternative
+// CHECK: scf.for {{.*}} iter_args
+// CHECK: wave.materialization_variants
+// CHECK: scf.for {{.*}} iter_args
+// CHECK: wave.rematerialization_alternative
+// CHECK: wave.materialization_variants
+// CHECK: return
+// MEMORY-LABEL: func.func @clone_nested_cyclic_alternative
+// MEMORY: wave.materialization_variants {{.*}} : !wave.mem.token
+func.func @clone_nested_cyclic_alternative(
+    %a: !wave.ptr<#wave.global, i8>, %lower: i32, %upper: i32,
+    %step: i32) -> !wave.mem.token attributes {wave.kernel} {
+  %range = arith.constant 1024 : i32
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %root = wave.token : !wave.mem.token
+  %outer = scf.for %j = %lower to %upper step %step iter_args(%ot = %root) -> !wave.mem.token : i32 {
+    %math = wave.index_expr <"1024*j"> ["j"](%j) : (i32) -> index
+    %bits = wave.cast intconvert %math : index -> i32
+    %offset = wave.cast intconvert %bits policy {extension = #wave.cast_extension<zero>} : i32 -> index
+    %base = wave.ptr_add %a, %offset : !wave.ptr<#wave.global, i8>, index -> !wave.ptr<#wave.global, i8>
+    %buffer = waveamd.make_buffer %base, %range : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
+    %inner = scf.for %i = %lower to %upper step %step iter_args(%it = %ot) -> !wave.mem.token : i32 {
+      %cyclic = wave.index_expr <"Mod(16*i + 4*lane, 1024)"> ["i", "lane"](%i, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+      %ptr = wave.ptr_add %buffer, %cyclic : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+      %value, %read = wave.load %ptr after %it : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>, !wave.mem.token) -> (!wave.simd<i32, 32>, !wave.mem.token)
+      %write = wave.store %value -> %ptr after %read : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>, !wave.mem.token) -> !wave.mem.token
+      scf.yield %write : !wave.mem.token
+    }
+    scf.yield %inner : !wave.mem.token
+  }
+  return %outer : !wave.mem.token
+}
