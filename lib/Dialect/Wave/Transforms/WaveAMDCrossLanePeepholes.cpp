@@ -17,6 +17,8 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <map>
+
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEAMDCROSSLANEPEEPHOLES
 #include "mlir/Dialect/Wave/Transforms/Passes.h.inc"
@@ -63,7 +65,35 @@ public:
     return segment && segment == segments.lookup(rhs);
   }
 
-  void notifyOperationErased(Operation *op) override { segments.erase(op); }
+  unsigned getSegment(Operation *op) const { return segments.lookup(op); }
+  unsigned getPosition(Operation *op) const { return positions.lookup(op); }
+
+  bool hasBarrierBetween(Operation *lhs, Operation *rhs) const {
+    auto next = barriers.upper_bound(getPosition(lhs));
+    return next != barriers.end() && next->first <= getPosition(rhs);
+  }
+
+  void notifyOperationInserted(Operation *op,
+                               OpBuilder::InsertPoint previous) override {
+    assert(!previous.isSet() && "cross-lane rewrites must not move operations");
+    // Replacements insert before their root; new ops stop partner scans.
+    unsigned position = getPosition(op->getNextNode());
+    if (!position)
+      return;
+    positions[op] = position;
+    ++barriers[position];
+  }
+
+  void notifyOperationErased(Operation *op) override {
+    unsigned position = getPosition(op);
+    if (position && !contains(op)) {
+      auto barrier = barriers.find(position);
+      if (!--barrier->second)
+        barriers.erase(barrier);
+    }
+    positions.erase(op);
+    segments.erase(op);
+  }
 
 private:
   void markBlock(Block &block, const DenseMap<Operation *, bool> &preserves) {
@@ -73,6 +103,7 @@ private:
         break;
       if (!op.getNumRegions()) {
         segments[&op] = segment;
+        positions[&op] = ++nextPosition;
         continue;
       }
       // EXEC regions restore entry mask; their bodies still run masked.
@@ -85,7 +116,10 @@ private:
   }
 
   DenseMap<Operation *, unsigned> segments;
+  DenseMap<Operation *, unsigned> positions;
+  std::map<unsigned, unsigned> barriers;
   unsigned nextSegment = 0;
+  unsigned nextPosition = 0;
 };
 
 class MachineU32Evaluator {
@@ -94,17 +128,13 @@ public:
       : lane(lane), workitemX(workitemX) {}
 
   std::optional<uint32_t> evaluate(Value value) {
-    DenseMap<Value, uint32_t>::iterator cached = values.find(value);
+    auto cached = values.find(value);
     if (cached != values.end())
       return cached->second;
 
     Operation *op = value.getDefiningOp();
-    if (!op)
-      return std::nullopt;
-
-    std::optional<uint32_t> result = evaluateOperation(op);
-    if (result)
-      values[value] = *result;
+    std::optional<uint32_t> result = op ? evaluateOperation(op) : std::nullopt;
+    values[value] = result;
     return result;
   }
 
@@ -248,7 +278,7 @@ private:
                            });
   }
 
-  DenseMap<Value, uint32_t> values;
+  DenseMap<Value, std::optional<uint32_t>> values;
   uint32_t lane;
   uint32_t workitemX;
 };
@@ -301,9 +331,8 @@ static std::optional<unsigned> getXLinearWorkgroupSize(func::FuncOp func) {
   return static_cast<unsigned>(dims[0]);
 }
 
-static std::optional<bool> evaluateCondition(Value condition, uint32_t lane,
-                                             uint32_t workitemX) {
-  MachineU32Evaluator evaluator(lane, workitemX);
+static std::optional<bool> evaluateCondition(Value condition,
+                                             MachineU32Evaluator &evaluator) {
   Value vcc = getVCCCopySource(condition);
   if (!vcc)
     return std::nullopt;
@@ -362,21 +391,12 @@ static std::optional<BpermutePayload> matchBpermutePayload(Value value) {
   return matchBpermuteTuplePayload(value, type.getWidth());
 }
 
-static std::optional<std::pair<bool, unsigned>>
-evaluateSelectedSource(PermlaneCandidate &candidate, uint32_t lane,
-                       uint32_t workitemX) {
-  std::optional<bool> takeTrue =
-      evaluateCondition(candidate.select.getCondition(), lane, workitemX);
-  if (!takeTrue)
-    return std::nullopt;
-  const BpermutePayload &payload =
-      *takeTrue ? candidate.truePayload : candidate.falsePayload;
-  MachineU32Evaluator evaluator(lane, workitemX);
-  std::optional<uint32_t> byteAddress = evaluator.evaluate(payload.address);
+static std::optional<unsigned> evaluateSource(Value address,
+                                              MachineU32Evaluator &evaluator) {
+  std::optional<uint32_t> byteAddress = evaluator.evaluate(address);
   if (!byteAddress || *byteAddress % 4 != 0 || *byteAddress / 4 >= 64)
     return std::nullopt;
-  return std::pair<bool, unsigned>{*takeTrue,
-                                   static_cast<unsigned>(*byteAddress / 4)};
+  return *byteAddress / 4;
 }
 
 static ArrayRef<Value> getSelectedWords(const PermlaneCandidate &candidate,
@@ -401,86 +421,281 @@ makePermlaneCandidate(VCndmaskB32TupleOp select) {
       PermlaneHalf::Lower};
 }
 
-static std::optional<PermlaneHalf>
-classifyPermlaneCandidate(PermlaneCandidate &candidate) {
-  std::optional<std::pair<bool, unsigned>> first =
-      evaluateSelectedSource(candidate, /*lane=*/0, /*workitemX=*/0);
-  std::optional<std::pair<bool, unsigned>> second =
-      evaluateSelectedSource(candidate, /*lane=*/32, /*workitemX=*/32);
-  if (!first || !second)
-    return std::nullopt;
-  ArrayRef<Value> firstWords = getSelectedWords(candidate, first->first);
-  ArrayRef<Value> secondWords = getSelectedWords(candidate, second->first);
-  candidate.firstWords.assign(firstWords.begin(), firstWords.end());
-  candidate.secondWords.assign(secondWords.begin(), secondWords.end());
-  if (sameValues(candidate.firstWords, candidate.secondWords))
-    return std::nullopt;
-  if (first->second == 0 && second->second == 0)
+struct SelectSemantics {
+  PermlaneHalf half;
+  bool firstTrue;
+};
+
+using SelectQuery = std::tuple<Value, Value, Value>;
+using SelectCache = DenseMap<SelectQuery, std::optional<SelectSemantics>>;
+using BroadcastCache = DenseMap<Value, std::optional<PermlaneHalf>>;
+
+static SelectQuery getSelectQuery(const PermlaneCandidate &candidate) {
+  VCndmaskB32TupleOp select = candidate.select;
+  return {select.getCondition(), candidate.falsePayload.address,
+          candidate.truePayload.address};
+}
+
+static std::optional<PermlaneHalf> getBroadcastHalf(unsigned source) {
+  if (source == 0)
     return PermlaneHalf::Lower;
-  if (first->second == 32 && second->second == 32)
+  if (source == 32)
     return PermlaneHalf::Upper;
   return std::nullopt;
 }
 
-static bool hasPermlaneSemantics(PermlaneCandidate &candidate,
-                                 unsigned workgroupSize) {
-  unsigned sourceBase = candidate.half == PermlaneHalf::Upper ? 32 : 0;
+static void checkBroadcastLane(Value address, std::optional<PermlaneHalf> &half,
+                               MachineU32Evaluator &evaluator, unsigned item) {
+  if (item && !half)
+    return;
+  std::optional<unsigned> source = evaluateSource(address, evaluator);
+  if (!source) {
+    half.reset();
+    return;
+  }
+  if (!item) {
+    half = getBroadcastHalf(*source);
+    return;
+  }
+  unsigned base = *half == PermlaneHalf::Upper ? 32 : 0;
+  if (*source != base + item % 32)
+    half.reset();
+}
+
+static std::optional<std::pair<bool, unsigned>>
+evaluateSelectedSource(const SelectQuery &query,
+                       MachineU32Evaluator &evaluator) {
+  auto [condition, falseAddress, trueAddress] = query;
+  std::optional<bool> takeTrue = evaluateCondition(condition, evaluator);
+  if (!takeTrue)
+    return std::nullopt;
+  std::optional<unsigned> source =
+      evaluateSource(*takeTrue ? trueAddress : falseAddress, evaluator);
+  if (!source)
+    return std::nullopt;
+  return std::pair<bool, unsigned>{*takeTrue, *source};
+}
+
+static void checkSelectLane(const SelectQuery &query,
+                            std::optional<SelectSemantics> &semantics,
+                            MachineU32Evaluator &evaluator, unsigned item) {
+  if (item && !semantics)
+    return;
+  std::optional<std::pair<bool, unsigned>> selected =
+      evaluateSelectedSource(query, evaluator);
+  if (!selected) {
+    semantics.reset();
+    return;
+  }
+  if (!item) {
+    std::optional<PermlaneHalf> half = getBroadcastHalf(selected->second);
+    if (half)
+      semantics = SelectSemantics{*half, selected->first};
+    return;
+  }
+  unsigned base = semantics->half == PermlaneHalf::Upper ? 32 : 0;
+  bool expectedTrue = (item % 64 < 32) == semantics->firstTrue;
+  if (selected->second != base + item % 32 || selected->first != expectedTrue)
+    semantics.reset();
+}
+
+static void classifyQueries(BroadcastCache &broadcasts, SelectCache &selects,
+                            unsigned workgroupSize) {
+  if (broadcasts.empty() && selects.empty())
+    return;
+  // One DAG cache per lane, shared by all queries and then released.
+  for (unsigned item : llvm::seq(workgroupSize)) {
+    MachineU32Evaluator evaluator(item % 64, item);
+    for (auto &[address, half] : broadcasts)
+      checkBroadcastLane(address, half, evaluator, item);
+    for (auto &[query, semantics] : selects)
+      checkSelectLane(query, semantics, evaluator, item);
+  }
+}
+
+static std::optional<unsigned>
+evaluateBpermuteSource(DsBpermuteB32Op op, unsigned lane, unsigned workitemX) {
+  if (op.getOffset() != 0)
+    return std::nullopt;
+  MachineU32Evaluator evaluator(lane, workitemX);
+  return evaluateSource(op.getAddr(), evaluator);
+}
+
+static bool isHalfExchangeAtLane(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
+                                 unsigned lane, unsigned workitemX) {
+  std::optional<unsigned> lhsSource =
+      evaluateBpermuteSource(lhs, lane, workitemX);
+  std::optional<unsigned> rhsSource =
+      evaluateBpermuteSource(rhs, lane, workitemX);
+  if (!lhsSource || !rhsSource)
+    return false;
+  unsigned otherHalf = lane ^ 32;
+  return (*lhsSource == lane && *rhsSource == otherHalf) ||
+         (*rhsSource == lane && *lhsSource == otherHalf);
+}
+
+static bool isHalfExchangePair(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
+                               unsigned workgroupSize) {
+  if (!lhs || !rhs || lhs.getData() != rhs.getData() || workgroupSize < 64 ||
+      workgroupSize % 64 != 0)
+    return false;
   for (unsigned wave : llvm::seq<unsigned>(workgroupSize / 64)) {
     unsigned waveBase = wave * 64;
-    for (unsigned lane : llvm::seq<unsigned>(0, 64)) {
-      std::optional<std::pair<bool, unsigned>> selected =
-          evaluateSelectedSource(candidate, lane, waveBase + lane);
-      if (!selected)
+    for (unsigned lane : llvm::seq<unsigned>(0, 64))
+      if (!isHalfExchangeAtLane(lhs, rhs, lane, waveBase + lane))
         return false;
-      ArrayRef<Value> actualWords =
-          getSelectedWords(candidate, selected->first);
-      ArrayRef<Value> expectedWords =
-          lane < 32 ? ArrayRef<Value>(candidate.firstWords)
-                    : ArrayRef<Value>(candidate.secondWords);
-      if (!sameValues(actualWords, expectedWords) ||
-          selected->second != sourceBase + lane % 32)
-        return false;
-    }
   }
   return true;
 }
 
-static std::optional<PermlaneCandidate>
-matchPermlaneCandidate(VCndmaskB32TupleOp select, unsigned workgroupSize,
-                       const FullExecAnalysis &exec) {
-  std::optional<PermlaneCandidate> candidate = makePermlaneCandidate(select);
-  if (!candidate)
-    return std::nullopt;
-  for (const BpermutePayload *payload :
-       {&candidate->falsePayload, &candidate->truePayload})
-    for (DsBpermuteB32Op permute : payload->permutes)
-      if (!exec.sameSegment(permute, select))
-        return std::nullopt;
-  std::optional<PermlaneHalf> half = classifyPermlaneCandidate(*candidate);
-  if (!half)
-    return std::nullopt;
-  candidate->half = *half;
-  if (!hasPermlaneSemantics(*candidate, workgroupSize))
-    return std::nullopt;
-  return candidate;
-}
+class CandidateIndex : public RewriterBase::Listener {
+  using OrderedCandidates = std::map<unsigned, Operation *>;
+  using Bucket = std::array<OrderedCandidates, 2>;
+  struct Entry {
+    Bucket *bucket;
+    unsigned position;
+    PermlaneHalf half;
+    bool firstTrue;
+  };
+
+public:
+  explicit CandidateIndex(FullExecAnalysis &exec) : exec(exec) {}
+
+  void initialize(func::FuncOp func, unsigned workgroupSize) {
+    BroadcastCache broadcasts;
+    SelectCache selects;
+    SmallVector<DsBpermuteB32Op> permutes;
+    SmallVector<PermlaneCandidate, 0> candidates;
+    func.walk([&](Operation *op) {
+      if (!exec.contains(op))
+        return;
+      if (auto permute = dyn_cast<DsBpermuteB32Op>(op)) {
+        if (permute.getOffset() == 0) {
+          permutes.push_back(permute);
+          broadcasts.try_emplace(permute.getAddr());
+        }
+        return;
+      }
+      if (auto select = dyn_cast<VCndmaskB32TupleOp>(op))
+        collectSelect(select, selects, candidates);
+    });
+    classifyQueries(broadcasts, selects, workgroupSize);
+    for (DsBpermuteB32Op permute : permutes)
+      if (std::optional<PermlaneHalf> half =
+              broadcasts.lookup(permute.getAddr()))
+        add(permute, {permute.getData()}, *half);
+    for (const PermlaneCandidate &candidate : candidates)
+      if (std::optional<SelectSemantics> semantics =
+              selects.lookup(getSelectQuery(candidate)))
+        addSelect(candidate, *semantics);
+  }
+
+  std::optional<PermlaneCandidate> matchSelect(VCndmaskB32TupleOp op) {
+    auto found = entries.find(op);
+    if (found == entries.end())
+      return std::nullopt;
+    std::optional<PermlaneCandidate> candidate = makePermlaneCandidate(op);
+    if (!candidate) {
+      erase(op);
+      return std::nullopt;
+    }
+    candidate->half = found->second.half;
+    ArrayRef<Value> first =
+        getSelectedWords(*candidate, found->second.firstTrue);
+    ArrayRef<Value> second =
+        getSelectedWords(*candidate, !found->second.firstTrue);
+    candidate->firstWords.assign(first.begin(), first.end());
+    candidate->secondWords.assign(second.begin(), second.end());
+    return candidate;
+  }
+
+  std::optional<PermlaneHalf> getHalf(Operation *op) const {
+    auto found = entries.find(op);
+    if (found == entries.end())
+      return std::nullopt;
+    return found->second.half;
+  }
+
+  Operation *findPartner(Operation *op) const {
+    auto found = entries.find(op);
+    if (found == entries.end())
+      return nullptr;
+    const Entry &entry = found->second;
+    const OrderedCandidates &partners =
+        (*entry.bucket)[entry.half == PermlaneHalf::Lower ? 1 : 0];
+    auto partner = partners.upper_bound(entry.position);
+    if (partner == partners.end() ||
+        exec.hasBarrierBetween(op, partner->second))
+      return nullptr;
+    return partner->second;
+  }
+
+  void notifyOperationInserted(Operation *op,
+                               OpBuilder::InsertPoint previous) override {
+    exec.notifyOperationInserted(op, previous);
+  }
+
+  void notifyOperationErased(Operation *op) override {
+    erase(op);
+    exec.notifyOperationErased(op);
+  }
+
+private:
+  void collectSelect(VCndmaskB32TupleOp select, SelectCache &cache,
+                     SmallVectorImpl<PermlaneCandidate> &candidates) {
+    std::optional<PermlaneCandidate> candidate = makePermlaneCandidate(select);
+    if (!candidate)
+      return;
+    for (const BpermutePayload *payload :
+         {&candidate->falsePayload, &candidate->truePayload})
+      for (DsBpermuteB32Op permute : payload->permutes)
+        if (!exec.sameSegment(permute, select))
+          return;
+    cache.try_emplace(getSelectQuery(*candidate));
+    candidates.push_back(std::move(*candidate));
+  }
+
+  void addSelect(const PermlaneCandidate &candidate,
+                 SelectSemantics semantics) {
+    SmallVector<Value> words(getSelectedWords(candidate, semantics.firstTrue));
+    llvm::append_range(words,
+                       getSelectedWords(candidate, !semantics.firstTrue));
+    add(candidate.select, words, semantics.half, semantics.firstTrue);
+  }
+
+  void add(Operation *op, ArrayRef<Value> words, PermlaneHalf half,
+           bool firstTrue = false) {
+    auto key = std::make_pair(exec.getSegment(op), SmallVector<Value>(words));
+    std::unique_ptr<Bucket> &bucket = buckets[key];
+    if (!bucket)
+      bucket = std::make_unique<Bucket>();
+    unsigned position = exec.getPosition(op);
+    (*bucket)[static_cast<unsigned>(half)].emplace(position, op);
+    entries.try_emplace(op, Entry{bucket.get(), position, half, firstTrue});
+  }
+
+  void erase(Operation *op) {
+    auto found = entries.find(op);
+    if (found == entries.end())
+      return;
+    const Entry &entry = found->second;
+    (*entry.bucket)[static_cast<unsigned>(entry.half)].erase(entry.position);
+    entries.erase(found);
+  }
+
+  // Distinct replacements preserve keys; recheck select payloads on use.
+  DenseMap<std::pair<unsigned, SmallVector<Value>>, std::unique_ptr<Bucket>>
+      buckets;
+  DenseMap<Operation *, Entry> entries;
+  FullExecAnalysis &exec;
+};
 
 static std::optional<PermlaneCandidate>
-findUpperCandidate(const PermlaneCandidate &lower, unsigned workgroupSize,
-                   const FullExecAnalysis &exec) {
-  for (Operation *cursor = lower.select->getNextNode(); cursor;
-       cursor = cursor->getNextNode()) {
-    if (!exec.sameSegment(lower.select, cursor))
-      break;
-    VCndmaskB32TupleOp select = dyn_cast<VCndmaskB32TupleOp>(cursor);
-    if (!select)
-      continue;
+findUpperCandidate(const PermlaneCandidate &lower, CandidateIndex &index) {
+  while (Operation *partner = index.findPartner(lower.select)) {
     std::optional<PermlaneCandidate> candidate =
-        matchPermlaneCandidate(select, workgroupSize, exec);
-    if (!candidate || candidate->half != PermlaneHalf::Upper)
-      continue;
-    if (sameValues(candidate->firstWords, lower.firstWords) &&
-        sameValues(candidate->secondWords, lower.secondWords))
+        index.matchSelect(cast<VCndmaskB32TupleOp>(partner));
+    if (candidate)
       return candidate;
   }
   return std::nullopt;
@@ -585,21 +800,20 @@ static void eraseMatchedPayloads(PatternRewriter &rewriter,
 struct BpermuteSelectPairToPermlanePattern
     : public OpRewritePattern<VCndmaskB32TupleOp> {
   BpermuteSelectPairToPermlanePattern(MLIRContext *context,
-                                      unsigned workgroupSize,
-                                      const FullExecAnalysis &exec)
-      : OpRewritePattern<VCndmaskB32TupleOp>(context), exec(exec),
-        workgroupSize(workgroupSize) {}
+                                      CandidateIndex &index)
+      : OpRewritePattern<VCndmaskB32TupleOp>(context), index(index) {}
 
   LogicalResult matchAndRewrite(VCndmaskB32TupleOp op,
                                 PatternRewriter &rewriter) const override {
-    std::optional<PermlaneCandidate> lower =
-        matchPermlaneCandidate(op, workgroupSize, exec);
+    std::optional<PermlaneCandidate> lower = index.matchSelect(op);
     if (!lower || lower->half != PermlaneHalf::Lower)
       return failure();
-    std::optional<PermlaneCandidate> upper =
-        findUpperCandidate(*lower, workgroupSize, exec);
+    std::optional<PermlaneCandidate> upper = findUpperCandidate(*lower, index);
     if (!upper)
       return failure();
+    assert(sameValues(lower->firstWords, upper->firstWords) &&
+           sameValues(lower->secondWords, upper->secondWords) &&
+           "indexed sources must retain equality");
 
     // Shared source words dominate the lower select through its payloads.
     SmallVector<Value> sourceWords(lower->firstWords);
@@ -627,8 +841,7 @@ struct BpermuteSelectPairToPermlanePattern
     return success();
   }
 
-  const FullExecAnalysis &exec;
-  unsigned workgroupSize;
+  CandidateIndex &index;
 };
 
 struct DsPermuteToSwizzlePattern : public OpRewritePattern<DsPermuteB32Op> {
@@ -655,107 +868,24 @@ struct DsPermuteToSwizzlePattern : public OpRewritePattern<DsPermuteB32Op> {
   unsigned wavefrontSize;
 };
 
-static std::optional<unsigned>
-evaluateBpermuteSource(DsBpermuteB32Op op, unsigned lane, unsigned workitemX) {
-  if (op.getOffset() != 0)
-    return std::nullopt;
-  MachineU32Evaluator evaluator(lane, workitemX);
-  std::optional<uint32_t> byteAddress = evaluator.evaluate(op.getAddr());
-  if (!byteAddress || *byteAddress % 4 != 0 || *byteAddress / 4 >= 64)
-    return std::nullopt;
-  return *byteAddress / 4;
-}
-
-static bool isHalfExchangeAtLane(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
-                                 unsigned lane, unsigned workitemX) {
-  std::optional<unsigned> lhsSource =
-      evaluateBpermuteSource(lhs, lane, workitemX);
-  std::optional<unsigned> rhsSource =
-      evaluateBpermuteSource(rhs, lane, workitemX);
-  if (!lhsSource || !rhsSource)
-    return false;
-  unsigned otherHalf = lane ^ 32;
-  return (*lhsSource == lane && *rhsSource == otherHalf) ||
-         (*rhsSource == lane && *lhsSource == otherHalf);
-}
-
-static bool isHalfExchangePair(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
-                               unsigned workgroupSize) {
-  if (!lhs || !rhs || lhs.getData() != rhs.getData() || workgroupSize < 64 ||
-      workgroupSize % 64 != 0)
-    return false;
-  for (unsigned wave : llvm::seq<unsigned>(workgroupSize / 64)) {
-    unsigned waveBase = wave * 64;
-    for (unsigned lane : llvm::seq<unsigned>(0, 64))
-      if (!isHalfExchangeAtLane(lhs, rhs, lane, waveBase + lane))
-        return false;
-  }
-  return true;
-}
-
-static std::optional<PermlaneHalf>
-classifyHalfBroadcast(DsBpermuteB32Op op, unsigned workgroupSize) {
-  if (!op || workgroupSize < 64 || workgroupSize % 64 != 0)
-    return std::nullopt;
-
-  bool lower = true;
-  bool upper = true;
-  for (unsigned wave : llvm::seq<unsigned>(workgroupSize / 64)) {
-    unsigned waveBase = wave * 64;
-    for (unsigned lane : llvm::seq<unsigned>(0, 64)) {
-      std::optional<unsigned> source =
-          evaluateBpermuteSource(op, lane, waveBase + lane);
-      if (!source)
-        return std::nullopt;
-      lower &= *source == lane % 32;
-      upper &= *source == 32 + lane % 32;
-    }
-  }
-  if (lower == upper)
-    return std::nullopt;
-  return lower ? PermlaneHalf::Lower : PermlaneHalf::Upper;
-}
-
-static DsBpermuteB32Op findHalfBroadcastPartner(DsBpermuteB32Op op,
-                                                PermlaneHalf half,
-                                                unsigned workgroupSize,
-                                                const FullExecAnalysis &exec) {
-  for (Operation *cursor = op->getNextNode(); cursor;
-       cursor = cursor->getNextNode()) {
-    if (!exec.sameSegment(op, cursor))
-      break;
-    DsBpermuteB32Op candidate = dyn_cast<DsBpermuteB32Op>(cursor);
-    if (!candidate || candidate.getData() != op.getData())
-      continue;
-    std::optional<PermlaneHalf> candidateHalf =
-        classifyHalfBroadcast(candidate, workgroupSize);
-    if (candidateHalf && *candidateHalf != half)
-      return candidate;
-  }
-  return {};
-}
-
 struct BpermuteHalfBroadcastPairToPermlanePattern
     : public OpRewritePattern<DsBpermuteB32Op> {
   BpermuteHalfBroadcastPairToPermlanePattern(MLIRContext *context,
-                                             unsigned workgroupSize,
-                                             const FullExecAnalysis &exec)
-      : OpRewritePattern<DsBpermuteB32Op>(context), exec(exec),
-        workgroupSize(workgroupSize) {}
+                                             CandidateIndex &index)
+      : OpRewritePattern<DsBpermuteB32Op>(context), index(index) {}
 
   LogicalResult matchAndRewrite(DsBpermuteB32Op op,
                                 PatternRewriter &rewriter) const override {
-    if (!exec.contains(op))
-      return failure();
-    std::optional<PermlaneHalf> opHalf =
-        classifyHalfBroadcast(op, workgroupSize);
+    std::optional<PermlaneHalf> opHalf = index.getHalf(op);
     if (!opHalf)
       return failure();
 
     DsBpermuteB32Op partner =
-        findHalfBroadcastPartner(op, *opHalf, workgroupSize, exec);
+        cast_if_present<DsBpermuteB32Op>(index.findPartner(op));
     if (!partner)
       return failure();
+    assert(op.getData() == partner.getData() &&
+           "indexed sources must retain equality");
 
     Type pairType =
         RegType::get(op.getContext(), RegClass::VGPR, 2, /*index=*/-1);
@@ -776,8 +906,7 @@ struct BpermuteHalfBroadcastPairToPermlanePattern
     return success();
   }
 
-  const FullExecAnalysis &exec;
-  unsigned workgroupSize;
+  CandidateIndex &index;
 };
 
 static bool isOtherHalfExchange(DsBpermuteB32Op op, unsigned workgroupSize) {
@@ -911,15 +1040,16 @@ static LogicalResult runOnFunc(func::FuncOp func) {
     return failure();
 
   FullExecAnalysis exec(func);
+  CandidateIndex index(exec);
   RewritePatternSet patterns(func.getContext());
   patterns.add<DsPermuteToSwizzlePattern>(func.getContext(), *wavefrontSize);
   std::optional<unsigned> workgroupSize = getXLinearWorkgroupSize(func);
   if (*wavefrontSize == 64 && workgroupSize &&
       VPermlane32SwapB32TupleOp::isSupportedOnIsa(*isa)) {
-    patterns.add<BpermuteSelectPairToPermlanePattern>(func.getContext(),
-                                                      *workgroupSize, exec);
-    patterns.add<BpermuteHalfBroadcastPairToPermlanePattern>(
-        func.getContext(), *workgroupSize, exec);
+    index.initialize(func, *workgroupSize);
+    patterns.add<BpermuteSelectPairToPermlanePattern>(func.getContext(), index);
+    patterns.add<BpermuteHalfBroadcastPairToPermlanePattern>(func.getContext(),
+                                                             index);
     patterns.add<BpermuteHalfReductionToPermlanePattern<VAddF32Op>,
                  BpermuteHalfReductionToPermlanePattern<VMaxF32Op>,
                  BpermutePairReductionToPermlanePattern<VAddF32Op>,
@@ -929,7 +1059,7 @@ static LogicalResult runOnFunc(func::FuncOp func) {
   return applyPatternsGreedily(
       func, std::move(patterns),
       GreedyRewriteConfig()
-          .setListener(&exec)
+          .setListener(&index)
           .enableFolding(false)
           .setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled));
 }
