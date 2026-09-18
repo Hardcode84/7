@@ -27,7 +27,7 @@ SCENARIOS = (
     "loop_partial",
 )
 CASES = (
-    *product(("direct", "pair", "broadcast", "select"), SCENARIOS),
+    *product(("direct", "pair", "broadcast", "broadcast_pair", "select"), SCENARIOS),
     ("select", "split_exec"),
     ("select", "split_region"),
 )
@@ -102,11 +102,14 @@ def prelude(kind, scenario):
 def producers(kind):
     if kind == "direct":
         return "", binary("second", "ds_bpermute_b32", "other_addr", "a")
-    if kind in ("pair", "broadcast"):
+    if kind in ("pair", "broadcast", "broadcast_pair"):
         first, second = ("lane", "other") if kind == "pair" else ("lo", "hi")
+        names = (
+            ("result0", "result1") if kind == "broadcast_pair" else ("first", "second")
+        )
         return (
-            binary("first", "ds_bpermute_b32", f"{first}_addr", "a"),
-            binary("second", "ds_bpermute_b32", f"{second}_addr", "a"),
+            binary(names[0], "ds_bpermute_b32", f"{first}_addr", "a"),
+            binary(names[1], "ds_bpermute_b32", f"{second}_addr", "a"),
         )
     halves = []
     for half in ("lo", "hi"):
@@ -120,6 +123,8 @@ def producers(kind):
 
 
 def consumers(kind):
+    if kind == "broadcast_pair":
+        return ""
     if kind == "select":
         return select("result0", "lo") + select("result1", "hi")
     first = "a" if kind == "direct" else "first"
@@ -225,8 +230,15 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {""")
         print(f"// CHECK-LABEL: func.func @{kind}_{scenario}(")
         if scenario in ("full", "after_exec", "loop_exec"):
             print("// CHECK: waveamdmachine.v_permlane32_swap_b32_tuple")
-        elif kind in ("select", "broadcast") and scenario in ("consumer", "nested"):
-            opcode = "v_cndmask_b32_tuple" if kind == "select" else "v_add_f32"
+        elif kind in ("select", "broadcast", "broadcast_pair") and scenario in (
+            "consumer",
+            "nested",
+        ):
+            opcode = {
+                "select": "v_cndmask_b32_tuple",
+                "broadcast": "v_add_f32",
+                "broadcast_pair": "v_permlane32_swap_b32_tuple",
+            }[kind]
             print(f"// CHECK: waveamdmachine.{opcode}")
         else:
             print("// CHECK-NOT: waveamdmachine.v_permlane32_swap")
@@ -241,8 +253,8 @@ def reference_lane(kind, item, lane, a, b, first_mask, second_mask):
     def read(data, source, mask):
         return data[item - lane + source] if mask >> source & 1 else 0
 
-    if kind == "select":
-        data = a if lane < 32 else b
+    if kind in ("select", "broadcast_pair"):
+        data = b if kind == "select" and lane >= 32 else a
         return (
             read(data, lane % 32, first_mask),
             read(data, lane % 32 + 32, second_mask),

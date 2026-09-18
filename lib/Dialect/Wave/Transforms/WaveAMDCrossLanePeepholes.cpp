@@ -56,6 +56,8 @@ public:
       markBlock(func.getBody().front(), preserves);
   }
 
+  bool contains(Operation *op) const { return segments.contains(op); }
+
   bool sameSegment(Operation *lhs, Operation *rhs) const {
     unsigned segment = segments.lookup(lhs);
     return segment && segment == segments.lookup(rhs);
@@ -691,38 +693,6 @@ static bool isHalfExchangePair(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
   return true;
 }
 
-static bool preservesExec(Operation *op) {
-  if (isa<UniformLoopOp, UniformIfOp>(op))
-    return llvm::all_of(op->getRegions(), [](Region &region) {
-      return llvm::all_of(region.getOps(), [](Operation &nested) {
-        return preservesExec(&nested);
-      });
-    });
-  if (op->getNumRegions() ||
-      op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
-    return false;
-  if (isa<LabelOp, SCBranchExeczOp, SCBranchScc0Op, SCBranchScc1Op, SSetpcB64Op,
-          SEndpgmOp>(op))
-    return false;
-  return op->getDialect() ==
-         op->getContext()->getLoadedDialect<WaveAMDMachineDialect>();
-}
-
-static bool hasFullExec(Operation *op) {
-  Block *block = op->getBlock();
-  Operation *parent = block->getParentOp();
-  if (auto func = dyn_cast<func::FuncOp>(parent)) {
-    if (!func->hasAttr("wave.kernel") || block != &func.getBody().front())
-      return false;
-  } else if (!isa<UniformLoopOp, UniformIfOp>(parent) ||
-             !preservesExec(parent) || !hasFullExec(parent)) {
-    return false;
-  }
-  // Full kernel waves; masks and unknown control flow stop proof.
-  return llvm::all_of(llvm::make_range(block->begin(), op->getIterator()),
-                      [](Operation &before) { return preservesExec(&before); });
-}
-
 static std::optional<PermlaneHalf>
 classifyHalfBroadcast(DsBpermuteB32Op op, unsigned workgroupSize) {
   if (!op || workgroupSize < 64 || workgroupSize % 64 != 0)
@@ -748,10 +718,11 @@ classifyHalfBroadcast(DsBpermuteB32Op op, unsigned workgroupSize) {
 
 static DsBpermuteB32Op findHalfBroadcastPartner(DsBpermuteB32Op op,
                                                 PermlaneHalf half,
-                                                unsigned workgroupSize) {
+                                                unsigned workgroupSize,
+                                                const FullExecAnalysis &exec) {
   for (Operation *cursor = op->getNextNode(); cursor;
        cursor = cursor->getNextNode()) {
-    if (cursor->getNumRegions() || !preservesExec(cursor))
+    if (!exec.sameSegment(op, cursor))
       break;
     DsBpermuteB32Op candidate = dyn_cast<DsBpermuteB32Op>(cursor);
     if (!candidate || candidate.getData() != op.getData())
@@ -767,19 +738,22 @@ static DsBpermuteB32Op findHalfBroadcastPartner(DsBpermuteB32Op op,
 struct BpermuteHalfBroadcastPairToPermlanePattern
     : public OpRewritePattern<DsBpermuteB32Op> {
   BpermuteHalfBroadcastPairToPermlanePattern(MLIRContext *context,
-                                             unsigned workgroupSize)
-      : OpRewritePattern<DsBpermuteB32Op>(context),
+                                             unsigned workgroupSize,
+                                             const FullExecAnalysis &exec)
+      : OpRewritePattern<DsBpermuteB32Op>(context), exec(exec),
         workgroupSize(workgroupSize) {}
 
   LogicalResult matchAndRewrite(DsBpermuteB32Op op,
                                 PatternRewriter &rewriter) const override {
+    if (!exec.contains(op))
+      return failure();
     std::optional<PermlaneHalf> opHalf =
         classifyHalfBroadcast(op, workgroupSize);
-    if (!opHalf || !hasFullExec(op))
+    if (!opHalf)
       return failure();
 
     DsBpermuteB32Op partner =
-        findHalfBroadcastPartner(op, *opHalf, workgroupSize);
+        findHalfBroadcastPartner(op, *opHalf, workgroupSize, exec);
     if (!partner)
       return failure();
 
@@ -802,6 +776,7 @@ struct BpermuteHalfBroadcastPairToPermlanePattern
     return success();
   }
 
+  const FullExecAnalysis &exec;
   unsigned workgroupSize;
 };
 
@@ -943,8 +918,8 @@ static LogicalResult runOnFunc(func::FuncOp func) {
       VPermlane32SwapB32TupleOp::isSupportedOnIsa(*isa)) {
     patterns.add<BpermuteSelectPairToPermlanePattern>(func.getContext(),
                                                       *workgroupSize, exec);
-    patterns.add<BpermuteHalfBroadcastPairToPermlanePattern>(func.getContext(),
-                                                             *workgroupSize);
+    patterns.add<BpermuteHalfBroadcastPairToPermlanePattern>(
+        func.getContext(), *workgroupSize, exec);
     patterns.add<BpermuteHalfReductionToPermlanePattern<VAddF32Op>,
                  BpermuteHalfReductionToPermlanePattern<VMaxF32Op>,
                  BpermutePairReductionToPermlanePattern<VAddF32Op>,
