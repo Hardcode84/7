@@ -11,8 +11,8 @@ import subprocess
 from pathlib import Path
 from typing import ClassVar
 
-HIP_MEMCPY_HOST_TO_DEVICE = 1
-HIP_MEMCPY_DEVICE_TO_HOST = 2
+from hip_runtime import Hip, kernel_arguments
+
 HIP_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION = 4
 WORKGROUPS = 8
 WORKGROUPS_PER_CLUSTER = 4
@@ -67,67 +67,6 @@ assert HipLaunchConfig.num_attrs.offset == 48
 assert ctypes.sizeof(HipLaunchConfig) == 56
 
 
-class Hip:
-    def __init__(self, lib_path: str):
-        self.lib = ctypes.CDLL(lib_path)
-        self._bind()
-
-    def _bind(self):
-        self.lib.hipInit.argtypes = [ctypes.c_uint]
-        self.lib.hipInit.restype = ctypes.c_int
-        self.lib.hipGetErrorString.argtypes = [ctypes.c_int]
-        self.lib.hipGetErrorString.restype = ctypes.c_char_p
-        self.lib.hipMalloc.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_size_t,
-        ]
-        self.lib.hipMalloc.restype = ctypes.c_int
-        self.lib.hipFree.argtypes = [ctypes.c_void_p]
-        self.lib.hipFree.restype = ctypes.c_int
-        self.lib.hipMemcpy.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_int,
-        ]
-        self.lib.hipMemcpy.restype = ctypes.c_int
-        self.lib.hipModuleLoad.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_char_p,
-        ]
-        self.lib.hipModuleLoad.restype = ctypes.c_int
-        self.lib.hipModuleUnload.argtypes = [ctypes.c_void_p]
-        self.lib.hipModuleUnload.restype = ctypes.c_int
-        self.lib.hipModuleGetFunction.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-        ]
-        self.lib.hipModuleGetFunction.restype = ctypes.c_int
-        try:
-            self.launch_kernel_ex = self.lib.hipDrvLaunchKernelEx
-        except AttributeError as error:
-            raise RuntimeError(
-                "gfx1250 cluster launch requires hipDrvLaunchKernelEx"
-            ) from error
-        self.launch_kernel_ex.argtypes = [
-            ctypes.POINTER(HipLaunchConfig),
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_void_p,
-        ]
-        self.launch_kernel_ex.restype = ctypes.c_int
-        self.lib.hipDeviceSynchronize.argtypes = []
-        self.lib.hipDeviceSynchronize.restype = ctypes.c_int
-
-    def check(self, code: int, what: str):
-        if code == 0:
-            return
-        raw = self.lib.hipGetErrorString(code)
-        message = raw.decode() if raw else f"hip error {code}"
-        raise RuntimeError(f"{what}: {message}")
-
-
 def system_has_gfx1250() -> bool:
     rocminfo = shutil.which("rocminfo")
     if not rocminfo:
@@ -169,36 +108,6 @@ def int_array(value: int):
     return (ctypes.c_int32 * count)(*([value] * count))
 
 
-def ptr_to(value) -> ctypes.c_void_p:
-    return ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)
-
-
-def copy_to_device(hip: Hip, device: ctypes.c_void_p, host):
-    hip.check(
-        hip.lib.hipMemcpy(
-            device,
-            ctypes.cast(host, ctypes.c_void_p),
-            ctypes.sizeof(host),
-            HIP_MEMCPY_HOST_TO_DEVICE,
-        ),
-        "hipMemcpy host-to-device",
-    )
-
-
-def copy_from_device(hip: Hip, device: ctypes.c_void_p):
-    host = int_array(SENTINEL)
-    hip.check(
-        hip.lib.hipMemcpy(
-            ctypes.cast(host, ctypes.c_void_p),
-            device,
-            ctypes.sizeof(host),
-            HIP_MEMCPY_DEVICE_TO_HOST,
-        ),
-        "hipMemcpy device-to-host",
-    )
-    return host
-
-
 def verify_scratch(values):
     for workgroup in range(WORKGROUPS):
         for thread in range(THREADS_PER_WORKGROUP):
@@ -230,11 +139,15 @@ def launch(
     scratch: ctypes.c_void_p,
     output: ctypes.c_void_p,
 ):
-    scratch_arg = ctypes.c_void_p(scratch.value)
-    output_arg = ctypes.c_void_p(output.value)
-    params = (ctypes.c_void_p * 2)(
-        ptr_to(scratch_arg),
-        ptr_to(output_arg),
+    params = kernel_arguments((scratch, output))
+    launch_kernel_ex = hip.bind(
+        "hipDrvLaunchKernelEx",
+        [
+            ctypes.POINTER(HipLaunchConfig),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+        ],
     )
     attr = HipLaunchAttribute()
     attr.id = HIP_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
@@ -252,7 +165,7 @@ def launch(
         1,
     )
     hip.check(
-        hip.launch_kernel_ex(
+        launch_kernel_ex(
             ctypes.byref(config),
             function,
             params,
@@ -260,7 +173,7 @@ def launch(
         ),
         "hipDrvLaunchKernelEx",
     )
-    hip.check(hip.lib.hipDeviceSynchronize(), "hipDeviceSynchronize")
+    hip.synchronize()
 
 
 def run_kernel(
@@ -270,22 +183,16 @@ def run_kernel(
     scratch: ctypes.c_void_p,
     output: ctypes.c_void_p,
 ):
-    function = ctypes.c_void_p()
-    hip.check(
-        hip.lib.hipModuleGetFunction(
-            ctypes.byref(function),
-            module,
-            kernel.encode(),
-        ),
-        "hipModuleGetFunction",
-    )
-    scratch_seed = int_array(SENTINEL)
-    output_seed = int_array(SENTINEL)
-    copy_to_device(hip, scratch, scratch_seed)
-    copy_to_device(hip, output, output_seed)
+    function = hip.get_function(module, kernel)
+    scratch_host = int_array(SENTINEL)
+    output_host = int_array(SENTINEL)
+    hip.copy_to_device(scratch, scratch_host)
+    hip.copy_to_device(output, output_host)
     launch(hip, function, scratch, output)
-    verify_scratch(copy_from_device(hip, scratch))
-    verify_broadcast(copy_from_device(hip, output))
+    hip.copy_from_device(scratch, scratch_host)
+    hip.copy_from_device(output, output_host)
+    verify_scratch(scratch_host)
+    verify_broadcast(output_host)
 
 
 def run(args: argparse.Namespace):
@@ -293,35 +200,13 @@ def run(args: argparse.Namespace):
         print("gfx1250 cluster runtime skipped: gfx1250 unavailable")
         return
 
-    hip = Hip(find_hip_runtime())
-    hip.check(hip.lib.hipInit(0), "hipInit")
-    module = ctypes.c_void_p()
-    scratch = ctypes.c_void_p()
-    output = ctypes.c_void_p()
     byte_count = WORKGROUPS * THREADS_PER_WORKGROUP * ctypes.sizeof(ctypes.c_int32)
-    hip.check(
-        hip.lib.hipModuleLoad(ctypes.byref(module), str(args.hsaco).encode()),
-        "hipModuleLoad",
-    )
-    try:
-        try:
-            hip.check(
-                hip.lib.hipMalloc(ctypes.byref(scratch), byte_count),
-                "hipMalloc scratch",
-            )
-            hip.check(
-                hip.lib.hipMalloc(ctypes.byref(output), byte_count),
-                "hipMalloc output",
-            )
-            for kernel in ("gfx1250_cluster_load", "gfx1250_cluster_load_async"):
-                run_kernel(hip, module, kernel, scratch, output)
-        finally:
-            if output.value:
-                hip.check(hip.lib.hipFree(output), "hipFree output")
-            if scratch.value:
-                hip.check(hip.lib.hipFree(scratch), "hipFree scratch")
-    finally:
-        hip.check(hip.lib.hipModuleUnload(module), "hipModuleUnload")
+    with Hip(find_hip_runtime()) as hip:
+        binary = hip.load_module(args.hsaco)
+        scratch = hip.allocate(byte_count)
+        output = hip.allocate(byte_count)
+        for kernel in ("gfx1250_cluster_load", "gfx1250_cluster_load_async"):
+            run_kernel(hip, binary, kernel, scratch, output)
     print("gfx1250 cluster runtime passed")
 
 

@@ -8,67 +8,7 @@ import random
 import re
 from pathlib import Path
 
-HIP_MEMCPY_HOST_TO_DEVICE = 1
-HIP_MEMCPY_DEVICE_TO_HOST = 2
-
-
-class Hip:
-    def __init__(self, lib_path: str):
-        self.lib = ctypes.CDLL(lib_path)
-        self._bind()
-
-    def _bind(self):
-        self.lib.hipInit.argtypes = [ctypes.c_uint]
-        self.lib.hipInit.restype = ctypes.c_int
-        self.lib.hipGetErrorString.argtypes = [ctypes.c_int]
-        self.lib.hipGetErrorString.restype = ctypes.c_char_p
-        self.lib.hipMalloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]
-        self.lib.hipMalloc.restype = ctypes.c_int
-        self.lib.hipFree.argtypes = [ctypes.c_void_p]
-        self.lib.hipFree.restype = ctypes.c_int
-        self.lib.hipMemcpy.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_int,
-        ]
-        self.lib.hipMemcpy.restype = ctypes.c_int
-        self.lib.hipModuleLoad.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_char_p,
-        ]
-        self.lib.hipModuleLoad.restype = ctypes.c_int
-        self.lib.hipModuleUnload.argtypes = [ctypes.c_void_p]
-        self.lib.hipModuleUnload.restype = ctypes.c_int
-        self.lib.hipModuleGetFunction.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-        ]
-        self.lib.hipModuleGetFunction.restype = ctypes.c_int
-        self.lib.hipModuleLaunchKernel.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_void_p,
-        ]
-        self.lib.hipModuleLaunchKernel.restype = ctypes.c_int
-        self.lib.hipDeviceSynchronize.argtypes = []
-        self.lib.hipDeviceSynchronize.restype = ctypes.c_int
-
-    def check(self, code: int, what: str):
-        if code == 0:
-            return
-        raw = self.lib.hipGetErrorString(code)
-        message = raw.decode() if raw else f"hip error {code}"
-        raise RuntimeError(f"{what}: {message}")
+from hip_runtime import Hip
 
 
 def parse_sizes(raw: str, wave_size: int, workgroup_size: int) -> list[int]:
@@ -135,81 +75,6 @@ def as_float_array(values: list[float]):
     return array_type(*values)
 
 
-def ptr_to(value) -> ctypes.c_void_p:
-    return ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)
-
-
-def copy_to_device(hip: Hip, device: ctypes.c_void_p, values: list[float]):
-    host = as_float_array(values)
-    hip.check(
-        hip.lib.hipMemcpy(
-            device,
-            ctypes.cast(host, ctypes.c_void_p),
-            ctypes.sizeof(host),
-            HIP_MEMCPY_HOST_TO_DEVICE,
-        ),
-        "hipMemcpy host-to-device",
-    )
-
-
-def copy_from_device(hip: Hip, device: ctypes.c_void_p, count: int) -> list[float]:
-    host = (ctypes.c_float * count)()
-    hip.check(
-        hip.lib.hipMemcpy(
-            ctypes.cast(host, ctypes.c_void_p),
-            device,
-            ctypes.sizeof(host),
-            HIP_MEMCPY_DEVICE_TO_HOST,
-        ),
-        "hipMemcpy device-to-host",
-    )
-    return list(host)
-
-
-def free_device(hip: Hip, device: ctypes.c_void_p, what: str):
-    if device.value:
-        hip.check(hip.lib.hipFree(device), what)
-
-
-def launch_saxpy(
-    hip: Hip,
-    function: ctypes.c_void_p,
-    workgroup_size: int,
-    grid_x: int,
-    device_x: ctypes.c_void_p,
-    device_y: ctypes.c_void_p,
-    alpha: float,
-    n: int,
-):
-    x_arg = ctypes.c_void_p(device_x.value)
-    y_arg = ctypes.c_void_p(device_y.value)
-    alpha_arg = ctypes.c_float(alpha)
-    n_arg = ctypes.c_uint32(n)
-    params = (ctypes.c_void_p * 4)(
-        ptr_to(x_arg),
-        ptr_to(y_arg),
-        ptr_to(alpha_arg),
-        ptr_to(n_arg),
-    )
-    hip.check(
-        hip.lib.hipModuleLaunchKernel(
-            function,
-            grid_x,
-            1,
-            1,
-            workgroup_size,
-            1,
-            1,
-            0,
-            None,
-            params,
-            None,
-        ),
-        "hipModuleLaunchKernel",
-    )
-    hip.check(hip.lib.hipDeviceSynchronize(), "hipDeviceSynchronize")
-
-
 def check_result(
     got: list[float],
     x: list[float],
@@ -236,52 +101,25 @@ def run(args: argparse.Namespace):
     sizes = parse_sizes(args.sizes, args.wave_size, workgroup_size)
     elem_count = round_up(max([*sizes, 1]), workgroup_size)
     x, y = make_data(elem_count, args.seed)
-
-    hip = Hip(args.hip_lib)
-    hip.check(hip.lib.hipInit(0), "hipInit")
-
-    module = ctypes.c_void_p()
-    function = ctypes.c_void_p()
-    device_x = ctypes.c_void_p()
-    device_y = ctypes.c_void_p()
-    byte_count = elem_count * ctypes.sizeof(ctypes.c_float)
-
-    hip.check(
-        hip.lib.hipModuleLoad(ctypes.byref(module), str(args.hsaco).encode()),
-        "hipModuleLoad",
-    )
-    try:
-        hip.check(
-            hip.lib.hipModuleGetFunction(
-                ctypes.byref(function), module, args.kernel.encode()
-            ),
-            "hipModuleGetFunction",
-        )
-        hip.check(hip.lib.hipMalloc(ctypes.byref(device_x), byte_count), "hipMalloc x")
-        hip.check(hip.lib.hipMalloc(ctypes.byref(device_y), byte_count), "hipMalloc y")
-        try:
-            copy_to_device(hip, device_x, x)
-            grid_x = elem_count // workgroup_size
-            for n in sizes:
-                copy_to_device(hip, device_y, y)
-                launch_saxpy(
-                    hip,
-                    function,
-                    workgroup_size,
-                    grid_x,
-                    device_x,
-                    device_y,
-                    args.alpha,
-                    n,
-                )
-                got = copy_from_device(hip, device_y, elem_count)
-                check_result(got, x, y, args.alpha, n)
-                print(f"n={n} ok")
-        finally:
-            free_device(hip, device_x, "hipFree x")
-            free_device(hip, device_y, "hipFree y")
-    finally:
-        hip.check(hip.lib.hipModuleUnload(module), "hipModuleUnload")
+    x_host, y_host = as_float_array(x), as_float_array(y)
+    output = (ctypes.c_float * elem_count)()
+    with Hip(args.hip_lib) as hip:
+        binary = hip.load_module(args.hsaco)
+        function = hip.get_function(binary, args.kernel)
+        device_x = hip.allocate(ctypes.sizeof(x_host))
+        device_y = hip.allocate(ctypes.sizeof(y_host))
+        hip.copy_to_device(device_x, x_host)
+        for n in sizes:
+            hip.copy_to_device(device_y, y_host)
+            hip.launch(
+                function,
+                (device_x, device_y, ctypes.c_float(args.alpha), ctypes.c_uint32(n)),
+                block=(workgroup_size, 1, 1),
+                grid=(elem_count // workgroup_size, 1, 1),
+            )
+            hip.copy_from_device(device_y, output)
+            check_result(list(output), x, y, args.alpha, n)
+            print(f"n={n} ok")
     print("saxpy ctypes runner ok")
 
 

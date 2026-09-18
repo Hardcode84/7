@@ -8,67 +8,7 @@ import random
 import struct
 from pathlib import Path
 
-HIP_MEMCPY_HOST_TO_DEVICE = 1
-HIP_MEMCPY_DEVICE_TO_HOST = 2
-
-
-class Hip:
-    def __init__(self, lib_path: str):
-        self.lib = ctypes.CDLL(lib_path)
-        self._bind()
-
-    def _bind(self):
-        self.lib.hipInit.argtypes = [ctypes.c_uint]
-        self.lib.hipInit.restype = ctypes.c_int
-        self.lib.hipGetErrorString.argtypes = [ctypes.c_int]
-        self.lib.hipGetErrorString.restype = ctypes.c_char_p
-        self.lib.hipMalloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]
-        self.lib.hipMalloc.restype = ctypes.c_int
-        self.lib.hipFree.argtypes = [ctypes.c_void_p]
-        self.lib.hipFree.restype = ctypes.c_int
-        self.lib.hipMemcpy.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_size_t,
-            ctypes.c_int,
-        ]
-        self.lib.hipMemcpy.restype = ctypes.c_int
-        self.lib.hipModuleLoad.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_char_p,
-        ]
-        self.lib.hipModuleLoad.restype = ctypes.c_int
-        self.lib.hipModuleUnload.argtypes = [ctypes.c_void_p]
-        self.lib.hipModuleUnload.restype = ctypes.c_int
-        self.lib.hipModuleGetFunction.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-        ]
-        self.lib.hipModuleGetFunction.restype = ctypes.c_int
-        self.lib.hipModuleLaunchKernel.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_void_p,
-        ]
-        self.lib.hipModuleLaunchKernel.restype = ctypes.c_int
-        self.lib.hipDeviceSynchronize.argtypes = []
-        self.lib.hipDeviceSynchronize.restype = ctypes.c_int
-
-    def check(self, code: int, what: str):
-        if code == 0:
-            return
-        raw = self.lib.hipGetErrorString(code)
-        message = raw.decode() if raw else f"hip error {code}"
-        raise RuntimeError(f"{what}: {message}")
+from hip_runtime import Hip
 
 
 def half_bits(value: float) -> int:
@@ -111,48 +51,6 @@ def as_array(ctype, values: list[int] | list[float]):
     return array_type(*values)
 
 
-def ptr_to(value) -> ctypes.c_void_p:
-    return ctypes.cast(ctypes.pointer(value), ctypes.c_void_p)
-
-
-def copy_to_device(hip: Hip, device: ctypes.c_void_p, host):
-    hip.check(
-        hip.lib.hipMemcpy(
-            device,
-            ctypes.cast(host, ctypes.c_void_p),
-            ctypes.sizeof(host),
-            HIP_MEMCPY_HOST_TO_DEVICE,
-        ),
-        "hipMemcpy host-to-device",
-    )
-
-
-def copy_f32_from_device(hip: Hip, device: ctypes.c_void_p, count: int) -> list[float]:
-    host = (ctypes.c_float * count)()
-    hip.check(
-        hip.lib.hipMemcpy(
-            ctypes.cast(host, ctypes.c_void_p),
-            device,
-            ctypes.sizeof(host),
-            HIP_MEMCPY_DEVICE_TO_HOST,
-        ),
-        "hipMemcpy device-to-host",
-    )
-    return list(host)
-
-
-def launch(hip: Hip, function: ctypes.c_void_p, grid_x: int, grid_y: int, *devs):
-    args = [ctypes.c_void_p(dev.value) for dev in devs]
-    params = (ctypes.c_void_p * len(args))(*(ptr_to(arg) for arg in args))
-    hip.check(
-        hip.lib.hipModuleLaunchKernel(
-            function, grid_x, grid_y, 1, 32, 1, 1, 0, None, params, None
-        ),
-        "hipModuleLaunchKernel",
-    )
-    hip.check(hip.lib.hipDeviceSynchronize(), "hipDeviceSynchronize")
-
-
 def check_close(got: list[float], expected: list[float], tolerance: float):
     if len(got) != len(expected) or len(got) % 256:
         raise AssertionError(
@@ -172,11 +70,6 @@ def check_close(got: list[float], expected: list[float], tolerance: float):
     print(f"max_abs_error={worst:.6f}")
 
 
-def free_device(hip: Hip, device: ctypes.c_void_p, what: str):
-    if device.value:
-        hip.check(hip.lib.hipFree(device), what)
-
-
 def run(args: argparse.Namespace):
     if args.m % 16 or args.n % 16 or args.k % 16:
         raise ValueError("m, n, and k must be multiples of 16")
@@ -186,35 +79,18 @@ def run(args: argparse.Namespace):
     b_host = as_array(ctypes.c_uint16, b_raw)
     c_host = as_array(ctypes.c_float, [float("nan")] * len(expected))
 
-    hip = Hip(args.hip_lib)
-    hip.check(hip.lib.hipInit(0), "hipInit")
-    module = ctypes.c_void_p()
-    function = ctypes.c_void_p()
-    devs = [ctypes.c_void_p() for _ in range(3)]
-
-    hip.check(
-        hip.lib.hipModuleLoad(ctypes.byref(module), str(args.hsaco).encode()),
-        "hipModuleLoad",
-    )
-    try:
-        hip.check(
-            hip.lib.hipModuleGetFunction(
-                ctypes.byref(function), module, args.kernel.encode()
-            ),
-            "hipModuleGetFunction",
+    with Hip(args.hip_lib) as hip:
+        binary = hip.load_module(args.hsaco)
+        function = hip.get_function(binary, args.kernel)
+        hosts = (a_host, b_host, c_host)
+        devices = [hip.allocate(ctypes.sizeof(host)) for host in hosts]
+        for device, host in zip(devices, hosts, strict=True):
+            hip.copy_to_device(device, host)
+        hip.launch(
+            function, devices, grid=(args.m // 16, args.n // 16, 1), block=(32, 1, 1)
         )
-        for dev, host, name in zip(devs, (a_host, b_host, c_host), "abc", strict=True):
-            hip.check(hip.lib.hipMalloc(ctypes.byref(dev), ctypes.sizeof(host)), name)
-            copy_to_device(hip, dev, host)
-        launch(hip, function, args.m // 16, args.n // 16, *devs)
-        got = copy_f32_from_device(hip, devs[2], len(expected))
-        check_close(got, expected, args.tolerance)
-    finally:
-        for dev, name in zip(
-            devs, ("hipFree a", "hipFree b", "hipFree c"), strict=True
-        ):
-            free_device(hip, dev, name)
-        hip.check(hip.lib.hipModuleUnload(module), "hipModuleUnload")
+        hip.copy_from_device(devices[2], c_host)
+        check_close(list(c_host), expected, args.tolerance)
     print("wavec WMMA matmul random ok")
 
 

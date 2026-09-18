@@ -2,32 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import argparse
-import ctypes
-from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
 from cross_lane_exec import CASES, expected_output
-from half_broadcast_runner import launch
-from wavec_saxpy_ctypes_runner import Hip
+from hip_runtime import Hip
 
 
 def run(args):
-    hip = Hip(args.hip_lib)
-    hip.check(hip.lib.hipInit(0), "initialize HIP")
-    with ExitStack() as cleanup:
-        device = ctypes.c_void_p()
-        hip.check(hip.lib.hipMalloc(ctypes.byref(device), 512 * 4), "allocate")
-        cleanup.callback(lambda: hip.check(hip.lib.hipFree(device), "free"))
+    with Hip(args.hip_lib) as hip:
+        device = hip.allocate(512 * 4)
         binaries = []
         for path in (args.original, args.optimized):
-            binary = ctypes.c_void_p()
-            hip.check(
-                hip.lib.hipModuleLoad(ctypes.byref(binary), str(path).encode()), "load"
-            )
-            cleanup.callback(
-                lambda b=binary: hip.check(hip.lib.hipModuleUnload(b), "unload")
-            )
+            binary = hip.load_module(path)
             binaries.append(binary)
         for kind, scenario in CASES:
             name = f"{kind}_{scenario}"
@@ -35,7 +22,11 @@ def run(args):
             for variant, binary in zip(
                 ("original", "optimized"), binaries, strict=True
             ):
-                actual = launch(hip, binary, name, device)
+                actual = np.full(512, -1, dtype=np.int32)
+                hip.copy_to_device(device, actual)
+                function = hip.get_function(binary, name)
+                hip.launch(function, (device,), block=(256, 1, 1))
+                hip.copy_from_device(device, actual)
                 np.testing.assert_array_equal(
                     actual, expected, err_msg=f"{variant} {name}"
                 )

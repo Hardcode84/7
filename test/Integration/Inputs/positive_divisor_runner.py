@@ -4,31 +4,15 @@
 import argparse
 import ctypes
 import random
-from contextlib import ExitStack
 from pathlib import Path
 
-from wavec_saxpy_ctypes_runner import (
-    HIP_MEMCPY_DEVICE_TO_HOST,
-    HIP_MEMCPY_HOST_TO_DEVICE,
-    Hip,
-    ptr_to,
-)
+from hip_runtime import Hip
 
 
 def launch_and_check(hip, function, params, output, dividends, divisor):
-    arguments = (ctypes.c_void_p * len(params))(*(ptr_to(p) for p in params))
-    hip.check(
-        hip.lib.hipModuleLaunchKernel(
-            function, 1, 1, 1, len(dividends), 1, 1, 0, None, arguments, None
-        ),
-        "hipModuleLaunchKernel",
-    )
-    hip.check(hip.lib.hipDeviceSynchronize(), "hipDeviceSynchronize")
+    hip.launch(function, params, block=(len(dividends), 1, 1))
     host = (ctypes.c_int32 * (2 * len(dividends)))()
-    hip.check(
-        hip.lib.hipMemcpy(host, output, ctypes.sizeof(host), HIP_MEMCPY_DEVICE_TO_HOST),
-        "hipMemcpy output",
-    )
+    hip.copy_from_device(output, host)
     for lane, dividend in enumerate(dividends):
         quotient = abs(dividend) // abs(divisor)
         if (dividend < 0) != (divisor < 0):
@@ -57,12 +41,7 @@ def check_kernel(
                 if not negative_constant:
                     params.append(scalar(divisor))
                 launch_and_check(
-                    hip,
-                    function,
-                    params,
-                    output,
-                    [dividend] * len(lanes),
-                    divisor,
+                    hip, function, params, output, [dividend] * len(lanes), divisor
                 )
 
 
@@ -80,37 +59,13 @@ def run(args):
     )
     lanes = [dividends[i % len(dividends)] for i in range(args.wave_size)]
     host_input = (ctypes.c_int32 * args.wave_size)(*lanes)
-    hip = Hip(args.hip_lib)
-    hip.check(hip.lib.hipInit(0), "hipInit")
-    binary = ctypes.c_void_p()
-    source = ctypes.c_void_p()
-    output = ctypes.c_void_p()
-    with ExitStack() as cleanup:
-        hip.check(
-            hip.lib.hipModuleLoad(ctypes.byref(binary), str(args.hsaco).encode()),
-            "hipModuleLoad",
-        )
-        cleanup.callback(lambda: hip.check(hip.lib.hipModuleUnload(binary), "unload"))
-        for device, size in [
-            (source, args.wave_size * 4),
-            (output, args.wave_size * 8),
-        ]:
-            hip.check(hip.lib.hipMalloc(ctypes.byref(device), size), "hipMalloc")
-            cleanup.callback(lambda p=device: hip.check(hip.lib.hipFree(p), "hipFree"))
-        hip.check(
-            hip.lib.hipMemcpy(
-                source, host_input, ctypes.sizeof(host_input), HIP_MEMCPY_HOST_TO_DEVICE
-            ),
-            "hipMemcpy input",
-        )
+    with Hip(args.hip_lib) as hip:
+        binary = hip.load_module(args.hsaco)
+        source = hip.allocate(args.wave_size * 4)
+        output = hip.allocate(args.wave_size * 8)
+        hip.copy_to_device(source, host_input)
         for name in ["scalar", "narrow", "simd"]:
-            function = ctypes.c_void_p()
-            hip.check(
-                hip.lib.hipModuleGetFunction(
-                    ctypes.byref(function), binary, f"{prefix}_{name}".encode()
-                ),
-                "hipModuleGetFunction",
-            )
+            function = hip.get_function(binary, f"{prefix}_{name}")
             check_kernel(
                 hip,
                 function,

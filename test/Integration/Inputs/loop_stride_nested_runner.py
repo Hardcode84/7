@@ -3,16 +3,10 @@
 
 import argparse
 import ctypes
-from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
-from wavec_saxpy_ctypes_runner import (
-    HIP_MEMCPY_DEVICE_TO_HOST,
-    HIP_MEMCPY_HOST_TO_DEVICE,
-    Hip,
-    ptr_to,
-)
+from hip_runtime import Hip
 
 CASES = [
     (3, 7, 2, 0, 4, 1),
@@ -41,53 +35,19 @@ def expected_output(initial, bounds, width):
 
 def execute(hip, binary, device, initial, bounds, width):
     result = initial.copy()
-    hip.check(
-        hip.lib.hipMemcpy(
-            device, result.ctypes.data, result.nbytes, HIP_MEMCPY_HOST_TO_DEVICE
-        ),
-        "initialize storage",
-    )
-    function = ctypes.c_void_p()
-    hip.check(
-        hip.lib.hipModuleGetFunction(ctypes.byref(function), binary, b"nested_offsets"),
-        "get function",
-    )
+    hip.copy_to_device(device, result)
+    function = hip.get_function(binary, "nested_offsets")
     params = [device, *(ctypes.c_int32(x) for x in bounds)]
-    arguments = (ctypes.c_void_p * len(params))(*(ptr_to(x) for x in params))
-    hip.check(
-        hip.lib.hipModuleLaunchKernel(
-            function, 1, 1, 1, width, 1, 1, 0, None, arguments, None
-        ),
-        "launch",
-    )
-    hip.check(hip.lib.hipDeviceSynchronize(), "synchronize")
-    hip.check(
-        hip.lib.hipMemcpy(
-            result.ctypes.data, device, result.nbytes, HIP_MEMCPY_DEVICE_TO_HOST
-        ),
-        "copy storage",
-    )
+    hip.launch(function, params, block=(width, 1, 1))
+    hip.copy_from_device(device, result)
     return result
 
 
 def run(args):
     initial = np.arange(2048, dtype=np.int32) * 3 + 11
-    hip = Hip(args.hip_lib)
-    hip.check(hip.lib.hipInit(0), "initialize HIP")
-    with ExitStack() as cleanup:
-        device = ctypes.c_void_p()
-        hip.check(hip.lib.hipMalloc(ctypes.byref(device), initial.nbytes), "allocate")
-        cleanup.callback(lambda: hip.check(hip.lib.hipFree(device), "free"))
-        binaries = []
-        for path in args.hsaco:
-            binary = ctypes.c_void_p()
-            hip.check(
-                hip.lib.hipModuleLoad(ctypes.byref(binary), str(path).encode()), "load"
-            )
-            cleanup.callback(
-                lambda b=binary: hip.check(hip.lib.hipModuleUnload(b), "unload")
-            )
-            binaries.append(binary)
+    with Hip(args.hip_lib) as hip:
+        device = hip.allocate(initial.nbytes)
+        binaries = [hip.load_module(path) for path in args.hsaco]
         for bounds in CASES:
             expected = expected_output(initial, bounds, args.wave_width)
             for path, binary in zip(args.hsaco, binaries, strict=True):

@@ -2,17 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import argparse
-import ctypes
-from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
-from wavec_saxpy_ctypes_runner import (
-    HIP_MEMCPY_DEVICE_TO_HOST,
-    HIP_MEMCPY_HOST_TO_DEVICE,
-    Hip,
-    ptr_to,
-)
+from hip_runtime import Hip
 
 CASES = {
     "redistribute_broadcast_pair": (0xFFFFFFFFFFFFFFFF, False),
@@ -41,50 +34,19 @@ def expected_output(mask, changed):
 
 def launch(hip, binary, name, device):
     output = np.full(512, -1, dtype=np.int32)
-    hip.check(
-        hip.lib.hipMemcpy(
-            device, output.ctypes.data, output.nbytes, HIP_MEMCPY_HOST_TO_DEVICE
-        ),
-        "initialize output",
-    )
-    function = ctypes.c_void_p()
-    hip.check(
-        hip.lib.hipModuleGetFunction(ctypes.byref(function), binary, name.encode()),
-        "get function",
-    )
-    arguments = (ctypes.c_void_p * 1)(ptr_to(device))
-    hip.check(
-        hip.lib.hipModuleLaunchKernel(
-            function, 1, 1, 1, 256, 1, 1, 0, None, arguments, None
-        ),
-        "launch",
-    )
-    hip.check(hip.lib.hipDeviceSynchronize(), "synchronize")
-    hip.check(
-        hip.lib.hipMemcpy(
-            output.ctypes.data, device, output.nbytes, HIP_MEMCPY_DEVICE_TO_HOST
-        ),
-        "copy output",
-    )
+    hip.copy_to_device(device, output)
+    function = hip.get_function(binary, name)
+    hip.launch(function, (device,), block=(256, 1, 1))
+    hip.copy_from_device(device, output)
     return output
 
 
 def run(args):
-    hip = Hip(args.hip_lib)
-    hip.check(hip.lib.hipInit(0), "initialize HIP")
-    with ExitStack() as cleanup:
-        device = ctypes.c_void_p()
-        hip.check(hip.lib.hipMalloc(ctypes.byref(device), 512 * 4), "allocate")
-        cleanup.callback(lambda: hip.check(hip.lib.hipFree(device), "free"))
+    with Hip(args.hip_lib) as hip:
+        device = hip.allocate(512 * 4)
         binaries = []
         for path in [args.original, args.optimized]:
-            binary = ctypes.c_void_p()
-            hip.check(
-                hip.lib.hipModuleLoad(ctypes.byref(binary), str(path).encode()), "load"
-            )
-            cleanup.callback(
-                lambda b=binary: hip.check(hip.lib.hipModuleUnload(b), "unload")
-            )
+            binary = hip.load_module(path)
             binaries.append(binary)
         for name, (mask, changed) in CASES.items():
             original, optimized = [launch(hip, b, name, device) for b in binaries]
