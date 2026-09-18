@@ -24,6 +24,10 @@ struct BufferSentinel {
   Value range;
 };
 
+FailureOr<bool> canUseBufferDmaAddress(waveamd::DmaLoadLdsOp dma,
+                                       Value descriptor,
+                                       DataFlowSolver &solver);
+
 inline bool isBufferSimdPointer(Type type) {
   auto simdType = dyn_cast<SimdType>(type);
   if (!simdType)

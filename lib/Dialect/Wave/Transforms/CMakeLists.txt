@@ -7,6 +7,7 @@ add_mlir_dialect_library(MLIRWaveTransforms
   RegAlloc/WaveAMDResourceInfo.cpp
   WaveAMDABILowering.cpp
   WaveAMDBarrierCleanup.cpp
+  WaveAMDBufferAddressAnalysis.cpp
   WaveAMDBufferRsrcToTuples.cpp
   WaveAMDCanonicalizePackedTuples.cpp
   WaveAMDCollapseMaterializationVariants.cpp
