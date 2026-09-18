@@ -131,7 +131,8 @@ static void replaceWhereResults(IRRewriter &rewriter, WhereOp where,
   rewriter.replaceOp(where, replacements);
 }
 
-static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {
+static bool rewriteWhere(IRRewriter &rewriter, WhereOp where,
+                         DataFlowSolver &solver) {
   if (where.getConditions().size() != 1 || where.getElseRegion().empty())
     return false;
 
@@ -146,7 +147,7 @@ static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {
     ops.push_back(&op);
   }
   FailureOr<buffer_predication::BufferSentinel> sentinel =
-      buffer_predication::findBufferSentinel(getMemoryPointer(memory));
+      buffer_predication::findBufferSentinel(getMemoryPointer(memory), solver);
   if (failed(sentinel))
     return false;
 
@@ -170,8 +171,13 @@ struct WaveAMDLowerBufferPredicationPass
     : public wave::impl::WaveAMDLowerBufferPredicationBase<
           WaveAMDLowerBufferPredicationPass> {
   void runOnOperation() override {
+    DataFlowSolver solver;
+    if (failed(buffer_predication::initializeRangeAnalysis(solver,
+                                                           getOperation())))
+      return signalPassFailure();
     IRRewriter rewriter(&getContext());
-    getOperation()->walk([&](WhereOp where) { rewriteWhere(rewriter, where); });
+    getOperation()->walk(
+        [&](WhereOp where) { rewriteWhere(rewriter, where, solver); });
   }
 };
 

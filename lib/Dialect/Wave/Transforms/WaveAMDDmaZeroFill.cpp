@@ -26,19 +26,28 @@ using namespace mlir::wave;
 
 namespace {
 
+struct PlannedDma {
+  waveamd::DmaLoadLdsOp dma;
+  buffer_predication::BufferSentinel sentinel;
+};
+
 static bool isZeroFillDma(waveamd::DmaLoadLdsOp op) {
   return op.getZeroFillInactive().value_or(false);
 }
 
-static bool canMoveOut(Operation *op,
-                       SmallVectorImpl<waveamd::DmaLoadLdsOp> &dmas) {
+static bool canMoveOut(Operation *op, SmallVectorImpl<PlannedDma> &dmas,
+                       DataFlowSolver &solver) {
   if (isa<YieldOp>(op))
     return true;
   if (auto dma = dyn_cast<waveamd::DmaLoadLdsOp>(op)) {
     if (!isZeroFillDma(dma))
       return false;
-    dmas.push_back(dma);
-    return succeeded(buffer_predication::findBufferSentinel(dma.getSource()));
+    FailureOr<buffer_predication::BufferSentinel> sentinel =
+        buffer_predication::findBufferSentinel(dma.getSource(), solver);
+    if (failed(sentinel))
+      return false;
+    dmas.push_back({dma, *sentinel});
+    return true;
   }
   if (op->getNumRegions() != 0)
     return false;
@@ -46,14 +55,14 @@ static bool canMoveOut(Operation *op,
 }
 
 static bool hasValidOtherwise(WhereOp where, Operation *terminator,
-                              ArrayRef<waveamd::DmaLoadLdsOp> dmas) {
+                              ArrayRef<PlannedDma> dmas) {
   Region &otherwise = where.getElseRegion();
   if (otherwise.empty())
     return true;
   auto thenYield = cast<YieldOp>(terminator);
   if (dmas.size() != 1 || thenYield.getValues().size() != 1)
     return false;
-  waveamd::DmaLoadLdsOp dma = dmas.front();
+  waveamd::DmaLoadLdsOp dma = dmas.front().dma;
   if (thenYield.getValues().front() != dma.getToken() ||
       !llvm::hasSingleElement(otherwise) ||
       !llvm::hasSingleElement(otherwise.front()))
@@ -64,7 +73,8 @@ static bool hasValidOtherwise(WhereOp where, Operation *terminator,
 }
 
 static bool collectMovableBody(WhereOp where, SmallVectorImpl<Operation *> &ops,
-                               SmallVectorImpl<waveamd::DmaLoadLdsOp> &dmas) {
+                               SmallVectorImpl<PlannedDma> &dmas,
+                               DataFlowSolver &solver) {
   if (where.getNumResults() > 1)
     return false;
   if (where.getNumResults() == 1 &&
@@ -76,7 +86,7 @@ static bool collectMovableBody(WhereOp where, SmallVectorImpl<Operation *> &ops,
   for (Operation &op : block) {
     if (&op == terminator)
       break;
-    if (!canMoveOut(&op, dmas))
+    if (!canMoveOut(&op, dmas, solver))
       return false;
     ops.push_back(&op);
   }
@@ -85,19 +95,13 @@ static bool collectMovableBody(WhereOp where, SmallVectorImpl<Operation *> &ops,
   return hasValidOtherwise(where, terminator, dmas);
 }
 
-static FailureOr<Value> createSelectedSource(IRRewriter &rewriter,
-                                             waveamd::DmaLoadLdsOp dma,
-                                             Value condition) {
-  return buffer_predication::createOOBSelectedBufferPointer(
-      rewriter, dma.getLoc(), dma.getSource(), condition);
-}
-
-static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {
+static bool rewriteWhere(IRRewriter &rewriter, WhereOp where,
+                         DataFlowSolver &solver) {
   if (where.getConditions().size() != 1)
     return false;
   SmallVector<Operation *> ops;
-  SmallVector<waveamd::DmaLoadLdsOp> dmas;
-  if (!collectMovableBody(where, ops, dmas))
+  SmallVector<PlannedDma> dmas;
+  if (!collectMovableBody(where, ops, dmas, solver))
     return false;
 
   YieldOp yield = cast<YieldOp>(where.getThenRegion().front().getTerminator());
@@ -105,14 +109,13 @@ static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {
   for (Operation *op : ops)
     op->moveBefore(where);
 
-  for (waveamd::DmaLoadLdsOp dma : dmas) {
+  for (auto [dma, sentinel] : dmas) {
     rewriter.setInsertionPoint(dma);
-    FailureOr<Value> source =
-        createSelectedSource(rewriter, dma, where.getCondition());
-    if (failed(source))
-      return false;
+    Value source = buffer_predication::createOOBSelectedBufferPointer(
+        rewriter, dma.getLoc(), dma.getSource(), where.getCondition(),
+        sentinel);
     rewriter.modifyOpInPlace(dma, [&] {
-      dma->setOperand(0, *source);
+      dma->setOperand(0, source);
       dma.setZeroFillInactive(false);
     });
   }
@@ -124,6 +127,10 @@ static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {
 struct WaveAMDDmaZeroFillPass
     : public wave::impl::WaveAMDDmaZeroFillBase<WaveAMDDmaZeroFillPass> {
   void runOnOperation() override {
+    DataFlowSolver solver;
+    if (failed(buffer_predication::initializeRangeAnalysis(solver,
+                                                           getOperation())))
+      return signalPassFailure();
     IRRewriter rewriter(&getContext());
     SmallVector<WhereOp> wheres;
     getOperation()->walk([&](WhereOp where) { wheres.push_back(where); });
@@ -131,7 +138,7 @@ struct WaveAMDDmaZeroFillPass
     for (WhereOp where : llvm::reverse(wheres)) {
       if (!where->getBlock())
         continue;
-      (void)rewriteWhere(rewriter, where);
+      (void)rewriteWhere(rewriter, where, solver);
     }
   }
 };

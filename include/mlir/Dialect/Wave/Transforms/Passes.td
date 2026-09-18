@@ -296,7 +296,8 @@ def WaveAMDDmaZeroFill : Pass<"waveamd-dma-zero-fill"> {
     `waveamd.dma_load_lds` ops into straight-line DMA. Inactive lanes route
     through a same-buffer out-of-bounds source offset, relying on buffer OOB
     zero-fill instead of EXEC masking. Regions with non-DMA side effects or
-    non-buffer DMA sources are left untouched.
+    non-buffer DMA sources stay predicated. The buffer range must fit an
+    unsigned 32-bit offset; unproved or wider ranges keep EXEC masking.
   }];
   let dependentDialects = [
     "func::FuncDialect",
@@ -316,8 +317,9 @@ def WaveAMDLowerBufferPredication
     nonzero inactive value retain a value select after the unconditional load.
 
     The transform requires a `waveamd.make_buffer` ancestor and an inactive
-    token that is the active operation's dependency. Global full-address
-    memory and regions with other effects remain predicated through EXEC.
+    token that is the active operation's dependency. The buffer range must
+    fit an unsigned 32-bit offset; unproved or wider ranges keep EXEC masking.
+    Global full-address memory and regions with other effects keep EXEC masking.
   }];
   let dependentDialects = [
     "func::FuncDialect",

@@ -1,0 +1,10 @@
+// REQUIRES: host-supports-amdgpu-gfx942 || host-supports-amdgpu-gfx950
+// RUN: sed -e 's/@FINAL@/done/g' -e 's/@W@/%wave_width/g' -e 's/@OUT@/%wave_bytes/g' -e 's/@RANGE@/4096/g' -e 's/@RT@/i64/g' %S/Inputs/buffer_predication_ranges.mlir \
+// RUN:   | wave-opt - --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},waveamd-lower-buffer-predication,waveamd-dma-zero-fill,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
+// RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void
+// RUN: sed -e 's/@FINAL@/done/g' -e 's/@W@/%wave_width/g' -e 's/@OUT@/%wave_bytes/g' -e 's/@RANGE@/-2147483648/g' -e 's/@RT@/i32/g' %S/Inputs/buffer_predication_ranges.mlir \
+// RUN:   | wave-opt - --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},waveamd-lower-buffer-predication,waveamd-dma-zero-fill,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
+// RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void
+// RUN: sed -e 's/@FINAL@/done/g' -e 's/@W@/%wave_width/g' -e 's/@OUT@/%wave_bytes/g' -e 's/@RANGE@/4294967295/g' -e 's/@RT@/i64/g' %S/Inputs/buffer_predication_ranges.mlir \
+// RUN:   | wave-opt - --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},waveamd-lower-buffer-predication,waveamd-dma-zero-fill,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
+// RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void

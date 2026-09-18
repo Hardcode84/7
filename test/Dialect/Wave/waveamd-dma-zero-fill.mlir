@@ -344,6 +344,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // A modulo-2^32 buffer offset is range proof for the machine voffset.  Its
 // low dword is evaluated with native i32 arithmetic even when the exact layout
 // coordinate contains rational bit extraction.
+// CHECK-LABEL: func.func @wrapped_layout_offset_uses_i32
+// CHECK: wave.select
+// CHECK-NOT: wave.where
+// CHECK: waveamd.dma_load_lds
 // MACHINE-LABEL: func.func @wrapped_layout_offset_uses_i32
 // MACHINE-NOT: waveamdmachine.v_mul_u64
 // MACHINE-NOT: waveamdmachine.v_add_u64

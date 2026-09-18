@@ -241,13 +241,7 @@ materializeBufferLaneStrideDescriptor(WaveAMDMachineSelector &S,
   if (plan.bufferConstStride == 0)
     return descriptor;
 
-  if (make.getDescriptor().hasOneUse()) {
-    make.setConstStrideAttr(
-        S.builder.getI64IntegerAttr(plan.bufferConstStride));
-    make.setConstAddTidEnableAttr(S.builder.getBoolAttr(true));
-    return descriptor;
-  }
-
+  // Descriptor metadata also feeds operations awaiting selection.
   std::pair<Value, uint32_t> key{descriptor, plan.bufferConstStride};
   auto cached = S.bufferConstAddTidDescriptors.find(key);
   if (cached != S.bufferConstAddTidDescriptors.end())

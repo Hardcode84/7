@@ -9,6 +9,8 @@
 #ifndef MLIR_LIB_DIALECT_WAVE_TRANSFORMS_WAVEAMDBUFFERPREDICATIONUTILS_H
 #define MLIR_LIB_DIALECT_WAVE_TRANSFORMS_WAVEAMDBUFFERPREDICATIONUTILS_H
 
+#include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
+#include "mlir/Analysis/DataFlow/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
@@ -31,16 +33,8 @@ inline bool isBufferSimdPointer(Type type) {
          isa<waveamd::BufferAddressSpaceAttr>(ptrType.getAddressSpace());
 }
 
-inline Value stripPtrAdds(Value value) {
-  while (auto add = value.getDefiningOp<PtrAddOp>())
-    value = add.getBase();
-  return value;
-}
-
-inline waveamd::MakeBufferOp findMakeBuffer(Value value) {
+inline Value stripPointerOffsets(Value value) {
   while (true) {
-    if (auto makeBuffer = value.getDefiningOp<waveamd::MakeBufferOp>())
-      return makeBuffer;
     if (auto add = value.getDefiningOp<PtrAddOp>()) {
       value = add.getBase();
       continue;
@@ -49,43 +43,66 @@ inline waveamd::MakeBufferOp findMakeBuffer(Value value) {
       value = cast.getSource();
       continue;
     }
-    return {};
+    return value;
   }
 }
 
-inline FailureOr<BufferSentinel>
-findBufferSentinel(Value source, llvm::DenseSet<Value> &seen);
+inline LogicalResult initializeRangeAnalysis(DataFlowSolver &solver,
+                                             Operation *root) {
+  dataflow::loadBaselineAnalyses(solver);
+  solver.load<dataflow::IntegerRangeAnalysis>();
+  if (failed(solver.initializeAndRun(root)))
+    return root->emitError(
+        "IntegerRangeAnalysis failed for buffer predication");
+  return success();
+}
+
+inline bool fitsBufferVOffset(Value range, DataFlowSolver &solver) {
+  if (range.getType().isInteger(32))
+    return true;
+  const dataflow::IntegerValueRangeLattice *lattice =
+      solver.lookupState<dataflow::IntegerValueRangeLattice>(range);
+  if (!lattice || lattice->getValue().isUninitialized())
+    return false;
+  // Selected buffer offsets wrap at 32 bits, including on wide descriptors.
+  return lattice->getValue().getValue().umax().isIntN(32);
+}
 
 inline FailureOr<BufferSentinel>
-findScfForIterArgBufferSentinel(BlockArgument arg,
+findBufferSentinel(Value source, DataFlowSolver &solver,
+                   llvm::DenseSet<Value> &seen);
+
+inline FailureOr<BufferSentinel>
+findScfForIterArgBufferSentinel(BlockArgument arg, DataFlowSolver &solver,
                                 llvm::DenseSet<Value> &seen) {
   auto loop = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp());
   if (!loop || arg.getArgNumber() == 0)
     return failure();
   unsigned iterIndex = arg.getArgNumber() - 1;
-  if (iterIndex >= loop.getNumRegionIterArgs())
+  auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  if (stripPointerOffsets(yield.getOperand(iterIndex)) != arg)
     return failure();
-  return findBufferSentinel(loop.getInitArgs()[iterIndex], seen);
+  return findBufferSentinel(loop.getInitArgs()[iterIndex], solver, seen);
 }
 
 inline FailureOr<BufferSentinel>
-findBufferSentinel(Value source, llvm::DenseSet<Value> &seen) {
+findBufferSentinel(Value source, DataFlowSolver &solver,
+                   llvm::DenseSet<Value> &seen) {
   if (!seen.insert(source).second || !isBufferSimdPointer(source.getType()))
     return failure();
-  Value base = stripPtrAdds(source);
+  Value base = stripPointerOffsets(source);
   if (auto arg = dyn_cast<BlockArgument>(base))
-    return findScfForIterArgBufferSentinel(arg, seen);
-  if (!isa<PtrType>(base.getType()))
-    return failure();
-  waveamd::MakeBufferOp makeBuffer = findMakeBuffer(base);
-  if (!makeBuffer)
+    return findScfForIterArgBufferSentinel(arg, solver, seen);
+  auto makeBuffer = base.getDefiningOp<waveamd::MakeBufferOp>();
+  if (!makeBuffer || !fitsBufferVOffset(makeBuffer.getRange(), solver))
     return failure();
   return BufferSentinel{base, makeBuffer.getRange()};
 }
 
-inline FailureOr<BufferSentinel> findBufferSentinel(Value source) {
+inline FailureOr<BufferSentinel> findBufferSentinel(Value source,
+                                                    DataFlowSolver &solver) {
   llvm::DenseSet<Value> seen;
-  return findBufferSentinel(source, seen);
+  return findBufferSentinel(source, solver, seen);
 }
 
 inline Value createOOBSelectedBufferPointer(IRRewriter &rewriter, Location loc,
@@ -101,14 +118,14 @@ inline Value createOOBSelectedBufferPointer(IRRewriter &rewriter, Location loc,
   Value byteBase = sentinel.base;
   if (byteBase.getType() != byteBaseType)
     byteBase = PtrCastOp::create(rewriter, loc, byteBaseType, byteBase);
-  Value byteRange = sentinel.range;
-  if (byteRange.getType().isInteger(32)) {
-    DictionaryAttr policy = rewriter.getDictionaryAttr(rewriter.getNamedAttr(
+  DictionaryAttr policy;
+  if (sentinel.range.getType().isInteger(32))
+    policy = rewriter.getDictionaryAttr(rewriter.getNamedAttr(
         "extension", CastExtensionPolicyAttr::get(rewriter.getContext(),
                                                   CastExtension::Zero)));
-    byteRange = CastOp::create(rewriter, loc, rewriter.getIndexType(),
-                               CastKind::IntConvert, byteRange, policy);
-  }
+  Value byteRange =
+      CastOp::create(rewriter, loc, rewriter.getIndexType(),
+                     CastKind::IntConvert, sentinel.range, policy);
   Type offsetType = SimdType::get(rewriter.getContext(), byteRange.getType(),
                                   simdType.getWidth());
   Value offset = SplatOp::create(rewriter, loc, offsetType, byteRange);
@@ -118,17 +135,6 @@ inline Value createOOBSelectedBufferPointer(IRRewriter &rewriter, Location loc,
   return SelectOp::create(rewriter, loc, source.getType(), condition, source,
                           oob)
       .getResult();
-}
-
-inline FailureOr<Value> createOOBSelectedBufferPointer(IRRewriter &rewriter,
-                                                       Location loc,
-                                                       Value source,
-                                                       Value condition) {
-  FailureOr<BufferSentinel> sentinel = findBufferSentinel(source);
-  if (failed(sentinel))
-    return failure();
-  return createOOBSelectedBufferPointer(rewriter, loc, source, condition,
-                                        *sentinel);
 }
 
 } // namespace mlir::wave::buffer_predication
