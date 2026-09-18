@@ -305,6 +305,27 @@ def WaveAMDDmaZeroFill : Pass<"waveamd-dma-zero-fill"> {
   ];
 }
 
+def WaveAMDLowerBufferPredication
+    : Pass<"waveamd-lower-buffer-predication"> {
+  let summary = "Lower predicated buffer memory to OOB-selected addresses";
+  let description = [{
+    Rewrites single-operation `wave.where` regions around ordinary buffer
+    loads and stores into straight-line memory operations. Inactive lanes use
+    an offset at the buffer range, which invokes the AMD buffer out-of-bounds
+    contract: loads return zero and stores have no effect. Loads with a
+    nonzero inactive value retain a value select after the unconditional load.
+
+    The transform requires a `waveamd.make_buffer` ancestor and an inactive
+    token that is the active operation's dependency. Global full-address
+    memory and regions with other effects remain predicated through EXEC.
+  }];
+  let dependentDialects = [
+    "func::FuncDialect",
+    "wave::WaveDialect",
+    "waveamd::WaveAMDDialect"
+  ];
+}
+
 def WaveAMDDeduplicateWrites
     : Pass<"waveamd-deduplicate-writes"> {
   let summary = "Collapse identical joined Wave memory writes";

@@ -4,7 +4,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // ZF-LABEL: func.func @loop_carried_buffer_dma_zero_fill
 // ZF-NOT: wave.where
-// ZF: [[OOB:%.*]] = wave.ptr_add {{%.*}}, {{%.*}} : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<i32, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
+// ZF: [[OOB:%.*]] = wave.ptr_add {{%.*}}, {{%.*}} : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 64>
 // ZF: [[OOB_CAST:%.*]] = wave.ptr_cast [[OOB]]
 // ZF: [[SELECT:%.*]] = wave.select {{%.*}}, {{%.*}}, [[OOB_CAST]]
 // ZF: waveamd.dma_load_lds [[SELECT]]

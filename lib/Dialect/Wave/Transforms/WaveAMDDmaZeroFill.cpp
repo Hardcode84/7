@@ -8,12 +8,12 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "WaveAMDBufferPredicationUtils.h"
+
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 
 namespace mlir::wave {
@@ -26,83 +26,8 @@ using namespace mlir::wave;
 
 namespace {
 
-struct BufferSentinel {
-  Value base;
-  Value range;
-};
-
 static bool isZeroFillDma(waveamd::DmaLoadLdsOp op) {
   return op.getZeroFillInactive().value_or(false);
-}
-
-static bool isBufferSimdPointer(Type type) {
-  auto simdType = dyn_cast<SimdType>(type);
-  if (!simdType)
-    return false;
-  auto ptrType = dyn_cast<PtrType>(simdType.getElementType());
-  return ptrType &&
-         isa<waveamd::BufferAddressSpaceAttr>(ptrType.getAddressSpace());
-}
-
-static Value stripPtrAdds(Value value) {
-  while (auto add = value.getDefiningOp<PtrAddOp>())
-    value = add.getBase();
-  return value;
-}
-
-static waveamd::MakeBufferOp findMakeBuffer(Value value) {
-  while (true) {
-    if (auto makeBuffer = value.getDefiningOp<waveamd::MakeBufferOp>())
-      return makeBuffer;
-    if (auto add = value.getDefiningOp<PtrAddOp>()) {
-      value = add.getBase();
-      continue;
-    }
-    if (auto cast = value.getDefiningOp<PtrCastOp>()) {
-      value = cast.getSource();
-      continue;
-    }
-    return {};
-  }
-}
-
-static FailureOr<BufferSentinel> findBufferSentinel(Value source,
-                                                    DenseSet<Value> &seen);
-
-static FailureOr<BufferSentinel>
-findScfForIterArgBufferSentinel(BlockArgument arg, DenseSet<Value> &seen) {
-  auto loop = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp());
-  if (!loop)
-    return failure();
-  if (arg.getArgNumber() == 0)
-    return failure();
-
-  unsigned iterIndex = arg.getArgNumber() - 1;
-  if (iterIndex >= loop.getNumRegionIterArgs())
-    return failure();
-  return findBufferSentinel(loop.getInitArgs()[iterIndex], seen);
-}
-
-static FailureOr<BufferSentinel> findBufferSentinel(Value source,
-                                                    DenseSet<Value> &seen) {
-  if (!seen.insert(source).second)
-    return failure();
-  if (!isBufferSimdPointer(source.getType()))
-    return failure();
-  Value base = stripPtrAdds(source);
-  if (auto arg = dyn_cast<BlockArgument>(base))
-    return findScfForIterArgBufferSentinel(arg, seen);
-  if (!isa<PtrType>(base.getType()))
-    return failure();
-  waveamd::MakeBufferOp makeBuffer = findMakeBuffer(base);
-  if (!makeBuffer)
-    return failure();
-  return BufferSentinel{base, makeBuffer.getRange()};
-}
-
-static FailureOr<BufferSentinel> findBufferSentinel(Value source) {
-  DenseSet<Value> seen;
-  return findBufferSentinel(source, seen);
 }
 
 static bool canMoveOut(Operation *op,
@@ -113,7 +38,7 @@ static bool canMoveOut(Operation *op,
     if (!isZeroFillDma(dma))
       return false;
     dmas.push_back(dma);
-    return succeeded(findBufferSentinel(dma.getSource()));
+    return succeeded(buffer_predication::findBufferSentinel(dma.getSource()));
   }
   if (op->getNumRegions() != 0)
     return false;
@@ -163,32 +88,8 @@ static bool collectMovableBody(WhereOp where, SmallVectorImpl<Operation *> &ops,
 static FailureOr<Value> createSelectedSource(IRRewriter &rewriter,
                                              waveamd::DmaLoadLdsOp dma,
                                              Value condition) {
-  FailureOr<BufferSentinel> sentinel = findBufferSentinel(dma.getSource());
-  if (failed(sentinel))
-    return failure();
-
-  Location loc = dma.getLoc();
-  auto simdType = cast<SimdType>(dma.getSource().getType());
-  auto baseType = cast<PtrType>(sentinel->base.getType());
-  Type i8 = rewriter.getI8Type();
-  Type byteBaseType =
-      PtrType::get(dma.getContext(), i8, baseType.getAddressSpace());
-  Type byteSourceType =
-      SimdType::get(dma.getContext(), byteBaseType, simdType.getWidth());
-
-  Value byteBase = sentinel->base;
-  if (byteBase.getType() != byteBaseType)
-    byteBase = PtrCastOp::create(rewriter, loc, byteBaseType, byteBase);
-
-  Type offsetType = SimdType::get(dma.getContext(), sentinel->range.getType(),
-                                  simdType.getWidth());
-  Value offset = SplatOp::create(rewriter, loc, offsetType, sentinel->range);
-  Value oob = PtrAddOp::create(rewriter, loc, byteSourceType, byteBase, offset);
-  if (oob.getType() != dma.getSource().getType())
-    oob = PtrCastOp::create(rewriter, loc, dma.getSource().getType(), oob);
-  return SelectOp::create(rewriter, loc, dma.getSource().getType(), condition,
-                          dma.getSource(), oob)
-      .getResult();
+  return buffer_predication::createOOBSelectedBufferPointer(
+      rewriter, dma.getLoc(), dma.getSource(), condition);
 }
 
 static bool rewriteWhere(IRRewriter &rewriter, WhereOp where) {

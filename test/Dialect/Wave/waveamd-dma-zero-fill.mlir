@@ -10,8 +10,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 // CHECK: [[SRC:%.*]] = wave.ptr_add [[BUF]]
 // CHECK-NOT: wave.where
 // CHECK: [[BYTE_BUF:%.*]] = wave.ptr_cast [[BUF]] : !wave.ptr<#waveamd.buffer, i32> -> !wave.ptr<#waveamd.buffer, i8>
-// CHECK: [[OOB_OFF:%.*]] = wave.splat [[RANGE]] : i32 -> !wave.simd<i32, 32>
-// CHECK: [[OOB:%.*]] = wave.ptr_add [[BYTE_BUF]], [[OOB_OFF]] : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<i32, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+// CHECK: [[UNSIGNED_RANGE:%.*]] = wave.cast intconvert [[RANGE]] policy {extension = #wave.cast_extension<zero>} : i32 -> index
+// CHECK: [[OOB_OFF:%.*]] = wave.splat [[UNSIGNED_RANGE]] : index -> !wave.simd<index, 32>
+// CHECK: [[OOB:%.*]] = wave.ptr_add [[BYTE_BUF]], [[OOB_OFF]] : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
 // CHECK: [[TYPED_OOB:%.*]] = wave.ptr_cast [[OOB]] : !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
 // CHECK: [[SELECTED:%.*]] = wave.select [[MASK]], [[SRC]], [[TYPED_OOB]]
 // CHECK: [[TOK:%.*]] = waveamd.dma_load_lds [[SELECTED]]
