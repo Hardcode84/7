@@ -623,6 +623,120 @@ static bool isHalfExchangePair(DsBpermuteB32Op lhs, DsBpermuteB32Op rhs,
   return true;
 }
 
+static bool preservesExec(Operation *op) {
+  if (isa<UniformLoopOp, UniformIfOp>(op))
+    return llvm::all_of(op->getRegions(), [](Region &region) {
+      return llvm::all_of(region.getOps(), [](Operation &nested) {
+        return preservesExec(&nested);
+      });
+    });
+  if (op->getNumRegions() ||
+      op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>())
+    return false;
+  if (isa<LabelOp, SCBranchExeczOp, SCBranchScc0Op, SCBranchScc1Op, SSetpcB64Op,
+          SEndpgmOp>(op))
+    return false;
+  return op->getDialect() ==
+         op->getContext()->getLoadedDialect<WaveAMDMachineDialect>();
+}
+
+static bool hasFullExec(Operation *op) {
+  Block *block = op->getBlock();
+  Operation *parent = block->getParentOp();
+  if (auto func = dyn_cast<func::FuncOp>(parent)) {
+    if (!func->hasAttr("wave.kernel") || block != &func.getBody().front())
+      return false;
+  } else if (!isa<UniformLoopOp, UniformIfOp>(parent) ||
+             !preservesExec(parent) || !hasFullExec(parent)) {
+    return false;
+  }
+  // Full kernel waves; masks and unknown control flow stop proof.
+  return llvm::all_of(llvm::make_range(block->begin(), op->getIterator()),
+                      [](Operation &before) { return preservesExec(&before); });
+}
+
+static std::optional<PermlaneHalf>
+classifyHalfBroadcast(DsBpermuteB32Op op, unsigned workgroupSize) {
+  if (!op || workgroupSize < 64 || workgroupSize % 64 != 0)
+    return std::nullopt;
+
+  bool lower = true;
+  bool upper = true;
+  for (unsigned wave : llvm::seq<unsigned>(workgroupSize / 64)) {
+    unsigned waveBase = wave * 64;
+    for (unsigned lane : llvm::seq<unsigned>(0, 64)) {
+      std::optional<unsigned> source =
+          evaluateBpermuteSource(op, lane, waveBase + lane);
+      if (!source)
+        return std::nullopt;
+      lower &= *source == lane % 32;
+      upper &= *source == 32 + lane % 32;
+    }
+  }
+  if (lower == upper)
+    return std::nullopt;
+  return lower ? PermlaneHalf::Lower : PermlaneHalf::Upper;
+}
+
+static DsBpermuteB32Op findHalfBroadcastPartner(DsBpermuteB32Op op,
+                                                PermlaneHalf half,
+                                                unsigned workgroupSize) {
+  for (Operation *cursor = op->getNextNode(); cursor;
+       cursor = cursor->getNextNode()) {
+    if (cursor->getNumRegions() || !preservesExec(cursor))
+      break;
+    DsBpermuteB32Op candidate = dyn_cast<DsBpermuteB32Op>(cursor);
+    if (!candidate || candidate.getData() != op.getData())
+      continue;
+    std::optional<PermlaneHalf> candidateHalf =
+        classifyHalfBroadcast(candidate, workgroupSize);
+    if (candidateHalf && *candidateHalf != half)
+      return candidate;
+  }
+  return {};
+}
+
+struct BpermuteHalfBroadcastPairToPermlanePattern
+    : public OpRewritePattern<DsBpermuteB32Op> {
+  BpermuteHalfBroadcastPairToPermlanePattern(MLIRContext *context,
+                                             unsigned workgroupSize)
+      : OpRewritePattern<DsBpermuteB32Op>(context),
+        workgroupSize(workgroupSize) {}
+
+  LogicalResult matchAndRewrite(DsBpermuteB32Op op,
+                                PatternRewriter &rewriter) const override {
+    std::optional<PermlaneHalf> opHalf =
+        classifyHalfBroadcast(op, workgroupSize);
+    if (!opHalf || !hasFullExec(op))
+      return failure();
+
+    DsBpermuteB32Op partner =
+        findHalfBroadcastPartner(op, *opHalf, workgroupSize);
+    if (!partner)
+      return failure();
+
+    Type pairType =
+        RegType::get(op.getContext(), RegClass::VGPR, 2, /*index=*/-1);
+    Value source =
+        VMovB32TupleOp::create(rewriter, op.getLoc(), pairType, op.getData())
+            .getResult();
+    VPermlane32SwapB32TupleOp swap = VPermlane32SwapB32TupleOp::create(
+        rewriter, op.getLoc(), pairType, source);
+    Type wordType = op.getResult().getType();
+    std::array<Type, 2> resultTypes{wordType, wordType};
+    TupleToElementsOp split = TupleToElementsOp::create(
+        rewriter, op.getLoc(), resultTypes, swap.getResult());
+
+    Value lower = split.getElements()[0];
+    Value upper = split.getElements()[1];
+    rewriter.replaceOp(partner, *opHalf == PermlaneHalf::Lower ? upper : lower);
+    rewriter.replaceOp(op, *opHalf == PermlaneHalf::Lower ? lower : upper);
+    return success();
+  }
+
+  unsigned workgroupSize;
+};
+
 static bool isOtherHalfExchange(DsBpermuteB32Op op, unsigned workgroupSize) {
   if (!op || workgroupSize < 64 || workgroupSize % 64 != 0)
     return false;
@@ -752,6 +866,8 @@ static LogicalResult runOnFunc(func::FuncOp func) {
       VPermlane32SwapB32TupleOp::isSupportedOnIsa(*isa)) {
     patterns.add<BpermuteSelectPairToPermlanePattern>(func.getContext(),
                                                       *workgroupSize);
+    patterns.add<BpermuteHalfBroadcastPairToPermlanePattern>(func.getContext(),
+                                                             *workgroupSize);
     patterns.add<BpermuteHalfReductionToPermlanePattern<VAddF32Op>,
                  BpermuteHalfReductionToPermlanePattern<VMaxF32Op>,
                  BpermutePairReductionToPermlanePattern<VAddF32Op>,
