@@ -13,7 +13,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @direct_add_bitop3_to_permlane(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 512, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -47,7 +47,7 @@ func.func @direct_add_bitop3_to_permlane(
 func.func @direct_max_reversed_to_permlane(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 128, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 128, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -80,7 +80,7 @@ func.func @direct_max_reversed_to_permlane(
 func.func @bitop3_same_half_stays_bpermute(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 512, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 512, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -112,7 +112,7 @@ func.func @distinct_source_stays_bpermute(
     %direct: !waveamdmachine.reg<vgpr, 1>,
     %source: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -143,7 +143,7 @@ func.func @distinct_source_stays_bpermute(
 func.func @nonzero_offset_stays_bpermute(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -174,7 +174,7 @@ func.func @nonzero_offset_stays_bpermute(
 func.func @non_wave_multiple_stays_bpermute(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 96, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 96, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -208,7 +208,7 @@ func.func @non_wave_multiple_stays_bpermute(
 func.func @live_bpermute_keeps_address(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
-    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -245,7 +245,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 func.func @unsupported_isa_stays_bpermute(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm

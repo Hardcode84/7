@@ -128,7 +128,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @half_exchange_add_to_permlane(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -166,7 +166,7 @@ func.func @half_exchange_add_to_permlane(
 func.func @half_exchange_max_to_permlane(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 128, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 128, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm
@@ -204,7 +204,7 @@ func.func @half_exchange_max_to_permlane(
 func.func @quarter_exchange_stays_bpermute(
     %data: !waveamdmachine.reg<vgpr, 1>)
     -> !waveamdmachine.reg<vgpr, 1>
-    attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
   %workitem = waveamdmachine.v_workitem_id_x
       : !waveamdmachine.reg<vgpr, 1, 0>
   %c63 = waveamdmachine.imm 63 : !waveamdmachine.imm

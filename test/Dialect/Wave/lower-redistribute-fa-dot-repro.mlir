@@ -32,9 +32,10 @@
 // PERMLANE: return
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 func.func @fa_mfma_to_dot_operand_dynamic_slot(
-    %source: !wave.simd<vector<64xbf16>, 64>)
-    -> !wave.simd<vector<64xbf16>, 64>
-    attributes {wave.workgroup_size = array<i32: 256, 1, 1>} {
+    %source: !wave.simd<vector<64xbf16>, 64>,
+    %dst: !wave.ptr<#wave.global, bf16>)
+    -> !wave.mem.token
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 256, 1, 1>} {
   %result = wave.redistribute %source,
       <blocks = 1, items = 256,
        source_block = "block",
@@ -42,6 +43,15 @@ func.func @fa_mfma_to_dot_operand_dynamic_slot(
        source_slot = "xor(Mod(slot, 2) + 32*Mod(floor(1/32*slot), 2) + 16*Mod(floor(1/16*slot), 2) + 8*Mod(floor(1/8*slot), 2) + 2*Mod(floor(1/2*slot), 2), 4*floor(1/32*Mod(item, 64)))">
       : !wave.simd<vector<64xbf16>, 64>
      -> !wave.simd<vector<64xbf16>, 64>
-  return %result : !wave.simd<vector<64xbf16>, 64>
+  %item = wave.workitem_id 0 : !wave.simd<i32, 64>
+  %offset = wave.index_expr <"64*x"> ["x"](%item)
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
+  %ptr = wave.ptr_add %dst, %offset
+      : !wave.ptr<#wave.global, bf16>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, bf16>, 64>
+  %done = wave.store %result -> %ptr
+      : (!wave.simd<vector<64xbf16>, 64>,
+         !wave.simd<!wave.ptr<#wave.global, bf16>, 64>) -> !wave.mem.token
+  return %done : !wave.mem.token
 }
 }

@@ -4,13 +4,14 @@
 // RUN: wave-opt --split-input-file --waveamd-cross-lane-peepholes %s \
 // RUN:   | FileCheck %s --check-prefix=HIGHBITS
 
-// CHECK-LABEL: func.func @gfx950_exact(
-// CHECK: waveamdmachine.v_permlane32_swap_b32_tuple
-// CHECK-NOT: waveamdmachine.ds_bpermute_b32
-// CHECK-NOT: waveamdmachine.v_cndmask_b32_tuple
+// CHECK-LABEL: func.func @gfx950_unknown_exec(
+// CHECK-NOT: waveamdmachine.v_permlane32_swap_b32_tuple
+// CHECK: waveamdmachine.ds_bpermute_b32
+// CHECK: waveamdmachine.v_cndmask_b32_tuple
+// CHECK-NOT: waveamdmachine.v_permlane32_swap_b32_tuple
 // CHECK: return
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
-func.func @gfx950_exact(%source: !wave.simd<vector<2xi32>, 64>)
+func.func @gfx950_unknown_exec(%source: !wave.simd<vector<2xi32>, 64>)
     -> !wave.simd<vector<2xi32>, 64>
     attributes {wave.workgroup_size = array<i32: 64, 1, 1>} {
   %result = wave.redistribute %source,

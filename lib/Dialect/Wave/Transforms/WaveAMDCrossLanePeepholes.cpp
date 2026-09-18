@@ -30,6 +30,62 @@ namespace {
 
 enum class PermlaneHalf : uint8_t { Lower, Upper };
 
+class FullExecAnalysis : public RewriterBase::Listener {
+public:
+  explicit FullExecAnalysis(func::FuncOp func) {
+    DenseMap<Operation *, bool> preserves;
+    // Two linear walks: summarize regions, then mark full-EXEC segments.
+    func.walk<WalkOrder::PostOrder>([&](Operation *op) {
+      bool safe = false;
+      if (isa<UniformLoopOp, UniformIfOp, ExecIfOp>(op))
+        safe = llvm::all_of(op->getRegions(), [&](Region &region) {
+          return llvm::all_of(region.getOps(), [&](Operation &nested) {
+            return preserves.lookup(&nested);
+          });
+        });
+      else
+        safe = !op->getNumRegions() &&
+               !op->hasTrait<OpTrait::waveamdmachine::WritesExecOp>() &&
+               !isa<LabelOp, SCBranchExeczOp, SCBranchScc0Op, SCBranchScc1Op,
+                    SSetpcB64Op, SEndpgmOp>(op) &&
+               op->getDialect() ==
+                   op->getContext()->getLoadedDialect<WaveAMDMachineDialect>();
+      preserves[op] = safe;
+    });
+    if (func->hasAttr("wave.kernel") && !func.getBody().empty())
+      markBlock(func.getBody().front(), preserves);
+  }
+
+  bool sameSegment(Operation *lhs, Operation *rhs) const {
+    unsigned segment = segments.lookup(lhs);
+    return segment && segment == segments.lookup(rhs);
+  }
+
+  void notifyOperationErased(Operation *op) override { segments.erase(op); }
+
+private:
+  void markBlock(Block &block, const DenseMap<Operation *, bool> &preserves) {
+    unsigned segment = ++nextSegment;
+    for (Operation &op : block) {
+      if (!preserves.lookup(&op))
+        break;
+      if (!op.getNumRegions()) {
+        segments[&op] = segment;
+        continue;
+      }
+      // EXEC regions restore entry mask; their bodies still run masked.
+      if (!isa<ExecIfOp>(op))
+        for (Region &region : op.getRegions())
+          for (Block &nested : region)
+            markBlock(nested, preserves);
+      segment = ++nextSegment;
+    }
+  }
+
+  DenseMap<Operation *, unsigned> segments;
+  unsigned nextSegment = 0;
+};
+
 class MachineU32Evaluator {
 public:
   MachineU32Evaluator(uint32_t lane, uint32_t workitemX)
@@ -388,10 +444,16 @@ static bool hasPermlaneSemantics(PermlaneCandidate &candidate,
 }
 
 static std::optional<PermlaneCandidate>
-matchPermlaneCandidate(VCndmaskB32TupleOp select, unsigned workgroupSize) {
+matchPermlaneCandidate(VCndmaskB32TupleOp select, unsigned workgroupSize,
+                       const FullExecAnalysis &exec) {
   std::optional<PermlaneCandidate> candidate = makePermlaneCandidate(select);
   if (!candidate)
     return std::nullopt;
+  for (const BpermutePayload *payload :
+       {&candidate->falsePayload, &candidate->truePayload})
+    for (DsBpermuteB32Op permute : payload->permutes)
+      if (!exec.sameSegment(permute, select))
+        return std::nullopt;
   std::optional<PermlaneHalf> half = classifyPermlaneCandidate(*candidate);
   if (!half)
     return std::nullopt;
@@ -402,14 +464,17 @@ matchPermlaneCandidate(VCndmaskB32TupleOp select, unsigned workgroupSize) {
 }
 
 static std::optional<PermlaneCandidate>
-findUpperCandidate(const PermlaneCandidate &lower, unsigned workgroupSize) {
+findUpperCandidate(const PermlaneCandidate &lower, unsigned workgroupSize,
+                   const FullExecAnalysis &exec) {
   for (Operation *cursor = lower.select->getNextNode(); cursor;
        cursor = cursor->getNextNode()) {
+    if (!exec.sameSegment(lower.select, cursor))
+      break;
     VCndmaskB32TupleOp select = dyn_cast<VCndmaskB32TupleOp>(cursor);
     if (!select)
       continue;
     std::optional<PermlaneCandidate> candidate =
-        matchPermlaneCandidate(select, workgroupSize);
+        matchPermlaneCandidate(select, workgroupSize, exec);
     if (!candidate || candidate->half != PermlaneHalf::Upper)
       continue;
     if (sameValues(candidate->firstWords, lower.firstWords) &&
@@ -518,21 +583,23 @@ static void eraseMatchedPayloads(PatternRewriter &rewriter,
 struct BpermuteSelectPairToPermlanePattern
     : public OpRewritePattern<VCndmaskB32TupleOp> {
   BpermuteSelectPairToPermlanePattern(MLIRContext *context,
-                                      unsigned workgroupSize)
-      : OpRewritePattern<VCndmaskB32TupleOp>(context),
+                                      unsigned workgroupSize,
+                                      const FullExecAnalysis &exec)
+      : OpRewritePattern<VCndmaskB32TupleOp>(context), exec(exec),
         workgroupSize(workgroupSize) {}
 
   LogicalResult matchAndRewrite(VCndmaskB32TupleOp op,
                                 PatternRewriter &rewriter) const override {
     std::optional<PermlaneCandidate> lower =
-        matchPermlaneCandidate(op, workgroupSize);
+        matchPermlaneCandidate(op, workgroupSize, exec);
     if (!lower || lower->half != PermlaneHalf::Lower)
       return failure();
     std::optional<PermlaneCandidate> upper =
-        findUpperCandidate(*lower, workgroupSize);
+        findUpperCandidate(*lower, workgroupSize, exec);
     if (!upper)
       return failure();
 
+    // Shared source words dominate the lower select through its payloads.
     SmallVector<Value> sourceWords(lower->firstWords);
     llvm::append_range(sourceWords, lower->secondWords);
     MLIRContext *context = op.getContext();
@@ -558,6 +625,7 @@ struct BpermuteSelectPairToPermlanePattern
     return success();
   }
 
+  const FullExecAnalysis &exec;
   unsigned workgroupSize;
 };
 
@@ -756,8 +824,10 @@ template <typename BinaryOp>
 struct BpermuteHalfReductionToPermlanePattern
     : public OpRewritePattern<BinaryOp> {
   BpermuteHalfReductionToPermlanePattern(MLIRContext *context,
-                                         unsigned workgroupSize)
-      : OpRewritePattern<BinaryOp>(context), workgroupSize(workgroupSize) {}
+                                         unsigned workgroupSize,
+                                         const FullExecAnalysis &exec)
+      : OpRewritePattern<BinaryOp>(context), exec(exec),
+        workgroupSize(workgroupSize) {}
 
   LogicalResult matchAndRewrite(BinaryOp op,
                                 PatternRewriter &rewriter) const override {
@@ -768,7 +838,8 @@ struct BpermuteHalfReductionToPermlanePattern
       permute = op.getRhs().template getDefiningOp<DsBpermuteB32Op>();
       direct = op.getLhs();
     }
-    if (!permute || permute.getData() != direct ||
+    if (!permute || !exec.sameSegment(permute, op) ||
+        permute.getData() != direct ||
         !isOtherHalfExchange(permute, workgroupSize))
       return failure();
 
@@ -794,6 +865,7 @@ struct BpermuteHalfReductionToPermlanePattern
     return success();
   }
 
+  const FullExecAnalysis &exec;
   unsigned workgroupSize;
 };
 
@@ -801,14 +873,17 @@ template <typename BinaryOp>
 struct BpermutePairReductionToPermlanePattern
     : public OpRewritePattern<BinaryOp> {
   BpermutePairReductionToPermlanePattern(MLIRContext *context,
-                                         unsigned workgroupSize)
-      : OpRewritePattern<BinaryOp>(context), workgroupSize(workgroupSize) {}
+                                         unsigned workgroupSize,
+                                         const FullExecAnalysis &exec)
+      : OpRewritePattern<BinaryOp>(context), exec(exec),
+        workgroupSize(workgroupSize) {}
 
   LogicalResult matchAndRewrite(BinaryOp op,
                                 PatternRewriter &rewriter) const override {
     DsBpermuteB32Op lhs = op.getLhs().template getDefiningOp<DsBpermuteB32Op>();
     DsBpermuteB32Op rhs = op.getRhs().template getDefiningOp<DsBpermuteB32Op>();
-    if (!isHalfExchangePair(lhs, rhs, workgroupSize))
+    if (!exec.sameSegment(lhs, op) || !exec.sameSegment(rhs, op) ||
+        !isHalfExchangePair(lhs, rhs, workgroupSize))
       return failure();
 
     Value data = lhs.getData();
@@ -831,6 +906,7 @@ struct BpermutePairReductionToPermlanePattern
     return success();
   }
 
+  const FullExecAnalysis &exec;
   unsigned workgroupSize;
 };
 
@@ -859,25 +935,28 @@ static LogicalResult runOnFunc(func::FuncOp func) {
   if (failed(isa))
     return failure();
 
+  FullExecAnalysis exec(func);
   RewritePatternSet patterns(func.getContext());
   patterns.add<DsPermuteToSwizzlePattern>(func.getContext(), *wavefrontSize);
   std::optional<unsigned> workgroupSize = getXLinearWorkgroupSize(func);
   if (*wavefrontSize == 64 && workgroupSize &&
       VPermlane32SwapB32TupleOp::isSupportedOnIsa(*isa)) {
     patterns.add<BpermuteSelectPairToPermlanePattern>(func.getContext(),
-                                                      *workgroupSize);
+                                                      *workgroupSize, exec);
     patterns.add<BpermuteHalfBroadcastPairToPermlanePattern>(func.getContext(),
                                                              *workgroupSize);
     patterns.add<BpermuteHalfReductionToPermlanePattern<VAddF32Op>,
                  BpermuteHalfReductionToPermlanePattern<VMaxF32Op>,
                  BpermutePairReductionToPermlanePattern<VAddF32Op>,
                  BpermutePairReductionToPermlanePattern<VMaxF32Op>>(
-        func.getContext(), *workgroupSize);
+        func.getContext(), *workgroupSize, exec);
   }
   return applyPatternsGreedily(
       func, std::move(patterns),
-      GreedyRewriteConfig().enableFolding(false).setRegionSimplificationLevel(
-          GreedySimplifyRegionLevel::Disabled));
+      GreedyRewriteConfig()
+          .setListener(&exec)
+          .enableFolding(false)
+          .setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled));
 }
 
 struct WaveAMDCrossLanePeepholesPass
