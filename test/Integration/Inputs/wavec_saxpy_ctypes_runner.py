@@ -3,6 +3,7 @@
 
 import argparse
 import ctypes
+import math
 import random
 import re
 from pathlib import Path
@@ -216,9 +217,15 @@ def check_result(
     alpha: float,
     n: int,
 ):
+    if len(got) != len(x) or len(got) != len(y):
+        raise AssertionError("SAXPY output and input sizes differ")
     for index, actual in enumerate(got):
         expected = y[index] + alpha * x[index] if index < n else y[index]
-        if abs(actual - expected) > 0.001:
+        if (
+            not math.isfinite(actual)
+            or not math.isfinite(expected)
+            or abs(actual - expected) > 0.001
+        ):
             raise AssertionError(
                 f"n={n} index={index} expected={expected} actual={actual}"
             )

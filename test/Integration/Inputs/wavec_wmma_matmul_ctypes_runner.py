@@ -3,6 +3,7 @@
 
 import argparse
 import ctypes
+import math
 import random
 import struct
 from pathlib import Path
@@ -85,7 +86,7 @@ def half_values(raw: list[int]) -> list[float]:
     return [struct.unpack("<e", struct.pack("<H", value))[0] for value in raw]
 
 
-def reference_tile_major(
+def reference_output(
     a_raw: list[int], b_raw: list[int], m: int, n: int, k: int
 ) -> list[float]:
     a = half_values(a_raw)
@@ -93,10 +94,11 @@ def reference_tile_major(
     out = []
     for tile_m in range(m // 16):
         for tile_n in range(n // 16):
-            for mi in range(16):
-                row = tile_m * 16 + mi
-                for nj in range(16):
-                    col = tile_n * 16 + nj
+            for lane in range(32):
+                for reg in range(8):
+                    # fragment_unpack stores eight registers per lane.
+                    row = tile_m * 16 + lane // 16 + 2 * reg
+                    col = tile_n * 16 + lane % 16
                     acc = 0.0
                     for kk in range(k):
                         acc += a[row * k + kk] * b[col * k + kk]
@@ -152,31 +154,21 @@ def launch(hip: Hip, function: ctypes.c_void_p, grid_x: int, grid_y: int, *devs)
 
 
 def check_close(got: list[float], expected: list[float], tolerance: float):
-    tile_size = 256
-    if len(got) % tile_size or len(expected) % tile_size:
-        raise AssertionError("matmul output must contain whole 16x16 tiles")
-    worst = 0.0
-    worst_tile = 0
-    worst_index = 0
-    worst_actual = 0.0
-    worst_ref = 0.0
-    for tile in range(len(got) // tile_size):
-        start = tile * tile_size
-        got_tile = sorted(got[start : start + tile_size])
-        ref_tile = sorted(expected[start : start + tile_size])
-        for index, (actual, ref) in enumerate(zip(got_tile, ref_tile, strict=True)):
-            diff = abs(actual - ref)
-            if diff > worst:
-                worst = diff
-                worst_tile = tile
-                worst_index = index
-                worst_actual = actual
-                worst_ref = ref
-    if worst > tolerance:
+    if len(got) != len(expected) or len(got) % 256:
         raise AssertionError(
-            f"tile={worst_tile} index={worst_index} expected={worst_ref} "
-            f"actual={worst_actual} diff={worst}"
+            "matmul output must match reference size and contain whole tiles"
         )
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be finite and nonnegative")
+    worst = 0.0
+    for index, (actual, ref) in enumerate(zip(got, expected, strict=True)):
+        diff = abs(actual - ref)
+        if not math.isfinite(actual) or not math.isfinite(ref) or diff > tolerance:
+            raise AssertionError(
+                f"tile={index // 256} lane={index % 256 // 8} reg={index % 8} "
+                f"expected={ref} actual={actual} diff={diff}"
+            )
+        worst = max(worst, diff)
     print(f"max_abs_error={worst:.6f}")
 
 
@@ -189,10 +181,10 @@ def run(args: argparse.Namespace):
     if args.m % 16 or args.n % 16 or args.k % 16:
         raise ValueError("m, n, and k must be multiples of 16")
     a_raw, b_raw = make_inputs(args.m, args.n, args.k, args.seed)
-    expected = reference_tile_major(a_raw, b_raw, args.m, args.n, args.k)
+    expected = reference_output(a_raw, b_raw, args.m, args.n, args.k)
     a_host = as_array(ctypes.c_uint16, a_raw)
     b_host = as_array(ctypes.c_uint16, b_raw)
-    c_host = as_array(ctypes.c_float, [0.0] * len(expected))
+    c_host = as_array(ctypes.c_float, [float("nan")] * len(expected))
 
     hip = Hip(args.hip_lib)
     hip.check(hip.lib.hipInit(0), "hipInit")
