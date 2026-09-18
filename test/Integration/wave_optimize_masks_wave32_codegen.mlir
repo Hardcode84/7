@@ -41,14 +41,14 @@ func.func @proven_true_wave32_where(%dst: !wave.ptr<#wave.global, i32>) -> !wave
 
 // MACHINE-LABEL: func.func @boolean_select_mask_roundtrip
 // MACHINE: [[ACTIVE:%.*]] = waveamdmachine.v_cmp_{{.*}}
-// MACHINE-NOT: waveamdmachine.v_cndmask
+// MACHINE: waveamdmachine.v_cndmask
 // MACHINE-NOT: waveamdmachine.v_cmp
-// MACHINE: waveamdmachine.exec_if [[ACTIVE]]
+// MACHINE-NOT: waveamdmachine.exec_if
 // ASM-LABEL: boolean_select_mask_roundtrip:
 // ASM: v_cmp_{{.*}}
-// ASM-NOT: v_cndmask
+// ASM: v_cndmask
 // ASM-NOT: v_cmp
-// ASM: s_and_saveexec_b32
+// ASM-NOT: s_and_saveexec_b32
 func.func @boolean_select_mask_roundtrip(
     %dst: !wave.ptr<#wave.global, i32>, %limit: i32) -> !wave.mem.token attributes {wave.kernel} {
   %range = arith.constant 128 : i32

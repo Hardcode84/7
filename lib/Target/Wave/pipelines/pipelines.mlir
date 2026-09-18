@@ -70,7 +70,9 @@ module attributes {transform.with_named_sequence} {
         : (!transform.any_op) -> !transform.any_op
     %rzf = transform.apply_registered_pass "waveamd-dma-zero-fill" to %rstride
         : (!transform.any_op) -> !transform.any_op
-    %rlicm = transform.apply_registered_pass "loop-invariant-code-motion" to %rzf
+    %rpred = transform.apply_registered_pass "waveamd-lower-buffer-predication" to %rzf
+        : (!transform.any_op) -> !transform.any_op
+    %rlicm = transform.apply_registered_pass "loop-invariant-code-motion" to %rpred
         : (!transform.any_op) -> !transform.any_op
     %rmask1 = transform.apply_registered_pass "wave-optimize-masks" to %rlicm
         : (!transform.any_op) -> !transform.any_op

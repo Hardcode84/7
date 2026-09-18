@@ -130,7 +130,7 @@ func.func @keep_effectful_gap_codegen(
 // ASM-LABEL: keep_readfirstlane_outside_exec_codegen:
 // ASM: s_and_saveexec_b64
 // ASM: v_readfirstlane_b32
-// ASM: s_and_saveexec_b64
+// ASM: v_cndmask_b32
 // ASM-NOT: s_and_saveexec_b64
 // ASM: s_endpgm
 func.func @keep_readfirstlane_outside_exec_codegen(

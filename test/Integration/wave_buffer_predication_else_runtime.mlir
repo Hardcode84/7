@@ -2,6 +2,9 @@
 // RUN: sed -e 's/@W@/%wave_width/g' -e 's/@BYTES@/%wave_bytes/g' %s \
 // RUN:   | wave-opt - --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},waveamd-lower-buffer-predication,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
 // RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void
+// RUN: sed -e 's/@W@/%wave_width/g' -e 's/@BYTES@/%wave_bytes/g' %s \
+// RUN:   | wave-opt - --pass-pipeline='builtin.module(wave-set-target-attr{chip=%chip},transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=compile_kernels},convert-scf-to-cf,gpu-to-llvm{use-bare-pointers-for-kernels=true},convert-to-llvm,reconcile-unrealized-casts)' \
+// RUN:   | mlir-runner --shared-libs=%mlir_rocm_runtime --shared-libs=%mlir_runner_utils --shared-libs=%wave_runtime --entry-point-result=void
 
 module attributes {gpu.container_module} {
 gpu.module @kernels {

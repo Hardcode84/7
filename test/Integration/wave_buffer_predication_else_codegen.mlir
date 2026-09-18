@@ -1,3 +1,5 @@
+// RUN: wave-translate --wave-to-amdgpu-asm %s | FileCheck %s
+// RUN: wave-translate --wave-to-amdgpu-asm %s | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 // RUN: wave-opt --waveamd-lower-buffer-predication %s | wave-translate --wave-to-amdgpu-asm | FileCheck %s
 // RUN: wave-opt --waveamd-lower-buffer-predication %s | wave-translate --wave-to-amdgpu-asm | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj -o /dev/null
 

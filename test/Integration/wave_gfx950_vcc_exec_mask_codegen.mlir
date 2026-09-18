@@ -9,10 +9,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // ASM-LABEL: vcc_exec_mask_codegen:
 // ASM: v_cmp_lt_i32_e64 vcc,
-// ASM-NEXT: s_and_saveexec_b64 [[SAVE:s\[[0-9]+:[0-9]+\]]], vcc
 // ASM-NOT: s_mov_b64 {{.*}}, vcc
+// ASM: v_cndmask_b32_e32
 // ASM: buffer_store_dword
-// ASM: s_mov_b64 exec, [[SAVE]]
+// ASM-NOT: s_and_saveexec_b64
 // ASM: s_endpgm
 func.func @vcc_exec_mask_codegen(
     %out: !wave.ptr<#wave.global, i32>,
@@ -46,8 +46,9 @@ func.func @vcc_exec_mask_codegen(
 // ASM-DAG: v_cmp_ge_i32_e64 [[MASK1:s\[[0-9]+:[0-9]+\]]],
 // ASM: s_and_b64 [[COMBINED:s\[[0-9]+:[0-9]+\]]], [[MASK0]], [[MASK1]]
 // ASM-NOT: s_mov_b64 {{.*}}, vcc
-// ASM: s_and_saveexec_b64 {{.*}}, [[COMBINED]]
+// ASM: v_cndmask_b32_e64 {{.*}}, {{.*}}, {{.*}}, [[COMBINED]]
 // ASM: buffer_store_dword
+// ASM-NOT: s_and_saveexec_b64
 // ASM: s_endpgm
 func.func @direct_compare_mask_chain_codegen(
     %out: !wave.ptr<#wave.global, i32>,
@@ -85,10 +86,10 @@ func.func @direct_compare_mask_chain_codegen(
 
 // ASM-LABEL: ordered_f32_compare_codegen:
 // ASM: v_cmp_lt_f32_e64 vcc,
-// ASM-NEXT: s_and_saveexec_b64 [[FLOAT_SAVE:s\[[0-9]+:[0-9]+\]]], vcc
 // ASM-NOT: s_mov_b64 {{.*}}, vcc
+// ASM: v_cndmask_b32_e32
 // ASM: buffer_store_dword
-// ASM: s_mov_b64 exec, [[FLOAT_SAVE]]
+// ASM-NOT: s_and_saveexec_b64
 // ASM: s_endpgm
 func.func @ordered_f32_compare_codegen(
     %out: !wave.ptr<#wave.global, i32>,

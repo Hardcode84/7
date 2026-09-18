@@ -6,10 +6,11 @@
 
 // ASM-LABEL: symbolic_memory_scoped_assumption_codegen:
 // ASM: v_cmp_lt_i32
-// ASM: s_and_saveexec_b64
+// ASM: v_cndmask_b32
 // ASM: buffer_load_dword
-// ASM: s_and_saveexec_b64
+// ASM: v_cndmask_b32
 // ASM: buffer_load_dword
+// ASM-NOT: s_and_saveexec_b64
 // ASM-NOT: global_load_dword
 // ASM: s_waitcnt vmcnt(0)
 // ASM: buffer_store_dwordx2
