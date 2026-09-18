@@ -738,7 +738,6 @@ private:
       return targetCapabilities->waitXcnt;
     return sti->hasFeature(llvm::AMDGPU::FeatureWaitXcnt);
   }
-  bool rejectLegacyVMemToLDS() const { return llvm::AMDGPU::isGFX1250(*sti); }
   bool usesSplitWaitCounters() const {
     if (targetCapabilities)
       return targetCapabilities->waitCounterFamily ==
@@ -1266,28 +1265,6 @@ private:
   unsigned dsWrite2B64() const { return opcodes.dsWrite2B64; }
   unsigned dsWrite2St64B32() const { return opcodes.dsWrite2St64B32; }
   unsigned dsWrite2St64B64() const { return opcodes.dsWrite2St64B64; }
-
-  unsigned globalLoadLdsB32() const {
-    return isGfx90APlus() ? llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_gfx940
-                          : llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR_vi;
-  }
-
-  unsigned globalLoadLdsB128() const {
-    return isGfx90APlus() ? llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORDX4_SADDR_gfx940
-                          : llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORDX4_SADDR_vi;
-  }
-
-  unsigned bufferLoadLdsB32() const {
-    if (isGfx90APlus())
-      return llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN_gfx90a;
-    return opcodes.bufferLoadLdsB32;
-  }
-
-  unsigned bufferLoadLdsB128() const {
-    if (isGfx90APlus())
-      return llvm::AMDGPU::BUFFER_LOAD_DWORDX4_LDS_OFFEN_gfx90a;
-    return llvm::AMDGPU::BUFFER_LOAD_DWORDX4_LDS_OFFEN_vi;
-  }
 
   unsigned dsReadB32() const { return opcodes.dsReadB32; }
   unsigned dsReadAddTidB32() const { return opcodes.dsReadAddTidB32; }
@@ -4117,6 +4094,29 @@ private:
          llvm::MCOperand::createImm(aux), llvm::MCOperand::createImm(0)});
   }
 
+  LogicalResult emitLdsDma(Operation &op) {
+    bool buffer = isa<waveamdmachine::BufferLoadLdsB32Op,
+                      waveamdmachine::BufferLoadLdsB128Op>(op);
+    unsigned bytes = isa<waveamdmachine::GlobalLoadLdsB128Op,
+                         waveamdmachine::BufferLoadLdsB128Op>(op)
+                         ? 16
+                         : 4;
+    std::optional<unsigned> opcode =
+        waveamdmachine::getAMDGPULdsDmaOpcodes(*sti).get(buffer, bytes);
+    if (!opcode)
+      return op.emitError()
+             << targetChip << " does not support " << bytes << "-byte "
+             << (buffer ? "buffer" : "global") << "-to-LDS DMA";
+    if (buffer)
+      return emitBufferLoadLds(op, *opcode);
+    if (failed(rejectCacheAttr(op, "global LDS load")))
+      return failure();
+    return emitLegacyLdsDma(
+        *opcode, {toMCOperand(op.getOperand(1)), toMCOperand(op.getOperand(0)),
+                  llvm::MCOperand::createImm(getIntAttr(&op, "inst_offset", 0)),
+                  llvm::MCOperand::createImm(getIntAttr(&op, "aux", 0))});
+  }
+
   LogicalResult emitBufferStore(Operation &op, unsigned opcode) {
     FailureOr<llvm::MCOperand> soffset =
         getBufferSoffsetOperand(op, opcode, op.getOperand(3));
@@ -5921,40 +5921,11 @@ private:
           llvm::AMDGPU::CLUSTER_LOAD_ASYNC_TO_LDS_B128_SADDR,
           cast<waveamdmachine::ClusterLoadAsyncToLdsB128Op>(op).getLdsAddress(),
           "gfx1250 async cluster-to-LDS load");
-    if (rejectLegacyVMemToLDS() && isa<waveamdmachine::GlobalLoadLdsB32Op,
-                                       waveamdmachine::GlobalLoadLdsB128Op,
-                                       waveamdmachine::BufferLoadLdsB32Op,
-                                       waveamdmachine::BufferLoadLdsB128Op>(op))
-      return op.emitError("no legacy VMEM-to-LDS MC mapping for target ")
-             << targetChip << ": " << op.getName();
-    if (isa<waveamdmachine::GlobalLoadLdsB32Op>(op)) {
-      if (failed(rejectCacheAttr(op, "global LDS load")))
-        return failure();
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      int64_t aux = getIntAttr(&op, "aux", 0);
-      return emitLegacyLdsDma(globalLoadLdsB32(),
-                              {toMCOperand(op.getOperand(1)),
-                               toMCOperand(op.getOperand(0)),
-                               llvm::MCOperand::createImm(instOffset),
-                               llvm::MCOperand::createImm(aux)});
-    }
-    if (isa<waveamdmachine::GlobalLoadLdsB128Op>(op)) {
-      if (failed(rejectCacheAttr(op, "global LDS load")))
-        return failure();
-      int64_t instOffset = getIntAttr(&op, "inst_offset", 0);
-      int64_t aux = getIntAttr(&op, "aux", 0);
-      return emitLegacyLdsDma(globalLoadLdsB128(),
-                              {toMCOperand(op.getOperand(1)),
-                               toMCOperand(op.getOperand(0)),
-                               llvm::MCOperand::createImm(instOffset),
-                               llvm::MCOperand::createImm(aux)});
-    }
-    if (isa<waveamdmachine::BufferLoadLdsB32Op>(op)) {
-      return emitBufferLoadLds(op, bufferLoadLdsB32());
-    }
-    if (isa<waveamdmachine::BufferLoadLdsB128Op>(op)) {
-      return emitBufferLoadLds(op, bufferLoadLdsB128());
-    }
+    if (isa<waveamdmachine::GlobalLoadLdsB32Op,
+            waveamdmachine::GlobalLoadLdsB128Op,
+            waveamdmachine::BufferLoadLdsB32Op,
+            waveamdmachine::BufferLoadLdsB128Op>(op))
+      return emitLdsDma(op);
     if (isa<waveamdmachine::DsLoadU8Op>(op))
       return emitDsLoad(op, dsReadU8());
     if (isa<waveamdmachine::DsLoadI8Op>(op))

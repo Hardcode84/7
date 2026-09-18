@@ -344,29 +344,29 @@ func.func @promote_simd_constant_offset(
 
 // -----
 
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 
 // CHECK-LABEL: func.func @promote_dma_load_lds
 // CHECK: [[BUF:%.*]] = waveamd.make_buffer
-// CHECK: [[SRC:%.*]] = wave.ptr_add [[BUF]], {{%.*}} : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 32> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 32>
+// CHECK: [[SRC:%.*]] = wave.ptr_add [[BUF]], {{%.*}} : !wave.ptr<#waveamd.buffer, i32>, !wave.simd<index, 64> -> !wave.simd<!wave.ptr<#waveamd.buffer, i32>, 64>
 // CHECK: waveamd.dma_load_lds [[SRC]]
 // MACHINE-LABEL: func.func @promote_dma_load_lds
 // MACHINE: waveamdmachine.buffer_load_lds_b32
 func.func @promote_dma_load_lds(
     %in: !wave.ptr<#wave.global, i32>)
-    attributes {wave.kernel, waveamdmachine.lds_size = 128 : i64} {
+    attributes {wave.kernel, wave.lds_size = 256 : i64} {
   %tok0 = wave.token : !wave.mem.token
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
-  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %lane = wave.lane_id : !wave.simd<i32, 64>
   %lane_offset = wave.index_expr <"lane">
-      assuming [#wave.pred<"lane >= 0">, #wave.pred<"lane <= 31">]
+      assuming [#wave.pred<"lane >= 0">, #wave.pred<"lane <= 63">]
       ["lane"](%lane)
-      : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
+      : (!wave.simd<i32, 64>) -> !wave.simd<index, 64>
   %src = wave.ptr_add %in, %lane_offset
-      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 32>
-      -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
+      : !wave.ptr<#wave.global, i32>, !wave.simd<index, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
   %tok1 = waveamd.dma_load_lds %src -> %lds after %tok0 {bytes = 4 : i64}
-      : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
+      : (!wave.simd<!wave.ptr<#wave.global, i32>, 64>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token
   return
 }

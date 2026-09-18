@@ -579,7 +579,7 @@ func.func @gfx1250_rejects_direct_to_lds(
       -> !wave.simd<!wave.ptr<#wave.global, i32>, 32>
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
   %root = wave.token : !wave.mem.token
-  // expected-error @below {{gfx1250 does not support direct-to-LDS lowering}}
+  // expected-error @below {{gfx1250 does not support 16-byte global-to-LDS DMA}}
   %loaded = waveamd.dma_load_lds %src -> %lds after %root {bytes = 16 : i64}
       : (!wave.simd<!wave.ptr<#wave.global, i32>, 32>,
          !wave.ptr<#wave.shared, i32>, !wave.mem.token) -> !wave.mem.token

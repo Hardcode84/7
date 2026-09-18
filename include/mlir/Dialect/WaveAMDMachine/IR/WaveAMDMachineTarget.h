@@ -18,6 +18,7 @@
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 #include "llvm/TargetParser/SubtargetFeature.h"
 
+#include <cassert>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -148,6 +149,22 @@ getAMDGPUWmmaCapabilities(const llvm::MCSubtargetInfo &sti, bool bf16);
 
 std::optional<AMDGPUMmaCapabilities>
 getAMDGPUGfx1250WmmaCapabilities(bool bf16);
+
+struct AMDGPULdsDmaOpcodes {
+  std::optional<unsigned> bufferB32;
+  std::optional<unsigned> bufferB128;
+  std::optional<unsigned> globalB32;
+  std::optional<unsigned> globalB128;
+
+  std::optional<unsigned> get(bool buffer, unsigned bytes) const {
+    assert((bytes == 4 || bytes == 16) && "unsupported DMA width");
+    if (buffer)
+      return bytes == 4 ? bufferB32 : bufferB128;
+    return bytes == 4 ? globalB32 : globalB128;
+  }
+};
+
+AMDGPULdsDmaOpcodes getAMDGPULdsDmaOpcodes(const llvm::MCSubtargetInfo &sti);
 
 bool isAMDGPUOpcodeAvailable(unsigned opcode,
                              const llvm::FeatureBitset &features);

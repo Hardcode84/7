@@ -25,6 +25,7 @@
 #include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
+#include <array>
 
 #define GET_AVAILABLE_OPCODE_CHECKER
 #include "AMDGPUGenInstrInfo.inc"
@@ -593,6 +594,29 @@ mlir::waveamdmachine::getAMDGPUGfx1250WmmaCapabilities(bool bf16) {
   if (!sti)
     return std::nullopt;
   return getAMDGPUWmmaCapabilities(*sti, bf16);
+}
+
+static std::optional<unsigned>
+getLdsDmaOpcode(unsigned pseudo, const llvm::MCSubtargetInfo &sti) {
+  constexpr std::array families = {
+      llvm::SIEncodingFamily::GFX940, llvm::SIEncodingFamily::GFX90A,
+      llvm::SIEncodingFamily::GFX10, llvm::SIEncodingFamily::VI,
+      llvm::SIEncodingFamily::SI};
+  for (unsigned family : families) {
+    int opcode = llvm::AMDGPU::getMCOpcode(pseudo, family);
+    if (opcode >= 0 && opcode != llvm::AMDGPU::INSTRUCTION_LIST_END &&
+        isAMDGPUOpcodeAvailable(opcode, sti.getFeatureBits()))
+      return opcode;
+  }
+  return std::nullopt;
+}
+
+AMDGPULdsDmaOpcodes
+mlir::waveamdmachine::getAMDGPULdsDmaOpcodes(const llvm::MCSubtargetInfo &sti) {
+  return {getLdsDmaOpcode(llvm::AMDGPU::BUFFER_LOAD_DWORD_LDS_OFFEN, sti),
+          getLdsDmaOpcode(llvm::AMDGPU::BUFFER_LOAD_DWORDX4_LDS_OFFEN, sti),
+          getLdsDmaOpcode(llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORD_SADDR, sti),
+          getLdsDmaOpcode(llvm::AMDGPU::GLOBAL_LOAD_LDS_DWORDX4_SADDR, sti)};
 }
 
 bool mlir::waveamdmachine::isAMDGPUOpcodeAvailable(

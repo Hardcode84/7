@@ -334,6 +334,7 @@ public:
       slotFitsU32Cache;
   DenseMap<std::pair<Value, uint32_t>, Value> bufferConstAddTidDescriptors;
   std::optional<waveamdmachine::AMDGPUTarget> target;
+  waveamdmachine::AMDGPULdsDmaOpcodes ldsDmaOpcodes;
   PointerOffset lastDmaDstOffset;
   SmallVector<Operation *> opsToErase;
   SmallVector<Operation *> foldedMmaAccumulatorMaterializations;
@@ -353,7 +354,6 @@ public:
   bool dmaIssueTimingEnabled = false;
   bool lastDmaHadIssueDelay = false;
   bool packedWorkitemIds = false;
-  bool rejectLegacyVMemToLDS = false;
   bool setPrioIncWg = false;
 
   // ---- address-planning helpers -----------------------------------------

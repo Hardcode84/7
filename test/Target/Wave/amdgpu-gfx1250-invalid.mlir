@@ -119,7 +119,7 @@ func.func @old_lds_dma() -> !waveamdmachine.mem.token {
         -> !waveamdmachine.m0
   %dependency = waveamdmachine.token
       : !waveamdmachine.mem.token
-  // expected-error @below {{no legacy VMEM-to-LDS MC mapping for target gfx1250: waveamdmachine.global_load_lds_b32}}
+  // expected-error @below {{gfx1250 does not support 4-byte global-to-LDS DMA}}
   %token = waveamdmachine.global_load_lds_b32
       %off, %base, %m0 after %dependency
       : (!waveamdmachine.reg<vgpr, 1, 0>,

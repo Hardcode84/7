@@ -4,7 +4,7 @@
 // RUN: FileCheck %s --check-prefix=ERR < %t.err
 // RUN: not test -s %t.mlir
 
-// ERR: 'waveamd.dma_load_lds' op gfx1250 does not support direct-to-LDS lowering
+// ERR: 'waveamd.dma_load_lds' op gfx1250 does not support 16-byte buffer-to-LDS DMA
 // ERR-NOT: waveamdmachine.{{global|buffer}}_load_lds
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"} {

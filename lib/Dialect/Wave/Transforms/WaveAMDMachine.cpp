@@ -516,13 +516,13 @@ static LogicalResult validateTargetWaveWidth(
 
 struct MachineSelectionTargetInfo {
   waveamdmachine::AMDGPUTarget target;
+  waveamdmachine::AMDGPULdsDmaOpcodes ldsDmaOpcodes;
   unsigned wavefrontSize = 0;
   unsigned bufferResourceBaseBits = 0;
   waveamdmachine::MatrixFamily matrixFamily =
       waveamdmachine::MatrixFamily::None;
   bool clusters = false;
   bool setPrioIncWg = false;
-  bool rejectLegacyVMemToLDS = false;
 };
 
 static FailureOr<MachineSelectionTargetInfo>
@@ -553,13 +553,11 @@ getMachineSelectionTargetInfo(func::FuncOp func, ModuleOp targetModule) {
   bool clusters = capabilities && capabilities->clusters &&
                   target->kind == llvm::AMDGPU::GK_GFX1250;
   bool setPrioIncWg = capabilities && capabilities->setPrioIncWg;
-  return MachineSelectionTargetInfo{std::move(*target),
-                                    *wavefrontSize,
-                                    bufferResourceBaseBits,
-                                    matrixFamily,
-                                    clusters,
-                                    setPrioIncWg,
-                                    llvm::AMDGPU::isGFX1250(*sti)};
+  return MachineSelectionTargetInfo{
+      std::move(*target), waveamdmachine::getAMDGPULdsDmaOpcodes(*sti),
+      *wavefrontSize,     bufferResourceBaseBits,
+      matrixFamily,       clusters,
+      setPrioIncWg};
 }
 
 static LogicalResult configureMachineSelectionClusterDims(
@@ -597,7 +595,7 @@ validateMachineSelectionTarget(WaveAMDMachineSelector &selector) {
   selector.target = std::move(targetInfo->target);
   selector.bufferResourceBaseBits = targetInfo->bufferResourceBaseBits;
   selector.matrixFamily = targetInfo->matrixFamily;
-  selector.rejectLegacyVMemToLDS = targetInfo->rejectLegacyVMemToLDS;
+  selector.ldsDmaOpcodes = targetInfo->ldsDmaOpcodes;
   selector.setPrioIncWg = targetInfo->setPrioIncWg;
   if (failed(configureMachineSelectionClusterDims(selector, *targetInfo)))
     return failure();
@@ -9196,9 +9194,11 @@ validateDmaLoadLdsSelection(WaveAMDMachineSelector &selector,
                             waveamd::DmaLoadLdsOp op) {
   if (op.getBytes() != 4 && op.getBytes() != 16)
     return op.emitError("WaveAMDMachine backend supports only bytes = 4 or 16");
-  if (selector.target && selector.rejectLegacyVMemToLDS)
-    return op.emitOpError() << selector.target->chip
-                            << " does not support direct-to-LDS lowering";
+  bool buffer = selector.pointerBuffers.lookup(op.getSource());
+  if (selector.target && !selector.ldsDmaOpcodes.get(buffer, op.getBytes()))
+    return op.emitOpError()
+           << selector.target->chip << " does not support " << op.getBytes()
+           << "-byte " << (buffer ? "buffer" : "global") << "-to-LDS DMA";
   return success();
 }
 
