@@ -9,4 +9,4 @@
 // RUN: ld.lld --shared %t.original.o -o %t.original.hsaco
 // RUN: ld.lld --shared %t.optimized.o -o %t.optimized.hsaco
 // RUN: env LD_LIBRARY_PATH=%rocm_lib %python %S/Inputs/cross_lane_exec_runner.py --hip-lib=%hip_runtime_lib %t.original.hsaco %t.optimized.hsaco | FileCheck %s
-// CHECK: Cross-lane EXEC: 62 kernels, 4 waves, 63488 outputs passed
+// CHECK: Cross-lane EXEC: 67 kernels, 4 waves, 68608 outputs passed

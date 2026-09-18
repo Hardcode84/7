@@ -3171,28 +3171,6 @@ private:
     llvm_unreachable("expected allocated WaveAMDMachine register");
   }
 
-  std::string physReg(Value value) const {
-    auto regType = cast<waveamdmachine::RegType>(value.getType());
-    unsigned phys = getPhys(value);
-    StringRef prefix = "s";
-    if (regType.getRegClass() == waveamdmachine::RegClass::VGPR)
-      prefix = "v";
-    if (regType.getRegClass() == waveamdmachine::RegClass::AGPR)
-      prefix = "a";
-    if (regType.getWidth() == 1)
-      return (prefix + Twine(phys)).str();
-    return (prefix + Twine("[") + Twine(phys) + ":" +
-            Twine(phys + regType.getWidth() - 1) + "]")
-        .str();
-  }
-
-  std::string operandToString(Value value) const {
-    if (Operation *def = value.getDefiningOp())
-      if (isa<waveamdmachine::ImmOp>(def))
-        return Twine(def->getAttrOfType<IntegerAttr>("value").getInt()).str();
-    return physReg(value);
-  }
-
   unsigned namedPhysReg(StringRef name) {
     if (name.consume_front("s[")) {
       StringRef first;
@@ -4592,9 +4570,6 @@ private:
     sgprTupleEmissionFailed = false;
     if (failed(verifyVGPRAddressability(op)))
       return failure();
-    auto operandString = [&](unsigned i) {
-      return operandToString(op.getOperand(i));
-    };
     auto result = [&]() { return op.getResult(0); };
     StringRef name = op.getName().getStringRef();
 
@@ -5181,13 +5156,15 @@ private:
       return emitMC(
           opcode, {dst, toMCB32(op.getOperand(0)), toMCB32(op.getOperand(1))});
     }
-    if (isa<waveamdmachine::SMovB32Op>(op)) {
-      StringRef dst = op.getAttrOfType<StringAttr>("dst").getValue();
-      std::string src = operandString(0);
-      if (dst != src)
-        return emitMC(sMovB32(), {llvm::MCOperand::createReg(namedPhysReg(dst)),
-                                  toMCOperand(op.getOperand(0))});
-      return success();
+    if (auto move = dyn_cast<waveamdmachine::SMovB32Op>(op)) {
+      unsigned dst = move.getFixedPhysicalRegisterDefs().front().begin;
+      Value source = move.getSource();
+      if (isa<waveamdmachine::RegType>(source.getType()) &&
+          getPhys(source) == dst)
+        return success();
+      return emitMC(sMovB32(),
+                    {llvm::MCOperand::createReg(mcSGPRReg(dst, /*width=*/1)),
+                     toMCOperand(source)});
     }
     if (isa<waveamdmachine::SMovB32ValueOp>(op)) {
       // Coalescing in the regalloc may have folded source==dest;

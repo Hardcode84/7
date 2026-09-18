@@ -1619,16 +1619,17 @@ def WaveAMDMachine_MfmaScaleF32_32x32x64_F4F4Op
 }
 
 def WaveAMDMachine_SMovB32Op : WaveAMDMachine_UnaryNoResult<"s_mov_b32",
-                                                       WaveAMDMachine_RegOrImm,
+                                                       WaveAMDMachine_SGPR1OrImm,
                                                        [WaveAMDMachine_SALU]> {
-  let arguments = (ins StrAttr:$dst, WaveAMDMachine_RegOrImm:$source);
+  let summary = "copy a scalar word to a numbered ABI SGPR";
+  let arguments = (ins StrAttr:$dst, WaveAMDMachine_SGPR1OrImm:$source);
   let assemblyFormat = "$dst `,` $source attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
   let fixedPhysicalRegisterDefs = [{
-    ::std::optional<::mlir::waveamdmachine::PhysicalRegisterSpan> span =
-        ::mlir::waveamdmachine::parseSGPRRegisterSpan(getDst());
-    if (span)
-      return {*span};
-    return {};
+    unsigned index = 0;
+    [[maybe_unused]] bool invalid = getDst().drop_front().getAsInteger(10, index);
+    assert(!invalid && "destination must be a verified numbered SGPR");
+    return {{::mlir::waveamdmachine::RegClass::SGPR, index, index + 1}};
   }];
 }
 

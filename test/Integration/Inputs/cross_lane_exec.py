@@ -14,6 +14,7 @@ MASKS = {
     "lower": (1 << 32) - 1,
     "upper": FULL << 32 & FULL,
     "sparse": 0x55555555AAAAAAAA,
+    "exec_lo": FULL ^ 0xFFFFFFFF,
 }
 SCENARIOS = (
     *MASKS,
@@ -180,7 +181,10 @@ def kernel(kind, scenario):
         code += exec_region()
     if scenario in ("loop_exec", "loop_partial"):
         return code + loop_body(kind, scenario) + "  return\n}\n"
-    if scenario in (*MASKS, "restored") and scenario != "full":
+    if scenario == "exec_lo":
+        code += "  %zero = waveamdmachine.s_mov_b32_value %c0 : (!i) -> !s1\n"
+        code += "  waveamdmachine.s_mov_exec_lo %zero : (!s1) -> ()\n"
+    elif scenario in (*MASKS, "restored") and scenario != "full":
         code += mask_exec()
     code += first
     if scenario.startswith("split_"):

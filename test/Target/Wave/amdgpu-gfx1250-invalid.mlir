@@ -345,10 +345,10 @@ module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"
 } {
 
-func.func @unmapped_high_vgpr() {
+func.func @invalid_fixed_move_high_vgpr() {
   %src = waveamdmachine.uninit
       : !waveamdmachine.reg<vgpr, 1, 300>
-  // expected-error @below {{high VGPR operand 1 (MSBs 1) of S_MOV_B32_gfx12 emitted by waveamdmachine.s_mov_b32 has no LLVM VGPR-window mapping}}
+  // expected-error @below {{operand #0 must be WaveAMDMachine SGPR or immediate}}
   waveamdmachine.s_mov_b32 "s0", %src
       : (!waveamdmachine.reg<vgpr, 1, 300>) -> ()
   return
@@ -572,7 +572,7 @@ module attributes {
 
 func.func @unsupported_named_sgpr_tuple() {
   %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
-  // expected-error @below {{LLVM MC has no SGPR tuple at base 6 with width 8 on gfx1250}}
+  // expected-error @below {{destination must name one numbered SGPR (sN)}}
   waveamdmachine.s_mov_b32 "s[6:13]", %zero
       : (!waveamdmachine.imm) -> ()
   return

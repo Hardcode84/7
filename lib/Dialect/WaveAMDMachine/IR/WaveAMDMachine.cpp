@@ -874,6 +874,18 @@ LogicalResult VAccvgprWriteB32TupleOp::verify() {
   return success();
 }
 
+LogicalResult SMovB32Op::verify() {
+  StringRef dst = getDst();
+  unsigned index = 0;
+  if (!dst.consume_front("s") || dst.empty() ||
+      !llvm::all_of(dst, llvm::isDigit) || dst.getAsInteger(10, index))
+    return emitOpError("destination must name one numbered SGPR (sN)");
+  unsigned count = llvm::AMDGPU::EncValues::SGPR_MAX_GFX10 + 1;
+  if (index >= count)
+    return emitOpError("destination SGPR index must be less than ") << count;
+  return success();
+}
+
 LogicalResult SMovB32TupleOp::verify() {
   auto resultType = cast<RegType>(getResult().getType());
   if (auto registers = (*this)->getAttrOfType<IntegerAttr>("registers")) {
