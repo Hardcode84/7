@@ -10,6 +10,7 @@
 
 #include "WavePointerAdd.h"
 #include "WaveSignedRange.h"
+#include "WaveSymbolicValueAnalysis.h"
 
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Analysis/DataFlow/Utils.h"
@@ -22,6 +23,7 @@
 #include "mlir/Dialect/Wave/IR/WaveSymbols.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -106,6 +108,13 @@ struct LoopCyclicOffsetCandidate {
   bool canAnchor = false;
 };
 
+struct LoopMemoryOffsetCandidate {
+  BoundExpr base;
+  BoundExpr increment;
+  PtrAddOp ptrAdd;
+  int64_t ring = 0;
+};
+
 using MaterializationAlternatives = llvm::SmallPtrSet<Operation *, 4>;
 
 struct OffsetCarryCandidate {
@@ -123,6 +132,9 @@ struct LoopOffsetCarryCandidate {
 static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
                                    MLIRContext *ctx, const BoundExpr &expr,
                                    IRMapping *map);
+
+static Value createOffsetExpr(IRRewriter &rewriter, Location loc,
+                              const BoundExpr &expr, Type offsetType);
 
 static bool isDefinedInside(Operation *scope, Value value) {
   if (Operation *def = value.getDefiningOp())
@@ -915,9 +927,9 @@ matchCyclicOffsetPattern(sym::Store &store, sym::ExprHandle expr,
 }
 
 static FailureOr<Value>
-createCyclicOffsetUpdate(IRRewriter &rewriter, Location loc, MLIRContext *ctx,
-                         sym::Store &store, Value current,
-                         const BoundExpr &increment, int64_t ring) {
+createCyclicOffsetUpdate(IRRewriter &rewriter, Location loc, sym::Store &store,
+                         Value current, const BoundExpr &increment,
+                         int64_t ring) {
   llvm::StringSet<> used;
   collectUsedNames(increment, used);
   std::string offsetName = uniqueName(used, "offset");
@@ -946,13 +958,19 @@ createCyclicOffsetUpdate(IRRewriter &rewriter, Location loc, MLIRContext *ctx,
   update.bindings.push_back(current);
   llvm::append_range(update.names, increment.names);
   llvm::append_range(update.bindings, increment.bindings);
-  return createIndexExpr(rewriter, loc, ctx, update, nullptr).getResult();
+  return createOffsetExpr(rewriter, loc, update, current.getType());
+}
+
+static Value stripAssumes(Value value) {
+  while (AssumeOp assume = value.getDefiningOp<AssumeOp>())
+    value = assume.getValue();
+  return value;
 }
 
 static std::optional<std::string> findIVBinding(const ExpandedIndexExpr &expr,
                                                 Value iv) {
   for (auto [name, binding] : llvm::zip(expr.names, expr.bindings))
-    if (binding == iv)
+    if (stripAssumes(binding) == iv)
       return name;
   return std::nullopt;
 }
@@ -964,9 +982,12 @@ static bool isImmediateBodyOp(scf::ForOp loop, Operation *op) {
 static bool canRewritePtrAddInLoop(scf::ForOp loop, PtrAddOp ptrAdd) {
   if (!isImmediateBodyOp(loop, ptrAdd))
     return false;
-  if (ptrAdd->use_empty())
-    return false;
-  return !isDefinedInside(loop, ptrAdd.getBase());
+  return !ptrAdd->use_empty();
+}
+
+static bool canCarryPtrAddInLoop(scf::ForOp loop, PtrAddOp ptrAdd) {
+  return canRewritePtrAddInLoop(loop, ptrAdd) &&
+         !isDefinedInside(loop, ptrAdd.getBase());
 }
 
 static IndexExprOp getLoopLocalOffsetExpr(scf::ForOp loop, PtrAddOp ptrAdd) {
@@ -981,7 +1002,7 @@ static IndexExprOp getLoopLocalOffsetExpr(scf::ForOp loop, PtrAddOp ptrAdd) {
 static bool hasLoopLocalNonIVBinding(scf::ForOp loop,
                                      const ExpandedIndexExpr &indexExpr) {
   for (Value binding : indexExpr.bindings) {
-    if (binding == loop.getInductionVar())
+    if (stripAssumes(binding) == loop.getInductionVar())
       continue;
     if (isDefinedInside(loop, binding))
       return true;
@@ -1241,7 +1262,7 @@ static LogicalResult buildCandidate(scf::ForOp loop, PtrAddOp ptrAdd,
                                     LoopStrideCandidate &candidate,
                                     bool &matched) {
   matched = false;
-  if (!canRewritePtrAddInLoop(loop, ptrAdd))
+  if (!canCarryPtrAddInLoop(loop, ptrAdd))
     return success();
 
   IndexExprOp indexExpr = getLoopLocalOffsetExpr(loop, ptrAdd);
@@ -1289,6 +1310,12 @@ static bool canRewriteCyclicOffsetInLoop(scf::ForOp loop,
   return type.isIndex();
 }
 
+static FailureOr<sym::ExprHandle>
+wrapExprRing(sym::Store &store, int64_t modulus, sym::ExprHandle expr) {
+  sym::ExprHandle ring = sym::composeExprInt(store, modulus);
+  return sym::composeExprBinary(store, expr, sym::ExprBinaryOp::Mod, ring);
+}
+
 static std::optional<int64_t>
 getExplicitPowerOfTwoModulus(sym::ExprHandle expr) {
   sym::ExprView view(expr);
@@ -1300,6 +1327,126 @@ getExplicitPowerOfTwoModulus(sym::ExprHandle expr) {
       !isPowerOfTwo(*modulus))
     return std::nullopt;
   return modulus;
+}
+
+static bool hasGlobalPointerBase(PtrAddOp op) {
+  std::optional<PtrType> ptr = getWavePointerType(op.getBase().getType());
+  return ptr && isa<GlobalAddressSpaceAttr>(ptr->getAddressSpace());
+}
+
+static FailureOr<std::optional<ExpandedIndexExpr>>
+buildExactIntegerCastOffset(PtrAddOp ptrAdd, WaveDialect &dialect) {
+  CastOp cast = ptrAdd.getOffset().getDefiningOp<CastOp>();
+  if (!cast || !mlir::wave::detail::isStructurallySymbolicIntegerCast(
+                   cast, /*allowI64Integers=*/hasGlobalPointerBase(ptrAdd)))
+    return std::optional<ExpandedIndexExpr>{};
+
+  mlir::wave::detail::SymbolicValueBuilder builder(
+      dialect, /*allowI64Integers=*/hasGlobalPointerBase(ptrAdd),
+      /*assumeI32StorageRange=*/true,
+      /*expandIndexExprRoot=*/false,
+      /*foldWaveConstants=*/false,
+      /*modelWrappingArithmetic=*/true,
+      /*fullyMergeAssumes=*/false,
+      mlir::wave::detail::AssumeRootPolicy::ExpandSource,
+      hasAddressArithmeticNoOverflowAssumption(ptrAdd.getOperation()));
+  builder.enableExactIntegerCasts();
+  FailureOr<std::optional<SymbolicOffset>> offset =
+      builder.build(ptrAdd.getOffset());
+  if (failed(offset))
+    return failure();
+  if (!*offset)
+    return std::optional<ExpandedIndexExpr>{};
+
+  ExpandedIndexExpr expanded;
+  expanded.expr = (**offset).expr;
+  expanded.materializationExpr = (**offset).expr;
+  expanded.assumptions = std::move((**offset).assumptions);
+  for (const SymbolicOffsetBinding &binding : (**offset).bindings) {
+    expanded.names.push_back(mlir::wave::detail::symbolName(binding).str());
+    expanded.bindings.push_back(binding.value);
+  }
+  return std::optional<ExpandedIndexExpr>{std::move(expanded)};
+}
+
+static bool hasSimdBindings(ArrayRef<Value> bindings) {
+  return llvm::any_of(
+      bindings, [](Value value) { return isa<SimdType>(value.getType()); });
+}
+
+static FailureOr<std::optional<LoopMemoryOffsetCandidate>>
+buildMemoryOffsetCandidate(scf::ForOp loop, PtrAddOp ptrAdd,
+                           WaveDialect &dialect, sym::Store &store) {
+  FailureOr<std::optional<ExpandedIndexExpr>> expanded =
+      buildExactIntegerCastOffset(ptrAdd, dialect);
+  if (failed(expanded))
+    return failure();
+  if (!*expanded)
+    return std::optional<LoopMemoryOffsetCandidate>{};
+
+  std::optional<int64_t> modulus =
+      getExplicitPowerOfTwoModulus((**expanded).expr);
+  std::optional<std::string> ivName =
+      findIVBinding(**expanded, loop.getInductionVar());
+  if (!modulus || !ivName || hasLoopLocalNonIVBinding(loop, **expanded))
+    return std::optional<LoopMemoryOffsetCandidate>{};
+
+  FailureOr<BoundExpr> base = buildBaseExpr(**expanded, *ivName, loop, store);
+  FailureOr<BoundExpr> increment =
+      buildModularStrideExpr(**expanded, *ivName, loop, store, *modulus);
+  if (failed(base) || failed(increment))
+    return std::optional<LoopMemoryOffsetCandidate>{};
+  if (hasSimdBindings(increment->bindings))
+    return std::optional<LoopMemoryOffsetCandidate>{};
+
+  FailureOr<sym::ExprHandle> wrappedBase =
+      wrapExprRing(store, *modulus, base->expr);
+  if (failed(wrappedBase))
+    return failure();
+  base->expr = *wrappedBase;
+
+  LoopMemoryOffsetCandidate candidate;
+  candidate.ptrAdd = ptrAdd;
+  candidate.base = std::move(*base);
+  candidate.increment = std::move(*increment);
+  candidate.ring = *modulus;
+  return std::optional<LoopMemoryOffsetCandidate>{std::move(candidate)};
+}
+
+static FailureOr<std::optional<LoopMemoryOffsetCandidate>>
+findMemoryOffsetCandidate(scf::ForOp loop, WaveDialect &dialect,
+                          sym::Store &store) {
+  for (Operation &op : loop.getBody()->without_terminator()) {
+    PtrAddOp ptrAdd = dyn_cast<PtrAddOp>(&op);
+    if (!ptrAdd || !canRewritePtrAddInLoop(loop, ptrAdd))
+      continue;
+    FailureOr<std::optional<LoopMemoryOffsetCandidate>> candidate =
+        buildMemoryOffsetCandidate(loop, ptrAdd, dialect, store);
+    if (failed(candidate) || *candidate)
+      return candidate;
+  }
+  return std::optional<LoopMemoryOffsetCandidate>{};
+}
+
+static FailureOr<bool>
+needsExactMemoryOffsetCanonicalization(scf::ForOp loop, WaveDialect &dialect) {
+  for (Operation &op : loop.getBody()->without_terminator()) {
+    PtrAddOp ptrAdd = dyn_cast<PtrAddOp>(&op);
+    if (!ptrAdd || !canRewritePtrAddInLoop(loop, ptrAdd) ||
+        !isDefinedInside(loop, ptrAdd.getBase()))
+      continue;
+
+    FailureOr<std::optional<ExpandedIndexExpr>> expanded =
+        buildExactIntegerCastOffset(ptrAdd, dialect);
+    if (failed(expanded))
+      return failure();
+    if (!*expanded || !getExplicitPowerOfTwoModulus((**expanded).expr) ||
+        !findIVBinding(**expanded, loop.getInductionVar()))
+      continue;
+    if (hasLoopLocalNonIVBinding(loop, **expanded))
+      return true;
+  }
+  return false;
 }
 
 static bool canCreateModularChoice(
@@ -1314,13 +1461,8 @@ static bool canCreateModularChoice(
 static LogicalResult wrapOffsetRing(sym::Store &store, int64_t modulus,
                                     sym::ExprHandle &base,
                                     sym::ExprHandle &proof) {
-  FailureOr<sym::ExprHandle> ring = sym::composeExprInt(store, modulus);
-  if (failed(ring))
-    return failure();
-  FailureOr<sym::ExprHandle> wrappedBase =
-      sym::composeExprBinary(store, base, sym::ExprBinaryOp::Mod, *ring);
-  FailureOr<sym::ExprHandle> wrappedProof =
-      sym::composeExprBinary(store, proof, sym::ExprBinaryOp::Mod, *ring);
+  FailureOr<sym::ExprHandle> wrappedBase = wrapExprRing(store, modulus, base);
+  FailureOr<sym::ExprHandle> wrappedProof = wrapExprRing(store, modulus, proof);
   if (failed(wrappedBase) || failed(wrappedProof))
     return failure();
   base = *wrappedBase;
@@ -1353,8 +1495,7 @@ static FailureOr<bool> buildExplicitModularOffsetCarryCandidate(
       buildModularStrideExpr(*expanded, *ivName, loop, store, *modulus);
   if (failed(base) || failed(increment))
     return false;
-  if (llvm::any_of(increment->bindings,
-                   [](Value value) { return isa<SimdType>(value.getType()); }))
+  if (hasSimdBindings(increment->bindings))
     return false;
 
   candidate.members.push_back(
@@ -1779,6 +1920,21 @@ static IndexExprOp createIndexExpr(IRRewriter &rewriter, Location loc,
                              rewriter.getStrArrayAttr(nameRefs), bindings);
 }
 
+static Value createOffsetExpr(IRRewriter &rewriter, Location loc,
+                              const BoundExpr &expr, Type offsetType) {
+  Value value = createIndexExpr(rewriter, loc, rewriter.getContext(), expr);
+  Type elementShape = isa<SimdType>(value.getType())
+                          ? offsetType
+                          : getOffsetElementType(offsetType);
+  if (value.getType() != elementShape)
+    value = CastOp::create(rewriter, loc, elementShape, CastKind::IntConvert,
+                           value, DictionaryAttr{});
+  // IV substitution can remove every lane binding from a SIMD expression.
+  if (value.getType() != offsetType)
+    value = SplatOp::create(rewriter, loc, offsetType, value);
+  return value;
+}
+
 static LogicalResult remapMaterializationAlternatives(
     scf::ForOp source, const IRMapping &map,
     MaterializationAlternatives &materializationAlternatives) {
@@ -1989,8 +2145,57 @@ static LogicalResult cloneBodyWithCarriedCyclicOffset(
   assert(anchor != candidate.members.end() &&
          "cyclic offset group must have an anchor");
   FailureOr<Value> nextOffset = createCyclicOffsetUpdate(
-      rewriter, anchor->indexExpr.getLoc(), src->getContext(), store,
-      offsetCarry, candidate.increment, candidate.ring);
+      rewriter, anchor->indexExpr.getLoc(), store, offsetCarry,
+      candidate.increment, candidate.ring);
+  if (failed(nextOffset))
+    return failure();
+  yielded.push_back(*nextOffset);
+  scf::YieldOp::create(rewriter, srcYield.getLoc(), yielded);
+  return remapMaterializationAlternatives(src, map, alternatives);
+}
+
+static LogicalResult cloneBodyWithMemoryOffsetVariants(
+    IRRewriter &rewriter, scf::ForOp src, scf::ForOp dst,
+    LoopMemoryOffsetCandidate candidate, sym::Store &store,
+    MaterializationAlternatives &alternatives) {
+  Block &srcBody = *src.getBody();
+  Block &dstBody = *dst.getBody();
+  Value offsetCarry = dstBody.getArgument(srcBody.getNumArguments());
+
+  IRMapping map;
+  map.map(src.getInductionVar(), dst.getInductionVar());
+  for (auto [oldArg, newArg] :
+       llvm::zip(src.getRegionIterArgs(), dst.getRegionIterArgs().drop_back()))
+    map.map(oldArg, newArg);
+
+  rewriter.setInsertionPointToStart(&dstBody);
+  for (Operation &op : srcBody.without_terminator()) {
+    if (&op != candidate.ptrAdd.getOperation()) {
+      rewriter.clone(op, map);
+      continue;
+    }
+
+    Value originalOffset = map.lookupOrDefault(candidate.ptrAdd.getOffset());
+    assert(originalOffset.getType() == offsetCarry.getType() &&
+           "offset carry must preserve the original type");
+    SmallVector<Value, 2> choices{originalOffset, offsetCarry};
+    auto variants = MaterializationVariantsOp::create(
+        rewriter, candidate.ptrAdd.getLoc(), originalOffset.getType(), choices);
+    IRMapping ptrMap = map;
+    ptrMap.map(candidate.ptrAdd.getOffset(), variants.getResult());
+    Operation *cloned = rewriter.clone(op, ptrMap);
+    for (auto [source, replacement] :
+         llvm::zip_equal(op.getResults(), cloned->getResults()))
+      map.map(source, replacement);
+  }
+
+  SmallVector<Value> yielded;
+  scf::YieldOp srcYield = cast<scf::YieldOp>(srcBody.getTerminator());
+  for (Value value : srcYield.getOperands())
+    yielded.push_back(map.lookupOrDefault(value));
+  FailureOr<Value> nextOffset = createCyclicOffsetUpdate(
+      rewriter, candidate.ptrAdd.getLoc(), store, offsetCarry,
+      candidate.increment, candidate.ring);
   if (failed(nextOffset))
     return failure();
   yielded.push_back(*nextOffset);
@@ -2087,6 +2292,31 @@ static LogicalResult cloneBodyWithoutOffsetCarries(
 static void copyLoopAttrs(scf::ForOp src, scf::ForOp dst) {
   for (NamedAttribute attr : src->getAttrs())
     dst->setAttr(attr.getName(), attr.getValue());
+}
+
+static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
+                                 LoopMemoryOffsetCandidate candidate,
+                                 sym::Store &store,
+                                 MaterializationAlternatives &alternatives) {
+  rewriter.setInsertionPoint(loop);
+  Value base =
+      createOffsetExpr(rewriter, candidate.ptrAdd.getLoc(), candidate.base,
+                       candidate.ptrAdd.getOffset().getType());
+
+  SmallVector<Value> initArgs(loop.getInitArgs().begin(),
+                              loop.getInitArgs().end());
+  initArgs.push_back(base);
+  scf::ForOp newLoop =
+      scf::ForOp::create(rewriter, loop.getLoc(), loop.getLowerBound(),
+                         loop.getUpperBound(), loop.getStep(), initArgs);
+  copyLoopAttrs(loop, newLoop);
+  if (failed(cloneBodyWithMemoryOffsetVariants(rewriter, loop, newLoop,
+                                               candidate, store, alternatives)))
+    return failure();
+
+  rewriter.replaceOp(loop,
+                     newLoop.getResults().take_front(loop.getNumResults()));
+  return success();
 }
 
 static LogicalResult rewriteLoop(IRRewriter &rewriter, scf::ForOp loop,
@@ -2221,6 +2451,21 @@ rewriteOneCyclicOffset(IRRewriter &rewriter, scf::ForOp loop, sym::Store &store,
 }
 
 static FailureOr<bool>
+rewriteOneMemoryOffset(IRRewriter &rewriter, scf::ForOp loop,
+                       WaveDialect &dialect, sym::Store &store,
+                       MaterializationAlternatives &alternatives) {
+  FailureOr<std::optional<LoopMemoryOffsetCandidate>> candidate =
+      findMemoryOffsetCandidate(loop, dialect, store);
+  if (failed(candidate))
+    return failure();
+  if (!*candidate)
+    return false;
+  if (failed(rewriteLoop(rewriter, loop, **candidate, store, alternatives)))
+    return failure();
+  return true;
+}
+
+static FailureOr<bool>
 rewriteOneOffsetCarry(IRRewriter &rewriter, scf::ForOp loop,
                       MaterializationAlternatives &alternatives) {
   FailureOr<std::optional<LoopOffsetCarryCandidate>> candidate =
@@ -2238,8 +2483,20 @@ static FailureOr<bool>
 rewriteOneStrideExtraction(IRRewriter &rewriter, scf::ForOp loop,
                            WaveDialect *dialect, DataFlowSolver &solver,
                            MaterializationAlternatives &alternatives) {
+  FailureOr<bool> needsCanonicalization =
+      needsExactMemoryOffsetCanonicalization(loop, *dialect);
+  if (failed(needsCanonicalization))
+    return failure();
+  if (*needsCanonicalization)
+    moveLoopInvariantCode(cast<LoopLikeOpInterface>(loop.getOperation()));
+
   FailureOr<bool> rewritten = rewriteOneLoop(
       rewriter, loop, dialect->getSymbolStore(), solver, alternatives);
+  if (failed(rewritten) || *rewritten)
+    return rewritten;
+
+  rewritten = rewriteOneMemoryOffset(rewriter, loop, *dialect,
+                                     dialect->getSymbolStore(), alternatives);
   if (failed(rewritten) || *rewritten)
     return rewritten;
 

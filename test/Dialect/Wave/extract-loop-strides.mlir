@@ -1,5 +1,6 @@
 // RUN: wave-opt --split-input-file --wave-extract-loop-strides %s | FileCheck %s
 // RUN: wave-opt --split-input-file --wave-extract-loop-strides --wave-extract-loop-strides %s | FileCheck %s
+// RUN: wave-opt --split-input-file --wave-extract-loop-strides --wave-materialize-memory-variants %s | FileCheck %s --check-prefix=MEMORY
 
 // CHECK-LABEL: func.func @extract_iv_stride
 // CHECK: %[[WI:.*]] = wave.workitem_id 0
@@ -714,6 +715,116 @@ func.func @drop_dead_simd_offset_carries(
         : !wave.simd<i32, 32>, !wave.simd<i32, 32> -> !wave.simd<i32, 32>
     scf.yield %next0, %next1, %t
         : !wave.simd<i32, 32>, !wave.simd<i32, 32>, !wave.mem.token
+  }
+  return
+}
+
+// -----
+
+// Keep the original wrapping address tree as the first alternative. The
+// carried offset is an exact second materialization of the same address.
+// CHECK-LABEL: func.func @exact_cast_memory_offset_carry
+// CHECK-SAME: %[[BUFFER:.*]]: !wave.ptr<#waveamd.buffer, i8>
+// CHECK: %[[ITEM:.*]] = wave.assume
+// CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(256 + raw0, 4294967296)">
+// CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
+// CHECK: %[[SCALED_INDEX:.*]] = wave.index_expr <"64*(4 + i)"> ["i"](%[[I]])
+// CHECK: %[[SCALED:.*]] = wave.cast intconvert %[[SCALED_INDEX]] : index -> i32
+// CHECK: %[[SPLAT:.*]] = wave.splat %[[SCALED]]
+// CHECK: %[[SUM:.*]] = wave.binary addi %[[SPLAT]], %[[ITEM]]
+// CHECK: %[[ORIGINAL:.*]] = wave.cast intconvert %[[SUM]] policy {extension = #wave.cast_extension<zero>}
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[ORIGINAL]], %[[OFFSET]]
+// CHECK: wave.ptr_add %[[BUFFER]], %[[CHOICE]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(64 + offset, 4294967296)"> ["offset"](%[[OFFSET]])
+// CHECK: scf.yield %[[NEXT]]
+// MEMORY-LABEL: func.func @exact_cast_memory_offset_carry
+// MEMORY: %[[ORIGINAL_OFFSET:.*]] = wave.cast intconvert %{{.*}} policy {extension = #wave.cast_extension<zero>}
+// MEMORY: %[[ORIGINAL_PTR:.*]] = wave.ptr_add %{{.*}}, %[[ORIGINAL_OFFSET]]
+// MEMORY: %[[CARRIED_PTR:.*]] = wave.ptr_add %{{.*}}, %{{.*}}
+// MEMORY: %[[ORIGINAL_VALUE:.*]], %[[ORIGINAL_TOKEN:.*]] = wave.load %[[ORIGINAL_PTR]]
+// MEMORY: %[[CARRIED_VALUE:.*]], %[[CARRIED_TOKEN:.*]] = wave.load %[[CARRIED_PTR]]
+// MEMORY: %[[VALUE:.*]] = wave.materialization_variants %[[ORIGINAL_VALUE]], %[[CARRIED_VALUE]]
+// MEMORY: %[[TOKEN:.*]] = wave.materialization_variants %[[ORIGINAL_TOKEN]], %[[CARRIED_TOKEN]]
+// MEMORY: %[[ORIGINAL_STORE:.*]] = wave.store %[[VALUE]] -> %[[ORIGINAL_PTR]] after %[[TOKEN]]
+// MEMORY: %[[CARRIED_STORE:.*]] = wave.store %[[VALUE]] -> %[[CARRIED_PTR]] after %[[TOKEN]]
+// MEMORY: wave.materialization_variants %[[ORIGINAL_STORE]], %[[CARRIED_STORE]]
+func.func @exact_cast_memory_offset_carry(
+    %buffer: !wave.ptr<#waveamd.buffer, i8>, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %item_raw = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %item = wave.assume %item_raw as "item"
+      [#wave.pred<"item >= 0">, #wave.pred<"-31 + item <= 0">]
+      : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %scaled_index = wave.index_expr <"64*(4 + i)"> ["i"](%i)
+        : (i32) -> index
+    %scaled = wave.cast intconvert %scaled_index : index -> i32
+    %scaled_lanes = wave.splat %scaled : i32 -> !wave.simd<i32, 32>
+    %sum = wave.binary addi %scaled_lanes, %item
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+        -> !wave.simd<i32, 32>
+    %offset = wave.cast intconvert %sum
+        policy {extension = #wave.cast_extension<zero>}
+        : !wave.simd<i32, 32> -> !wave.simd<index, 32>
+    %p = wave.ptr_add %buffer, %offset
+        : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+    %value, %token = wave.load %p
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>)
+        -> (!wave.simd<i8, 32>, !wave.mem.token)
+    %stored = wave.store %value -> %p after %token
+        : (!wave.simd<i8, 32>, !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>,
+           !wave.mem.token) -> !wave.mem.token
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @exact_offset_with_local_base_and_assumed_iv
+// CHECK: %[[ITEM:.*]] = wave.assume
+// CHECK: %[[BASE:.*]] = wave.index_expr <"Mod(256 + {{raw[0-9]+}}, 4294967296)">
+// CHECK: scf.for %[[I:.*]] = {{.*}} iter_args(%[[OFFSET:.*]] = %[[BASE]])
+// CHECK: %[[BOUNDED:.*]] = wave.assume %[[I]]
+// CHECK: %[[BUFFER:.*]] = waveamd.make_buffer
+// CHECK: %[[SUM:.*]] = wave.binary addi
+// CHECK: %[[ORIGINAL:.*]] = wave.cast intconvert %[[SUM]] policy
+// CHECK: %[[CHOICE:.*]] = wave.materialization_variants %[[ORIGINAL]], %[[OFFSET]]
+// CHECK: wave.ptr_add %[[BUFFER]], %[[CHOICE]]
+// CHECK: %[[NEXT:.*]] = wave.index_expr <"Mod(64 + offset, 4294967296)">
+// CHECK: scf.yield %[[NEXT]]
+func.func @exact_offset_with_local_base_and_assumed_iv(
+    %base: !wave.ptr<#wave.global, i8>, %n: i32)
+    attributes {wave.kernel} {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %item_raw = wave.workitem_id 0 : !wave.simd<i32, 32>
+  %item = wave.assume %item_raw as "item"
+      [#wave.pred<"item >= 0">, #wave.pred<"-31 + item <= 0">]
+      : !wave.simd<i32, 32>
+  scf.for %i = %c0 to %n step %c1 : i32 {
+    %bounded = wave.assume %i as "i"
+        [#wave.pred<"i >= 0">, #wave.pred<"-2147483646 + i <= 0">] : i32
+    %buffer = waveamd.make_buffer %base, %bounded
+        : !wave.ptr<#wave.global, i8>, i32 -> !wave.ptr<#waveamd.buffer, i8>
+    %scaled_index = wave.index_expr <"64*(4 + i)"> ["i"](%bounded)
+        : (i32) -> index
+    %scaled = wave.cast intconvert %scaled_index : index -> i32
+    %scaled_lanes = wave.splat %scaled : i32 -> !wave.simd<i32, 32>
+    %sum = wave.binary addi %scaled_lanes, %item
+        : !wave.simd<i32, 32>, !wave.simd<i32, 32>
+        -> !wave.simd<i32, 32>
+    %offset = wave.cast intconvert %sum
+        policy {extension = #wave.cast_extension<zero>}
+        : !wave.simd<i32, 32> -> !wave.simd<index, 32>
+    %p = wave.ptr_add %buffer, %offset
+        : !wave.ptr<#waveamd.buffer, i8>, !wave.simd<index, 32>
+        -> !wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>
+    %value, %token = wave.load %p
+        : (!wave.simd<!wave.ptr<#waveamd.buffer, i8>, 32>)
+        -> (!wave.simd<i8, 32>, !wave.mem.token)
   }
   return
 }
