@@ -79,7 +79,7 @@ struct TokenOrigin {
 using TokenOriginMap = DenseMap<Value, SmallVector<TokenOrigin, 2>>;
 
 static bool dropsTokenCompletion(Operation *op) {
-  return isa<IssueTokenOp>(op);
+  return isa<IssueTokenOp, ScheduleTokenOp>(op);
 }
 
 using MemoryEffectInstance = SideEffects::EffectInstance<MemoryEffects::Effect>;

@@ -454,6 +454,7 @@ public:
   LogicalResult selectSetPriorityIncWg(waveamd::SetPriorityIncWgOp op);
   LogicalResult selectToken(TokenOp op);
   LogicalResult selectIssueToken(IssueTokenOp op);
+  LogicalResult selectScheduleToken(ScheduleTokenOp op);
   LogicalResult selectTokenJoin(Operation *op);
   LogicalResult selectWhere(WhereOp op);
   LogicalResult selectRegion(Region &region);

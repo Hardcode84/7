@@ -656,9 +656,23 @@ def Wave_IssueTokenOp : Wave_Op<"issue_token", [Pure]> {
   let assemblyFormat = "$dependencies attr-dict `:` type($dependencies) `->` qualified(type($result))";
 }
 
+def Wave_ScheduleTokenOp : Wave_Op<"schedule_token", [Pure]> {
+  let summary = "order after value producers without completion";
+  let description = [{
+    Retains SSA issue ordering from each value producer but carries no memory
+    completion events. Canonicalization moves the dependency through dead pure
+    producers to their live input frontier.
+  }];
+  let arguments = (ins Variadic<AnyType>:$dependencies);
+  let results = (outs Wave_MemToken:$result);
+  let assemblyFormat = "$dependencies attr-dict `:` type($dependencies) `->` qualified(type($result))";
+  let hasCanonicalizer = 1;
+  let hasVerifier = 1;
+}
+
 def Wave_AfterOp : Wave_Op<"after", [Pure]> {
   let summary = "derive a memory token after one or more dependencies";
-  let arguments = (ins Variadic<AnyType>:$dependencies);
+  let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
   let results = (outs Wave_MemToken:$result);
   let assemblyFormat = "$dependencies attr-dict `:` type($dependencies) `->` qualified(type($result))";
 }

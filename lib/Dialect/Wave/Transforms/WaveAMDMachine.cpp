@@ -3171,6 +3171,7 @@ LogicalResult WaveAMDMachineSelector::selectOperation(Operation *op) {
       .Case<SchedBarrierOp>([&](auto o) { return selectSchedBarrier(o); })
       .Case<TokenOp>([&](auto o) { return selectToken(o); })
       .Case<IssueTokenOp>([&](auto o) { return selectIssueToken(o); })
+      .Case<ScheduleTokenOp>([&](auto o) { return selectScheduleToken(o); })
       .Case<AfterOp, JoinOp>([&](auto o) { return selectTokenJoin(o); })
       .Case<WhereOp>([&](auto o) { return selectWhere(o); })
       .Case<StoreOp>([&](auto o) { return selectStore(*this, o); })
@@ -8050,6 +8051,16 @@ LogicalResult WaveAMDMachineSelector::selectIssueToken(IssueTokenOp op) {
   for (Value dependency : op.getDependencies())
     operands.push_back(expect(dependency, op));
   values[op.getResult()] = waveamdmachine::IssueTokenOp::create(
+      builder, op.getLoc(), getMemTokenType(op.getContext()), operands);
+  eraseIfTopLevel(op);
+  return success();
+}
+
+LogicalResult WaveAMDMachineSelector::selectScheduleToken(ScheduleTokenOp op) {
+  SmallVector<Value> operands;
+  for (Value dependency : op.getDependencies())
+    operands.push_back(expect(dependency, op));
+  values[op.getResult()] = waveamdmachine::ScheduleTokenOp::create(
       builder, op.getLoc(), getMemTokenType(op.getContext()), operands);
   eraseIfTopLevel(op);
   return success();

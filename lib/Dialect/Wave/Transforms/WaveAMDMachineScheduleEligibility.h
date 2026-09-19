@@ -37,12 +37,13 @@ static inline bool isSupportedSchedulerPseudo(Operation *op) {
       waveamdmachine::ArgOp, waveamdmachine::KernargPreloadOp,
       waveamdmachine::UninitOp, waveamdmachine::ImmOp, waveamdmachine::TokenOp,
       waveamdmachine::TokenJoinOp, waveamdmachine::IssueTokenOp,
-      waveamdmachine::AfterOp, waveamdmachine::RegAfterOp,
-      waveamdmachine::BarrierInitOp, waveamdmachine::SWorkgroupIdXOp,
-      waveamdmachine::SWorkgroupIdYOp, waveamdmachine::SWorkgroupIdZOp,
-      waveamdmachine::VWorkitemIdXOp, waveamdmachine::VWorkitemIdYOp,
-      waveamdmachine::VWorkitemIdZOp, waveamdmachine::TupleToElementsOp,
-      waveamdmachine::TupleFromElementsOp, waveamdmachine::UpdateTupleOp>(op);
+      waveamdmachine::ScheduleTokenOp, waveamdmachine::AfterOp,
+      waveamdmachine::RegAfterOp, waveamdmachine::BarrierInitOp,
+      waveamdmachine::SWorkgroupIdXOp, waveamdmachine::SWorkgroupIdYOp,
+      waveamdmachine::SWorkgroupIdZOp, waveamdmachine::VWorkitemIdXOp,
+      waveamdmachine::VWorkitemIdYOp, waveamdmachine::VWorkitemIdZOp,
+      waveamdmachine::TupleToElementsOp, waveamdmachine::TupleFromElementsOp,
+      waveamdmachine::UpdateTupleOp>(op);
 }
 
 static inline bool isSupportedSchedulerSALU(Operation *op) {

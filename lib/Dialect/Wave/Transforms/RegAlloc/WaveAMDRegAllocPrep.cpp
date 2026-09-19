@@ -19,6 +19,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -155,37 +156,35 @@ static void eraseRegAfterOps(func::FuncOp func) {
   }
 }
 
-static LogicalResult materializeScheduledAfterCompletionTokens(func::FuncOp func) {
-  WalkResult result = func.walk([&](waveamdmachine::AfterOp op) {
-    SmallVector<Value> tokens;
-    for (Value dependency : op.getDependencies()) {
-      if (isa<waveamdmachine::MemTokenType>(dependency.getType())) {
-        if (!llvm::is_contained(tokens, dependency))
-          tokens.push_back(dependency);
-        continue;
-      }
-
-      Operation *def = dependency.getDefiningOp();
-      if (!def || !waveamdmachine::getWaitcntInfo(def).isIssuer())
-        continue;
-
-      bool foundCompletionToken = false;
-      for (Value value : def->getResults()) {
-        if (!isa<waveamdmachine::MemTokenType>(value.getType()))
-          continue;
-        foundCompletionToken = true;
-        if (!llvm::is_contained(tokens, value))
-          tokens.push_back(value);
-      }
-      if (!foundCompletionToken) {
-        op.emitOpError("memory result dependency has no completion token");
-        return WalkResult::interrupt();
-      }
-    }
-    op.getDependenciesMutable().assign(tokens);
-    return WalkResult::advance();
+static void eraseScheduleTokens(func::FuncOp func) {
+  SmallVector<waveamdmachine::ScheduleTokenOp> scheduleTokens;
+  func.walk([&](waveamdmachine::ScheduleTokenOp op) {
+    scheduleTokens.push_back(op);
   });
-  return failure(result.wasInterrupted());
+
+  SmallVector<Operation *> worklist;
+  for (waveamdmachine::ScheduleTokenOp op : scheduleTokens) {
+    for (Value dependency : op.getDependencies())
+      if (Operation *producer = dependency.getDefiningOp())
+        worklist.push_back(producer);
+    OpBuilder builder(op);
+    auto token = waveamdmachine::TokenOp::create(
+        builder, op.getLoc(), op.getResult().getType());
+    op.getResult().replaceAllUsesWith(token.getResult());
+    op.erase();
+  }
+
+  DenseSet<Operation *> visited;
+  while (!worklist.empty()) {
+    Operation *op = worklist.pop_back_val();
+    if (!op || !visited.insert(op).second || op->getNumRegions() != 0 ||
+        !isOpTriviallyDead(op))
+      continue;
+    for (Value operand : op->getOperands())
+      if (Operation *producer = operand.getDefiningOp())
+        worklist.push_back(producer);
+    op->erase();
+  }
 }
 
 static bool isDeadCheapRegOp(Operation *op) {
@@ -1515,11 +1514,10 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
       return failure();
     targetLimits = std::move(*limits);
   }
-  // The scheduler has consumed value dependencies on `after`. Preserve direct
-  // memory-result completion through the issuer token, then remove the value
-  // edges so that they do not extend register lifetimes through allocation.
-  if (failed(materializeScheduledAfterCompletionTokens(func)))
-    return failure();
+  // Scheduling tokens have constrained the final machine schedule. Remove
+  // their value uses before register allocation and delete newly dead pure
+  // producer trees.
+  eraseScheduleTokens(func);
   eraseRegAfterOps(func);
   if (failed(splitLiveUpdateTupleBases(func)))
     return failure();

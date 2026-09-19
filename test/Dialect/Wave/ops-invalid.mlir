@@ -1,5 +1,22 @@
 // RUN: wave-opt --split-input-file --verify-diagnostics %s
 
+func.func @schedule_token_empty() {
+  // expected-error @+1 {{requires at least one value dependency}}
+  %ordered = "wave.schedule_token"() : () -> !wave.mem.token
+  return
+}
+
+// -----
+
+func.func @schedule_token_memory_dependency() {
+  %token = wave.token : !wave.mem.token
+  // expected-error @+1 {{does not accept memory-token dependencies}}
+  %ordered = wave.schedule_token %token : !wave.mem.token -> !wave.mem.token
+  return
+}
+
+// -----
+
 func.func @set_priority_below_range() {
   // expected-error @+1 {{attribute 'priority' failed to satisfy constraint}}
   waveamd.set_priority -1
