@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Wave/IR/Wave.h"
 #include "mlir/Dialect/Wave/IR/WaveAMD.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/DenseMap.h"
@@ -2238,6 +2239,13 @@ createGeneratedIndexExprBuilder(WaveDialect &dialect, DataFlowSolver &solver,
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
                                      WaveDialect &dialect,
                                      DataFlowSolver &solver) {
+  // Keep captured address forms distinct until candidate selection.
+  if (isCapturedMemoryVariant(op))
+    return false;
+  Value rawOffset = op.getOffset();
+  if (rawOffset.getDefiningOp<MaterializationVariantsOp>())
+    return false;
+
   SymbolicValueBuilder builder = createGeneratedIndexExprBuilder(
       dialect, solver, op, hasGlobalPointerBase(op));
   FailureOr<std::optional<SymbolicOffset>> offset =
@@ -2253,9 +2261,23 @@ static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
   if (!preservesPtrAddResult(op, indexType))
     return false;
 
+  // Non-removable accesses and region boundaries require direct simplification.
+  bool sharedOffset = !rawOffset.hasOneUse() && canCaptureMemoryVariants(op);
   rewriter.setInsertionPoint(op);
   IndexExprOp index =
       createIndexExpr(rewriter, op.getLoc(), op.getContext(), **offset);
+  if (sharedOffset) {
+    // Pointer types agree even when the offset representations differ.
+    IRMapping map;
+    map.map(rawOffset, index.getResult());
+    auto symbolic = cast<PtrAddOp>(rewriter.clone(*op, map));
+    auto raw = cast<PtrAddOp>(rewriter.clone(*op));
+    SmallVector<Value> choices{symbolic.getResult(), raw.getResult()};
+    MaterializationVariantsOp variants = MaterializationVariantsOp::create(
+        rewriter, op.getLoc(), op.getType(), choices);
+    rewriter.replaceOp(op, variants.getResult());
+    return true;
+  }
   rewriter.modifyOpInPlace(
       op, [&] { op.getOffsetMutable().assign(index.getResult()); });
   return true;
@@ -2550,6 +2572,8 @@ struct WaveGenerateIndexExprsPass
     if (mlir::failed(
             applyPatternsGreedily(getOperation(), std::move(patterns))) ||
         failed)
+      return signalPassFailure();
+    if (mlir::failed(wave::captureMemoryVariants(root)))
       return signalPassFailure();
   }
 };

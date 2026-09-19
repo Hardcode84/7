@@ -631,6 +631,24 @@ class WaveAMDMachine_DsOp<string mnemonic, list<Trait> traits = []>
 class WaveAMDMachine_DsMemoryOp<string mnemonic, list<Trait> traits = []>
     : WaveAMDMachine_DsOp<mnemonic, traits> {}
 
+class WaveAMDMachine_DsLoadMemoryOp<string mnemonic,
+                                    list<Trait> traits = []>
+    : WaveAMDMachine_DsMemoryOp<
+          mnemonic, !listconcat(traits, [WaveAMDMachine_LDSLoad,
+                                        MemoryEffects<[MemRead]>])>;
+
+class WaveAMDMachine_DsStoreMemoryOp<string mnemonic,
+                                     list<Trait> traits = []>
+    : WaveAMDMachine_DsMemoryOp<
+          mnemonic, !listconcat(traits, [WaveAMDMachine_LDSStore,
+                                        MemoryEffects<[MemWrite]>])>;
+
+class WaveAMDMachine_DsAtomicMemoryOp<string mnemonic,
+                                      list<Trait> traits = []>
+    : WaveAMDMachine_DsMemoryOp<
+          mnemonic, !listconcat(traits, [WaveAMDMachine_LDSStore,
+                                        MemoryEffects<[MemRead, MemWrite]>])>;
+
 class WaveAMDMachine_ZeroOperandResult<string mnemonic, Type resultType,
                                     list<Trait> traits = []>
     : WaveAMDMachine_Op<mnemonic, traits> {
@@ -1957,6 +1975,7 @@ def WaveAMDMachine_MaterializationVariantsTypesMatch : AllTypesMatch<["choices",
 
 def WaveAMDMachine_MaterializationVariantsOp : WaveAMDMachine_Op<"materialization_variants", [
     Pure,
+    WaveAMDMachine_NoMachineInst,
     WaveAMDMachine_MaterializationVariantsTypesMatch,
     PredOpTrait<"at least one choice", CPred<"$_op.getNumOperands() != 0">>]> {
   let summary = "independent choice between equivalent materializations";
@@ -3261,7 +3280,7 @@ def WaveAMDMachine_ScratchStoreTupleB32Op
 // LDS and an optional immediate `offset:imm` is folded into the
 // hardware instruction. Both kinds drain through `lgkmcnt`.
 def WaveAMDMachine_DsLoadU8Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_u8", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_u8">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS unsigned 8-bit load";
@@ -3280,7 +3299,7 @@ def WaveAMDMachine_DsLoadU8Op
 }
 
 def WaveAMDMachine_DsLoadI8Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_i8", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_i8">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS signed 8-bit load";
@@ -3299,7 +3318,7 @@ def WaveAMDMachine_DsLoadI8Op
 }
 
 def WaveAMDMachine_DsLoadB16Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b16", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_b16">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 16-bit load";
@@ -3315,7 +3334,7 @@ def WaveAMDMachine_DsLoadB16Op
 }
 
 def WaveAMDMachine_DsLoadB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b32", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_b32">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit load";
@@ -3331,7 +3350,7 @@ def WaveAMDMachine_DsLoadB32Op
 }
 
 def WaveAMDMachine_DsLoad2B32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load2_b32", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load2_b32">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS paired 32-bit load";
@@ -3349,7 +3368,7 @@ def WaveAMDMachine_DsLoad2B32Op
 }
 
 def WaveAMDMachine_DsLoadAddTidB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_addtid_b32", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_addtid_b32">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit addtid load";
@@ -3365,7 +3384,8 @@ def WaveAMDMachine_DsLoadAddTidB32Op
 }
 
 def WaveAMDMachine_DsLoadTupleB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_tuple_b32", [WaveAMDMachine_LDSLoad, WaveAMDMachine_TupleMemory]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_tuple_b32",
+                                    [WaveAMDMachine_TupleMemory]>,
       WaveAMDMachine_LDSTupleLoadInfo,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS load of N consecutive 32-bit values into a register tuple";
@@ -3387,7 +3407,7 @@ def WaveAMDMachine_DsLoadTupleB32Op
 }
 
 def WaveAMDMachine_DsStoreB16Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b16", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_b16", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 16-bit store";
@@ -3402,7 +3422,7 @@ def WaveAMDMachine_DsStoreB16Op
 }
 
 def WaveAMDMachine_DsStoreB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit store";
@@ -3417,7 +3437,7 @@ def WaveAMDMachine_DsStoreB32Op
 }
 
 def WaveAMDMachine_DsStore2B32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store2_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store2_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget,
                                  "0x6"> {
@@ -3438,7 +3458,7 @@ def WaveAMDMachine_DsStore2B32Op
 }
 
 def WaveAMDMachine_DsAddU32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_add_u32", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsAtomicMemoryOp<"ds_add_u32">,
       WaveAMDMachine_LDSInfo<"1"> {
   let summary = "LDS non-returning atomic add";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
@@ -3453,7 +3473,7 @@ def WaveAMDMachine_DsAddU32Op
 }
 
 def WaveAMDMachine_DsAddRtnU32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_add_rtn_u32", [WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsAtomicMemoryOp<"ds_add_rtn_u32">,
       WaveAMDMachine_LDSInfo<"1"> {
   let summary = "LDS returning atomic add";
   let arguments = (ins WaveAMDMachine_VGPR1:$addr,
@@ -3469,7 +3489,7 @@ def WaveAMDMachine_DsAddRtnU32Op
 }
 
 def WaveAMDMachine_DsStoreAddTidB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_addtid_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_addtid_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 32-bit addtid store";
@@ -3484,7 +3504,7 @@ def WaveAMDMachine_DsStoreAddTidB32Op
 }
 
 def WaveAMDMachine_DsStoreB8Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b8", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_b8", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 8-bit store";
@@ -3499,7 +3519,7 @@ def WaveAMDMachine_DsStoreB8Op
 }
 
 def WaveAMDMachine_DsLoadB64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b64", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_b64">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 64-bit load";
@@ -3515,7 +3535,7 @@ def WaveAMDMachine_DsLoadB64Op
 }
 
 def WaveAMDMachine_DsLoad2B64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load2_b64", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load2_b64">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS paired 64-bit load";
@@ -3533,8 +3553,7 @@ def WaveAMDMachine_DsLoad2B64Op
 }
 
 def WaveAMDMachine_DsReadTrB64B4Op
-    : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b4",
-                                [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_read_tr_b64_b4">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 64-bit transposed read over 4 lanes";
@@ -3551,8 +3570,7 @@ def WaveAMDMachine_DsReadTrB64B4Op
 }
 
 def WaveAMDMachine_DsReadTrB64B8Op
-    : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b8",
-                                [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_read_tr_b64_b8">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 64-bit transposed read over 8 lanes";
@@ -3569,8 +3587,7 @@ def WaveAMDMachine_DsReadTrB64B8Op
 }
 
 def WaveAMDMachine_DsReadTrB96B6Op
-    : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b96_b6",
-                                [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_read_tr_b96_b6">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 96-bit transposed read over 6 lanes";
@@ -3587,8 +3604,7 @@ def WaveAMDMachine_DsReadTrB96B6Op
 }
 
 def WaveAMDMachine_DsReadTrB64B16Op
-    : WaveAMDMachine_DsMemoryOp<"ds_read_tr_b64_b16",
-                                [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_read_tr_b64_b16">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "gfx950 LDS 64-bit transposed read over 16-bit lanes";
@@ -3605,7 +3621,7 @@ def WaveAMDMachine_DsReadTrB64B16Op
 }
 
 def WaveAMDMachine_DsLoadB96Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b96", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_b96">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 96-bit load";
@@ -3621,7 +3637,7 @@ def WaveAMDMachine_DsLoadB96Op
 }
 
 def WaveAMDMachine_DsLoadB128Op
-    : WaveAMDMachine_DsMemoryOp<"ds_load_b128", [WaveAMDMachine_LDSLoad]>,
+    : WaveAMDMachine_DsLoadMemoryOp<"ds_load_b128">,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0", "0x1", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 128-bit load";
@@ -3637,7 +3653,7 @@ def WaveAMDMachine_DsLoadB128Op
 }
 
 def WaveAMDMachine_DsStoreB64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b64", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_b64", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 64-bit store";
@@ -3652,7 +3668,7 @@ def WaveAMDMachine_DsStoreB64Op
 }
 
 def WaveAMDMachine_DsStore2B64Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store2_b64", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store2_b64", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x6", "0", WaveAMDMachine_DsAGPRTarget,
                                  "0x6"> {
@@ -3673,7 +3689,7 @@ def WaveAMDMachine_DsStore2B64Op
 }
 
 def WaveAMDMachine_DsStoreB96Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b96", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_b96", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 96-bit store";
@@ -3688,7 +3704,7 @@ def WaveAMDMachine_DsStoreB96Op
 }
 
 def WaveAMDMachine_DsStoreB128Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_b128", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_b128", [NativeOpTrait<"wave::DiscardableMemoryOp">]>,
       WaveAMDMachine_LDSInfo<"1">,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS 128-bit store";
@@ -3703,7 +3719,7 @@ def WaveAMDMachine_DsStoreB128Op
 }
 
 def WaveAMDMachine_DsStoreTupleB32Op
-    : WaveAMDMachine_DsMemoryOp<"ds_store_tuple_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_LDSStore, WaveAMDMachine_TupleMemory]>,
+    : WaveAMDMachine_DsStoreMemoryOp<"ds_store_tuple_b32", [NativeOpTrait<"wave::DiscardableMemoryOp">, WaveAMDMachine_TupleMemory]>,
       WaveAMDMachine_LDSTupleStoreInfo,
       WaveAMDMachine_AGPRBanking<"0x2", "0", WaveAMDMachine_DsAGPRTarget> {
   let summary = "LDS store of a register tuple as N consecutive 32-bit values";

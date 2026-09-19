@@ -763,7 +763,7 @@ def WaveAMDExpandMaterializationVariants
     Clone candidates with private block arguments, resolve choices,
     and remove dead operations. This pass does not select or score candidates.
   }];
-  let options = [Option<"maxCandidates", "max-candidates", "unsigned", "16",
+  let options = [Option<"maxCandidates", "max-candidates", "unsigned", "64",
                        "Maximum assignments per search scope">];
   let dependentDialects = ["waveamdmachine::WaveAMDMachineDialect"];
 }

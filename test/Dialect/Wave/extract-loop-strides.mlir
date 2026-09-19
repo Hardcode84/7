@@ -742,12 +742,12 @@ func.func @drop_dead_simd_offset_carries(
 // MEMORY: %[[ORIGINAL_PTR:.*]] = wave.ptr_add %{{.*}}, %[[ORIGINAL_OFFSET]]
 // MEMORY: %[[CARRIED_PTR:.*]] = wave.ptr_add %{{.*}}, %{{.*}}
 // MEMORY: %[[ORIGINAL_VALUE:.*]], %[[ORIGINAL_TOKEN:.*]] = wave.load %[[ORIGINAL_PTR]]
-// MEMORY: %[[CARRIED_VALUE:.*]], %[[CARRIED_TOKEN:.*]] = wave.load %[[CARRIED_PTR]]
-// MEMORY: %[[VALUE:.*]] = wave.materialization_variants %[[ORIGINAL_VALUE]], %[[CARRIED_VALUE]]
-// MEMORY: %[[TOKEN:.*]] = wave.materialization_variants %[[ORIGINAL_TOKEN]], %[[CARRIED_TOKEN]]
-// MEMORY: %[[ORIGINAL_STORE:.*]] = wave.store %[[VALUE]] -> %[[ORIGINAL_PTR]] after %[[TOKEN]]
-// MEMORY: %[[CARRIED_STORE:.*]] = wave.store %[[VALUE]] -> %[[CARRIED_PTR]] after %[[TOKEN]]
-// MEMORY: wave.materialization_variants %[[ORIGINAL_STORE]], %[[CARRIED_STORE]]
+// MEMORY-NEXT: %[[CARRIED_VALUE:.*]], %[[CARRIED_TOKEN:.*]] = wave.load %[[CARRIED_PTR]]
+// MEMORY-NEXT: %[[VALUE:.*]] = wave.materialization_variants %[[ORIGINAL_VALUE]], %[[CARRIED_VALUE]]
+// MEMORY-NEXT: %[[TOKEN:.*]] = wave.materialization_variants %[[ORIGINAL_TOKEN]], %[[CARRIED_TOKEN]]
+// MEMORY-NEXT: %[[ORIGINAL_STORE:.*]] = wave.store %[[VALUE]] -> %[[ORIGINAL_PTR]] after %[[TOKEN]]
+// MEMORY-NEXT: %[[CARRIED_STORE:.*]] = wave.store %[[VALUE]] -> %[[CARRIED_PTR]] after %[[TOKEN]]
+// MEMORY-NEXT: wave.materialization_variants %[[ORIGINAL_STORE]], %[[CARRIED_STORE]]
 func.func @exact_cast_memory_offset_carry(
     %buffer: !wave.ptr<#waveamd.buffer, i8>, %n: i32)
     attributes {wave.kernel} {
@@ -1239,7 +1239,8 @@ func.func @sibling_assume_does_not_bound_remainder(
 // CHECK: wave.materialization_variants
 // CHECK: return
 // MEMORY-LABEL: func.func @clone_nested_cyclic_alternative
-// MEMORY: wave.materialization_variants {{.*}} : !wave.mem.token
+// MEMORY: wave.load
+// MEMORY: wave.materialization_variants
 func.func @clone_nested_cyclic_alternative(
     %a: !wave.ptr<#wave.global, i8>, %lower: i32, %upper: i32,
     %step: i32) -> !wave.mem.token attributes {wave.kernel} {

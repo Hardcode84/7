@@ -9,9 +9,12 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ROUNDTRIP: %[[ADDR:.*]] = waveamdmachine.v_mbcnt_lo
 // ROUNDTRIP: %[[STORE:.*]] = waveamdmachine.ds_store_b8 %[[ADDR]], %[[ADDR]] offset 7
 // ROUNDTRIP: %[[B4:.*]], %[[B4TOK:.*]] = waveamdmachine.ds_read_tr_b64_b4 %[[ADDR]] after %[[STORE]] offset 16
-// ROUNDTRIP: %[[B8:.*]], %[[B8TOK:.*]] = waveamdmachine.ds_read_tr_b64_b8 %[[ADDR]] after %[[B4TOK]] offset 32
-// ROUNDTRIP: %[[B6:.*]], %[[B6TOK:.*]] = waveamdmachine.ds_read_tr_b96_b6 %[[ADDR]] after %[[B8TOK]] offset 48
-// ROUNDTRIP: %[[B16:.*]], %[[B16TOK:.*]] = waveamdmachine.ds_read_tr_b64_b16 %[[ADDR]] after %[[B6TOK]] offset 65535
+// ROUNDTRIP: %[[B4STORE:.*]] = waveamdmachine.global_store_b64 {{.*}}, %[[B4]], {{.*}} after %[[B4TOK]]
+// ROUNDTRIP: %[[B8:.*]], %[[B8TOK:.*]] = waveamdmachine.ds_read_tr_b64_b8 %[[ADDR]] after %[[B4STORE]] offset 32
+// ROUNDTRIP: %[[B8STORE:.*]] = waveamdmachine.global_store_b64 {{.*}}, %[[B8]], {{.*}} after %[[B8TOK]]
+// ROUNDTRIP: %[[B6:.*]], %[[B6TOK:.*]] = waveamdmachine.ds_read_tr_b96_b6 %[[ADDR]] after %[[B8STORE]] offset 48
+// ROUNDTRIP: %[[B6STORE:.*]] = waveamdmachine.global_store_b96 {{.*}}, %[[B6]], {{.*}} after %[[B6TOK]]
+// ROUNDTRIP: %[[B16:.*]], %[[B16TOK:.*]] = waveamdmachine.ds_read_tr_b64_b16 %[[ADDR]] after %[[B6STORE]] offset 65535
 
 // ASM-LABEL: gfx950_ds_memory_ops:
 // ASM: ds_write_b8 {{v[0-9]+}}, {{v[0-9]+}} offset:7
@@ -20,7 +23,10 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: ds_read_b96_tr_b6 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:48
 // ASM: ds_read_b64_tr_b16 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:65535
 // ASM: s_endpgm
-func.func @gfx950_ds_memory_ops() attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
+func.func @gfx950_ds_memory_ops(
+    %out: !waveamdmachine.reg<vgpr, 1, 0>,
+    %base: !waveamdmachine.reg<sgpr, 2, 6>)
+    attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %addr = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
   %store = waveamdmachine.ds_store_b8 %addr, %addr offset 7
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
@@ -28,16 +34,32 @@ func.func @gfx950_ds_memory_ops() attributes {wave.kernel, waveamdmachine.lds_si
   %b4, %b4_tok = waveamdmachine.ds_read_tr_b64_b4 %addr after %store offset 16
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
-  %b8, %b8_tok = waveamdmachine.ds_read_tr_b64_b8 %addr after %b4_tok offset 32
+  %b4_store = waveamdmachine.global_store_b64 %out, %b4, %base after %b4_tok
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %b8, %b8_tok = waveamdmachine.ds_read_tr_b64_b8 %addr after %b4_store offset 32
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
-  %b6, %b6_tok = waveamdmachine.ds_read_tr_b96_b6 %addr after %b8_tok offset 48
+  %b8_store = waveamdmachine.global_store_b64 %out, %b8, %base after %b8_tok
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %b6, %b6_tok = waveamdmachine.ds_read_tr_b96_b6 %addr after %b8_store offset 48
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 3>, !waveamdmachine.mem.token)
-  %b16, %b16_tok = waveamdmachine.ds_read_tr_b64_b16 %addr after %b6_tok offset 65535
+  %b6_store = waveamdmachine.global_store_b96 %out, %b6, %base after %b6_tok
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 3>,
+         !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  %b16, %b16_tok = waveamdmachine.ds_read_tr_b64_b16 %addr after %b6_store offset 65535
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 2>, !waveamdmachine.mem.token)
-  waveamdmachine.s_endpgm
+  %b16_store = waveamdmachine.global_store_b64 %out, %b16, %base after %b16_tok
+      : (!waveamdmachine.reg<vgpr, 1, 0>, !waveamdmachine.reg<vgpr, 2>,
+         !waveamdmachine.reg<sgpr, 2, 6>, !waveamdmachine.mem.token)
+        -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %b16_store : !waveamdmachine.mem.token
   return
 }
 

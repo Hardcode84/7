@@ -5,9 +5,10 @@
 // ASM-LABEL: redistribute_with_live_unresolved_lds:
 // ASM: ds_write_b16
 // ASM: ds_write_b128
-// ASM-COUNT-15: s_barrier
 // ASM: ds_read_b128
+// ASM-COUNT-13: s_barrier
 // ASM: ds_read_u16
+// ASM: s_barrier
 // ASM: .amdhsa_group_segment_fixed_size 154528
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {

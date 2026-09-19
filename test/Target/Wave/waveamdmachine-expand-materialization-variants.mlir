@@ -180,6 +180,139 @@ func.func @couple_effect_results_through_pure_ops(
       : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
 }
 
+// CHECK-LABEL: func.func @couple_lds_effect_results
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK-NOT: waveamdmachine.ds_load_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK-NOT: waveamdmachine.ds_load_b32
+// CHECK: waveamdmachine.candidate_yield
+// CHECK-NOT: waveamdmachine.candidate_yield
+// CHECK: return
+func.func @couple_lds_effect_results(
+    %addr0: !waveamdmachine.reg<vgpr, 1>,
+    %addr1: !waveamdmachine.reg<vgpr, 1>,
+    %dep: !waveamdmachine.mem.token)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token) {
+  %value0, %token0 = waveamdmachine.ds_load_b32 %addr0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %value1, %token1 = waveamdmachine.ds_load_b32 %addr1 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+  %value = waveamdmachine.materialization_variants %value0, %value1
+      : !waveamdmachine.reg<vgpr, 1>
+  %token = waveamdmachine.materialization_variants %token0, %token1
+      : !waveamdmachine.mem.token
+  return %value, %token
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token
+}
+
+// CHECK-LABEL: func.func @discard_unselected_lds_dma
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK: waveamdmachine.buffer_load_lds_b128
+// CHECK-NOT: waveamdmachine.buffer_load_lds_b128
+// CHECK: waveamdmachine.candidate_yield
+// CHECK: waveamdmachine.buffer_load_lds_b128
+// CHECK-NOT: waveamdmachine.buffer_load_lds_b128
+// CHECK: waveamdmachine.candidate_yield
+// CHECK-NOT: waveamdmachine.candidate_yield
+// CHECK: return
+func.func @discard_unselected_lds_dma(
+    %off0: !waveamdmachine.reg<vgpr, 1>,
+    %off1: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff: !waveamdmachine.reg<sgpr, 1>, %m0: !waveamdmachine.m0,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %token0 = waveamdmachine.buffer_load_lds_b128
+      %off0, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %token1 = waveamdmachine.buffer_load_lds_b128
+      %off1, %desc, %soff, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %token = waveamdmachine.materialization_variants %token0, %token1
+      : !waveamdmachine.mem.token
+  return %token : !waveamdmachine.mem.token
+}
+
+// CHECK-LABEL: func.func @discard_unselected_m0_setup
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+// CHECK-NEXT: waveamdmachine.candidate_yield
+// CHECK: waveamdmachine.s_mov_m0
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+// CHECK-NEXT: waveamdmachine.candidate_yield
+// CHECK-NOT: waveamdmachine.candidate_yield
+// CHECK: return
+func.func @discard_unselected_m0_setup(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %soff0: !waveamdmachine.reg<sgpr, 1>,
+    %soff1: !waveamdmachine.reg<sgpr, 1>,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %m0 = waveamdmachine.s_mov_m0 %soff0
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %token0 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff0, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %m1 = waveamdmachine.s_mov_m0 %soff1
+      : (!waveamdmachine.reg<sgpr, 1>) -> !waveamdmachine.m0
+  %token1 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff1, %m1 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %token = waveamdmachine.materialization_variants %token0, %token1
+      : !waveamdmachine.mem.token
+  return %token : !waveamdmachine.mem.token
+}
+
+// CHECK-LABEL: func.func @discard_unselected_pure_setup
+// CHECK: waveamdmachine.materialization_candidates
+// CHECK: waveamdmachine.s_add_i32
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+// CHECK-NEXT: waveamdmachine.candidate_yield
+// CHECK: waveamdmachine.s_add_i32
+// CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+// CHECK-NEXT: waveamdmachine.candidate_yield
+// CHECK-NOT: waveamdmachine.candidate_yield
+// CHECK: return
+func.func @discard_unselected_pure_setup(
+    %off: !waveamdmachine.reg<vgpr, 1>,
+    %desc: !waveamdmachine.reg<sgpr, 4>,
+    %base: !waveamdmachine.reg<sgpr, 1>,
+    %step0: !waveamdmachine.imm, %step1: !waveamdmachine.imm,
+    %m0: !waveamdmachine.m0,
+    %dep: !waveamdmachine.mem.token) -> !waveamdmachine.mem.token {
+  %soff0, %scc0 = waveamdmachine.s_add_i32 %base, %step0
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %token0 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff0, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %soff1, %scc1 = waveamdmachine.s_add_i32 %base, %step1
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm)
+        -> (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.reg<scc, 1>)
+  %token1 = waveamdmachine.buffer_load_lds_b128
+      %off, %desc, %soff1, %m0 after %dep
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<sgpr, 4>,
+         !waveamdmachine.reg<sgpr, 1>, !waveamdmachine.m0,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  %token = waveamdmachine.materialization_variants %token0, %token1
+      : !waveamdmachine.mem.token
+  return %token : !waveamdmachine.mem.token
+}
+
 // CHECK-LABEL: func.func @preserve_prerequisite_effects
 // CHECK: [[PRIOR:%.*]] = waveamdmachine.buffer_store_b32
 // CHECK: waveamdmachine.materialization_candidates {{.*}}, [[PRIOR]],

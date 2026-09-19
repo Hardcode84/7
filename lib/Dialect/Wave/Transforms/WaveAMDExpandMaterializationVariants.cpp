@@ -9,11 +9,9 @@
 
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
-#include "mlir/Dialect/Utils/MaterializationVariants.h"
 #include "mlir/Dialect/WaveAMDMachine/IR/WaveAMDMachine.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/Threading.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/PassManager.h"
@@ -43,11 +41,17 @@ struct CandidateScope {
   SmallVector<unsigned> choiceDimensions;
   SmallVector<unsigned> dimensionArities;
   SmallVector<EffectAlternatives> dimensionEffectProducers;
+  SmallVector<EffectAlternatives> dimensionSetupProducers;
   SmallVector<SmallVector<unsigned>> assignments;
   SmallVector<Value> inputs;
   SmallVector<Value> outputs;
 };
 } // namespace
+
+static bool isCandidateSetupOp(Operation *op) {
+  return isSpeculatable(op) || isMemoryEffectFree(op) ||
+         isa<M0WriteHazardOpInterface>(op);
+}
 
 static void appendPredecessors(RegionBranchOpInterface branch,
                                RegionSuccessor successor, Value value,
@@ -85,7 +89,7 @@ static EffectAlternative collectEffectProducers(Value root) {
       appendPredecessors(branch, RegionSuccessor(def), value, pending);
       continue;
     }
-    if (!isMemoryEffectFree(def)) {
+    if (!isCandidateSetupOp(def)) {
       // Token predecessors are required history, not alternative-owned effects.
       effects.insert(def);
       continue;
@@ -109,6 +113,64 @@ collectAlternativeEffects(MaterializationVariantsOp choice) {
       return occurrences.lookup(effect) == alternatives.size();
     });
   return alternatives;
+}
+
+static void collectSetupProducer(Value value,
+                                 const llvm::DenseSet<Operation *> &effects,
+                                 SmallVectorImpl<Value> &pending,
+                                 llvm::SetVector<Operation *> &setup) {
+  if (auto arg = dyn_cast<BlockArgument>(value)) {
+    appendArgumentPredecessors(arg, pending);
+    return;
+  }
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return;
+  bool alternativeEffect = effects.contains(def);
+  if (auto branch = dyn_cast<RegionBranchOpInterface>(def)) {
+    if (isCandidateSetupOp(def) || alternativeEffect)
+      setup.insert(def);
+    appendPredecessors(branch, RegionSuccessor(def), value, pending);
+    return;
+  }
+  if (def->hasTrait<OpTrait::ConstantLike>() ||
+      (!isCandidateSetupOp(def) && !alternativeEffect))
+    return;
+  setup.insert(def);
+  llvm::append_range(pending, def->getOperands());
+}
+
+static EffectAlternative
+collectSetupProducers(Value root, ArrayRef<Operation *> alternativeEffects) {
+  llvm::DenseSet<Operation *> effects(alternativeEffects.begin(),
+                                      alternativeEffects.end());
+  SmallVector<Value> pending{root};
+  llvm::DenseSet<Value> visited;
+  llvm::SetVector<Operation *> setup;
+  while (!pending.empty()) {
+    Value value = pending.pop_back_val();
+    if (visited.insert(value).second)
+      collectSetupProducer(value, effects, pending, setup);
+  }
+  return setup.takeVector();
+}
+
+static EffectAlternatives
+collectAlternativeSetup(MaterializationVariantsOp choice,
+                        const EffectAlternatives &effects) {
+  EffectAlternatives alternatives;
+  for (auto [value, alternativeEffects] :
+       llvm::zip_equal(choice.getChoices(), effects))
+    alternatives.push_back(collectSetupProducers(value, alternativeEffects));
+  return alternatives;
+}
+
+static void mergeAlternativeSetup(EffectAlternatives &target,
+                                  const EffectAlternatives &source) {
+  for (auto [targetOps, sourceOps] : llvm::zip_equal(target, source))
+    for (Operation *op : sourceOps)
+      if (!llvm::is_contained(targetOps, op))
+        targetOps.push_back(op);
 }
 
 static bool hasAlternativeEffects(const EffectAlternatives &effects) {
@@ -248,17 +310,20 @@ static LogicalResult checkScope(unsigned limit, CandidateScope &scope,
   for (MaterializationVariantsOp choice : scope.choices) {
     unsigned arity = choice.getChoices().size();
     const EffectAlternatives &effects = choiceEffects.lookup(choice);
+    EffectAlternatives setup = collectAlternativeSetup(choice, effects);
     std::optional<unsigned> coupled = findCoupledDimension(scope, effects);
     unsigned dimension = 0;
     if (!coupled) {
       dimension = scope.dimensionArities.size();
       scope.dimensionArities.push_back(arity);
       scope.dimensionEffectProducers.push_back(effects);
+      scope.dimensionSetupProducers.push_back(std::move(setup));
     } else {
       dimension = *coupled;
       if (scope.dimensionArities[dimension] != arity)
         return choice.emitOpError("coupled access results must have equal "
                                   "alternative counts");
+      mergeAlternativeSetup(scope.dimensionSetupProducers[dimension], setup);
     }
     scope.choiceDimensions.push_back(dimension);
   }
@@ -274,47 +339,14 @@ static Operation *scopeRoot(Operation *op) {
   return op;
 }
 
-static void collectChoiceRoots(ArrayRef<MaterializationVariantsOp> choices,
-                               const ChoiceEffects &choiceEffects,
-                               SmallVectorImpl<Value> &pending,
-                               llvm::DenseSet<Operation *> &effectProducers) {
-  for (MaterializationVariantsOp choice : choices) {
-    llvm::append_range(pending, choice.getChoices());
-    for (const EffectAlternative &alternative : choiceEffects.lookup(choice))
-      effectProducers.insert(alternative.begin(), alternative.end());
-  }
-}
-
 static llvm::DenseSet<Operation *>
 collectChoiceSetup(ArrayRef<MaterializationVariantsOp> choices,
                    const ChoiceEffects &choiceEffects) {
-  SmallVector<Value> pending;
-  llvm::DenseSet<Operation *> effectProducers;
-  collectChoiceRoots(choices, choiceEffects, pending, effectProducers);
-  llvm::DenseSet<Value> visited;
   llvm::DenseSet<Operation *> setup;
-  while (!pending.empty()) {
-    Value value = pending.pop_back_val();
-    if (!visited.insert(value).second)
-      continue;
-    if (auto arg = dyn_cast<BlockArgument>(value)) {
-      appendArgumentPredecessors(arg, pending);
-      continue;
-    }
-    Operation *def = value.getDefiningOp();
-    bool alternativeEffect = effectProducers.contains(def);
-    if (auto branch = dyn_cast<RegionBranchOpInterface>(def)) {
-      if (isMemoryEffectFree(def) || alternativeEffect)
-        setup.insert(def);
-      appendPredecessors(branch, RegionSuccessor(def), value, pending);
-      continue;
-    }
-    if (def->hasTrait<OpTrait::ConstantLike>() ||
-        (!isMemoryEffectFree(def) && !alternativeEffect))
-      continue;
-    setup.insert(def);
-    llvm::append_range(pending, def->getOperands());
-  }
+  for (MaterializationVariantsOp choice : choices)
+    for (const EffectAlternative &alternative :
+         collectAlternativeSetup(choice, choiceEffects.lookup(choice)))
+      setup.insert(alternative.begin(), alternative.end());
   return setup;
 }
 
@@ -444,6 +476,88 @@ static LogicalResult checkBlockExits(Block &block) {
   return success();
 }
 
+struct CandidateOperationSets {
+  llvm::DenseSet<Operation *> selected;
+  llvm::DenseSet<Operation *> rejected;
+  llvm::DenseSet<Operation *> selectedSetup;
+  llvm::DenseSet<Operation *> rejectedSetup;
+};
+
+static CandidateOperationSets
+collectCandidateOperationSets(const CandidateScope &scope,
+                              ArrayRef<unsigned> dimensionSelections) {
+  CandidateOperationSets sets;
+  for (auto [dimension, alternatives] :
+       llvm::enumerate(scope.dimensionEffectProducers)) {
+    unsigned selection = dimensionSelections[dimension];
+    sets.selected.insert(alternatives[selection].begin(),
+                         alternatives[selection].end());
+    for (auto [alternative, effects] : llvm::enumerate(alternatives))
+      if (alternative != selection)
+        sets.rejected.insert(effects.begin(), effects.end());
+    const EffectAlternatives &setup = scope.dimensionSetupProducers[dimension];
+    sets.selectedSetup.insert(setup[selection].begin(), setup[selection].end());
+    for (auto [alternative, ops] : llvm::enumerate(setup))
+      if (alternative != selection)
+        sets.rejectedSetup.insert(ops.begin(), ops.end());
+  }
+  return sets;
+}
+
+static constexpr StringLiteral rejectedEffectAttr =
+    "wave.materialization_rejected_effect";
+static constexpr StringLiteral rejectedSetupAttr =
+    "wave.materialization_rejected_setup";
+
+static void markRejectedOperations(const CandidateOperationSets &sets,
+                                   IRMapping &mapping, MLIRContext *context) {
+  for (Operation *source : sets.rejected) {
+    if (sets.selected.contains(source))
+      continue;
+    if (Operation *clone = mapping.lookupOrNull(source))
+      clone->setAttr(rejectedEffectAttr, UnitAttr::get(context));
+  }
+  for (Operation *source : sets.rejectedSetup) {
+    if (sets.selectedSetup.contains(source) || sets.rejected.contains(source))
+      continue;
+    if (Operation *clone = mapping.lookupOrNull(source))
+      clone->setAttr(rejectedSetupAttr, UnitAttr::get(context));
+  }
+}
+
+static void eraseMarkedOperations(Region &region) {
+  IRRewriter rewriter(region.getContext());
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    region.walk<WalkOrder::PostOrder>([&](Operation *op) {
+      if ((!op->hasAttr(rejectedEffectAttr) &&
+           !op->hasAttr(rejectedSetupAttr)) ||
+          !op->use_empty())
+        return;
+      rewriter.eraseOp(op);
+      changed = true;
+    });
+  }
+  bool rejectedEffectRemains = false;
+  region.walk([&](Operation *op) {
+    rejectedEffectRemains |= op->hasAttr(rejectedEffectAttr);
+    op->removeAttr(rejectedSetupAttr);
+  });
+  assert(!rejectedEffectRemains &&
+         "rejected materialization effect still has a consumer");
+  eliminateTriviallyDeadOps(rewriter, region);
+}
+
+static void eraseRejectedEffects(const CandidateScope &scope,
+                                 ArrayRef<unsigned> dimensionSelections,
+                                 IRMapping &mapping, Region &region) {
+  CandidateOperationSets sets =
+      collectCandidateOperationSets(scope, dimensionSelections);
+  markRejectedOperations(sets, mapping, region.getContext());
+  eraseMarkedOperations(region);
+}
+
 static void populateCandidate(const CandidateScope &scope,
                               ArrayRef<unsigned> dimensionSelections,
                               Region &region) {
@@ -468,8 +582,7 @@ static void populateCandidate(const CandidateScope &scope,
     outputs.push_back(mapping.lookup(value));
   CandidateYieldOp::create(builder, scope.operations.back()->getLoc(), outputs,
                            IntegerAttr{});
-  IRRewriter rewriter(builder.getContext());
-  eliminateTriviallyDeadOps(rewriter, region);
+  eraseRejectedEffects(scope, dimensionSelections, mapping, region);
 }
 
 static void expandScope(CandidateScope &scope) {
@@ -488,12 +601,9 @@ static void expandScope(CandidateScope &scope) {
     for (Value input : scope.inputs)
       block->addArgument(input.getType(), input.getLoc());
   }
-  // Shared input use lists stay fixed while workers clone private regions.
-  parallelFor(first->getContext(), 0, scope.assignments.size(),
-              [&](size_t ordinal) {
-                populateCandidate(scope, scope.assignments[ordinal],
-                                  wrapper.getCandidates()[ordinal]);
-              });
+  for (size_t ordinal : llvm::seq(scope.assignments.size()))
+    populateCandidate(scope, scope.assignments[ordinal],
+                      wrapper.getCandidates()[ordinal]);
   for (auto [source, result] :
        llvm::zip_equal(scope.outputs, wrapper.getResults()))
     source.replaceAllUsesWith(result);

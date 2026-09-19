@@ -4,8 +4,9 @@
 
 // ASM-LABEL: glu_epilogue_redistribute_lds_overflow:
 // ASM: ds_write_b128
-// ASM-COUNT-7: s_barrier
+// ASM: s_barrier
 // ASM: ds_read_b128
+// ASM-COUNT-6: s_barrier
 // ASM: .amdhsa_group_segment_fixed_size 141504
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {

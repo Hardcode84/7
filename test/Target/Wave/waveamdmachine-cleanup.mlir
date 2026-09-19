@@ -411,12 +411,13 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK-NEXT: [[ADDR:%.*]] = waveamdmachine.v_lshlrev_b32 [[SHIFT]], [[X]]
 // CHECK-NEXT: waveamdmachine.exec_if [[COND]] {
 // CHECK-NOT: waveamdmachine.v_lshlrev_b32
-// CHECK: waveamdmachine.ds_load_b32 [[ADDR]]
-// CHECK: waveamdmachine.ds_load_b32 [[ADDR]]
+// CHECK: [[LOAD:%.*]] = waveamdmachine.ds_load_b32 [[ADDR]]
+// CHECK: waveamdmachine.yield [[LOAD]], [[LOAD]]
 // CHECK: } : !waveamdmachine.reg<sgpr, 1>
 func.func @hoist_exec_if_local_addr(%cond: !waveamdmachine.reg<sgpr, 1>,
-                                    %x: !waveamdmachine.reg<vgpr, 1>) {
-  waveamdmachine.exec_if %cond {
+                                    %x: !waveamdmachine.reg<vgpr, 1>)
+    -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) {
+  %loads:2 = waveamdmachine.exec_if %cond {
     %shift = waveamdmachine.imm 12 : !waveamdmachine.imm
     %addr0 = waveamdmachine.v_lshlrev_b32 %shift, %x
         : (!waveamdmachine.imm, !waveamdmachine.reg<vgpr, 1>)
@@ -428,9 +429,12 @@ func.func @hoist_exec_if_local_addr(%cond: !waveamdmachine.reg<sgpr, 1>,
         : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
     %load1 = waveamdmachine.ds_load_b32 %addr1
         : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
-    waveamdmachine.yield
+    waveamdmachine.yield %load0, %load1
+        : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
   } : !waveamdmachine.reg<sgpr, 1>
-  return
+      -> !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
+  return %loads#0, %loads#1
+      : !waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>
 }
 
 }
@@ -1170,7 +1174,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // CHECK: [[SUM:%.*]] = waveamdmachine.v_add_u32 [[VALUE]], [[X]]
 // CHECK-NEXT: waveamdmachine.ds_load_b32 [[SUM]]
 func.func @keep_yielded_value(%cond: !waveamdmachine.reg<sgpr, 1>,
-                              %x: !waveamdmachine.reg<vgpr, 1>) {
+                              %x: !waveamdmachine.reg<vgpr, 1>)
+    -> !waveamdmachine.reg<vgpr, 1> {
   %shift = waveamdmachine.imm 12 : !waveamdmachine.imm
   %value = waveamdmachine.exec_if %cond {
     %addr = waveamdmachine.v_lshlrev_b32 %shift, %x
@@ -1183,7 +1188,7 @@ func.func @keep_yielded_value(%cond: !waveamdmachine.reg<sgpr, 1>,
       -> !waveamdmachine.reg<vgpr, 1>
   %load = waveamdmachine.ds_load_b32 %sum
       : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 1>
-  return
+  return %load : !waveamdmachine.reg<vgpr, 1>
 }
 
 }

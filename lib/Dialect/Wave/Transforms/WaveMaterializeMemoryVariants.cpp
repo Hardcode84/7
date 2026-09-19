@@ -14,6 +14,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SetVector.h"
+#include <array>
 
 namespace mlir::wave {
 #define GEN_PASS_DEF_WAVEMATERIALIZEMEMORYVARIANTS
@@ -32,7 +33,11 @@ static Operation *cloneWithMappedOperands(IRRewriter &rewriter, Operation *op,
   SmallVector<Type> resultTypes(op->getResultTypes());
   Operation::CloneOptions options = Operation::CloneOptions::all();
   options.withResultTypes(std::move(resultTypes));
-  return rewriter.insert(op->clone(map, options));
+  Operation *clone = rewriter.insert(op->clone(map, options));
+  for (auto [result, clonedResult] :
+       llvm::zip_equal(op->getResults(), clone->getResults()))
+    map.map(result, clonedResult);
+  return clone;
 }
 
 static void mapAlternativeOperands(IRMapping &map, Operation *op,
@@ -118,6 +123,20 @@ collectDependentUsers(llvm::SetVector<Value> &dependentValues) {
   return reachable;
 }
 
+static bool reachesEffectfulUser(Value root) {
+  llvm::SetVector<Value> pending;
+  pending.insert(root);
+  for (size_t index = 0; index < pending.size(); ++index) {
+    for (Operation *user : pending[index].getUsers()) {
+      if (!isMemoryEffectFree(user))
+        return true;
+      for (Value result : user->getResults())
+        pending.insert(result);
+    }
+  }
+  return false;
+}
+
 static SmallVector<Operation *>
 collectReadyUsers(const llvm::SetVector<Operation *> &pending,
                   const llvm::SetVector<Value> &dependentValues,
@@ -164,65 +183,116 @@ static LogicalResult duplicateDependentUsers(
   return success();
 }
 
-static LogicalResult materializePointerChoices(
-    IRRewriter &rewriter, MaterializationVariantsOp sourceChoice,
-    ArrayRef<PtrAddOp> pointers, llvm::SetVector<Operation *> &cleanupRoots) {
-  ConcreteAlternatives concrete;
-  llvm::SetVector<Value> dependentValues;
-  cleanupRoots.insert(sourceChoice);
-  for (PtrAddOp ptrAdd : pointers) {
-    cleanupRoots.insert(ptrAdd);
-    SmallVector<Value> concretePointers;
-    rewriter.setInsertionPoint(ptrAdd);
-    for (Value concreteOffset : sourceChoice.getChoices()) {
-      IRMapping map;
-      map.map(sourceChoice.getResult(), concreteOffset);
-      concretePointers.push_back(
-          cloneWithMappedOperands(rewriter, ptrAdd, map)->getResult(0));
-    }
-    concrete[ptrAdd.getResult()] = std::move(concretePointers);
-    dependentValues.insert(ptrAdd.getResult());
-  }
+static bool isPointerChoice(MaterializationVariantsOp choice) {
+  Type type = choice.getType();
+  if (auto simd = dyn_cast<SimdType>(type))
+    type = simd.getElementType();
+  return isa<PtrType>(type);
+}
 
-  if (failed(duplicateDependentUsers(rewriter, sourceChoice, concrete,
-                                     dependentValues, cleanupRoots)))
-    return failure();
-  return success();
+static bool isOffsetUser(Operation *user, MaterializationVariantsOp choice) {
+  auto pointer = dyn_cast<PtrAddOp>(user);
+  return pointer && pointer.getOffset() == choice &&
+         reachesEffectfulUser(pointer.getResult());
 }
 
 struct WaveMaterializeMemoryVariantsPass
     : wave::impl::WaveMaterializeMemoryVariantsBase<
           WaveMaterializeMemoryVariantsPass> {
   void runOnOperation() override {
-    llvm::SetVector<Operation *> cleanupRoots;
-    SmallVector<MaterializationVariantsOp> addressChoices;
-    DenseMap<Operation *, SmallVector<PtrAddOp>> pointersByChoice;
-    getOperation()->walk([&](PtrAddOp op) {
-      auto choice = op.getOffset().getDefiningOp<MaterializationVariantsOp>();
-      if (!choice)
-        return;
-      auto [it, inserted] = pointersByChoice.try_emplace(choice);
-      if (inserted)
-        addressChoices.push_back(choice);
-      it->second.push_back(op);
-    });
-
-    IRRewriter rewriter(&getContext());
-    for (MaterializationVariantsOp sourceChoice : addressChoices)
-      if (failed(materializePointerChoices(
-              rewriter, sourceChoice, pointersByChoice.lookup(sourceChoice),
-              cleanupRoots)))
-        return signalPassFailure();
-    RewritePatternSet patterns(&getContext());
-    GreedyRewriteConfig config;
-    config.setStrictness(GreedyRewriteStrictness::ExistingOps)
-        .enableFolding(false)
-        .enableConstantCSE(false);
-    if (failed(applyOpPatternsGreedily(
-            cleanupRoots.getArrayRef(),
-            FrozenRewritePatternSet(std::move(patterns)), config)))
+    if (failed(wave::captureMemoryVariants(getOperation())))
       return signalPassFailure();
   }
 };
 
 } // namespace
+
+bool mlir::wave::isCapturedMemoryVariant(PtrAddOp pointer) {
+  std::array<llvm::SetVector<Value>, 2> pending;
+  pending[0].insert(pointer.getResult());
+  // Cross at most one access; visit each value twice at most: O(V + E).
+  for (unsigned afterAccess : llvm::seq(2u))
+    for (size_t index = 0; index < pending[afterAccess].size(); ++index)
+      for (Operation *user : pending[afterAccess][index].getUsers()) {
+        if (isa<MaterializationVariantsOp>(user))
+          return true;
+        if (user->getNumRegions())
+          continue;
+        if (isMemoryEffectFree(user))
+          pending[afterAccess].insert_range(user->getResults());
+        else if (!afterAccess)
+          pending[1].insert_range(user->getResults());
+      }
+  return false;
+}
+
+bool mlir::wave::canCaptureMemoryVariants(PtrAddOp pointer) {
+  llvm::SetVector<Operation *> pending;
+  pending.insert_range(pointer->getUsers());
+  // O(V + E) in this address-use graph; shared users are visited once.
+  for (size_t index = 0; index < pending.size(); ++index) {
+    Operation *user = pending[index];
+    if (user->getNumRegions() || user->hasTrait<OpTrait::IsTerminator>())
+      return false;
+    if (!isMemoryEffectFree(user)) {
+      if (!wouldOpBeTriviallyDead(user) &&
+          !user->hasTrait<OpTrait::wave::DiscardableMemoryOp>())
+        return false;
+      continue;
+    }
+    for (Value result : user->getResults())
+      pending.insert_range(result.getUsers());
+  }
+  return true;
+}
+
+LogicalResult mlir::wave::captureMemoryVariants(Operation *root) {
+  llvm::SetVector<Operation *> cleanupRoots;
+  SmallVector<MaterializationVariantsOp> addressChoices;
+  root->walk([&](MaterializationVariantsOp choice) {
+    bool addressChoice =
+        isPointerChoice(choice)
+            ? reachesEffectfulUser(choice.getResult())
+            : llvm::any_of(choice->getUsers(), [&](Operation *user) {
+                return isOffsetUser(user, choice);
+              });
+    if (addressChoice)
+      addressChoices.push_back(choice);
+  });
+
+  IRRewriter rewriter(root->getContext());
+  // Capture consumers first so producer capture sees concrete address users.
+  for (MaterializationVariantsOp sourceChoice : llvm::reverse(addressChoices)) {
+    ConcreteAlternatives concrete;
+    concrete[sourceChoice.getResult()] =
+        llvm::to_vector(sourceChoice.getChoices());
+    llvm::SetVector<Value> dependentValues;
+    cleanupRoots.insert(sourceChoice);
+    if (isPointerChoice(sourceChoice)) {
+      dependentValues.insert(sourceChoice.getResult());
+    } else {
+      // Offset choices can have non-address uses; leave those choices intact.
+      for (Operation *user :
+           llvm::make_early_inc_range(sourceChoice->getUsers())) {
+        if (!isOffsetUser(user, sourceChoice))
+          continue;
+        if (failed(
+                duplicatePureAddressOp(rewriter, user, concrete, sourceChoice)))
+          return failure();
+        dependentValues.insert(cast<PtrAddOp>(user).getResult());
+        cleanupRoots.insert(user);
+      }
+    }
+    if (failed(duplicateDependentUsers(rewriter, sourceChoice, concrete,
+                                       dependentValues, cleanupRoots)))
+      return failure();
+  }
+  RewritePatternSet patterns(root->getContext());
+  GreedyRewriteConfig config;
+  config.setStrictness(GreedyRewriteStrictness::ExistingOps)
+      .enableFolding(false)
+      .enableConstantCSE(false);
+  return applyOpPatternsGreedily(cleanupRoots.getArrayRef(),
+                                 FrozenRewritePatternSet(std::move(patterns)),
+                                 config);
+}

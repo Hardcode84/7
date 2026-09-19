@@ -4,6 +4,8 @@
 // RUN: diff %t.once %t.twice
 // RUN: wave-opt %t.twice --wave-materialize-memory-variants -o %t.memory
 // RUN: FileCheck %s --check-prefix=MEMORY < %t.memory
+// RUN: wave-opt %t.memory --wave-materialize-memory-variants -o %t.memory.twice
+// RUN: diff %t.memory %t.memory.twice
 
 // CHECK-LABEL: func.func @nested_offsets
 // CHECK: [[OUTER:%.*]]:2 = scf.for {{.*}} iter_args([[OT:%.*]] = {{%.*}}, [[OC:%.*]] = {{%.*}})
@@ -26,7 +28,19 @@
 // CHECK: return [[OUTER]]#0 : !wave.mem.token
 // MEMORY-LABEL: func.func @nested_offsets
 // MEMORY: wave.materialization_variants
-// MEMORY: wave.materialization_variants {{.*}} : !wave.mem.token
+// MEMORY: %[[VALUE:.*]], %[[TOKEN:.*]] = wave.load
+// MEMORY-NEXT: %[[ALT_VALUE:.*]], %[[ALT_TOKEN:.*]] = wave.load {{.*}}
+// MEMORY-NEXT: %[[VALUE_CHOICE:.*]] = wave.materialization_variants %[[VALUE]], %[[ALT_VALUE]]
+// MEMORY-NEXT: %[[TOKEN_CHOICE:.*]] = wave.materialization_variants %[[TOKEN]], %[[ALT_TOKEN]]
+// MEMORY-NEXT: %[[VALUE_2:.*]], %[[TOKEN_2:.*]] = wave.load
+// MEMORY-NEXT: %[[VALUE_3:.*]], %[[TOKEN_3:.*]] = wave.load
+// MEMORY-NEXT: %[[OTHER_VALUE:.*]] = wave.materialization_variants %[[VALUE_2]], %[[VALUE_3]]
+// MEMORY-NEXT: %[[OTHER_TOKEN:.*]] = wave.materialization_variants %[[TOKEN_2]], %[[TOKEN_3]]
+// MEMORY-NEXT: %[[ALL_VALUE:.*]] = wave.materialization_variants %[[VALUE_CHOICE]], %[[OTHER_VALUE]]
+// MEMORY-NEXT: %[[ALL_TOKEN:.*]] = wave.materialization_variants %[[TOKEN_CHOICE]], %[[OTHER_TOKEN]]
+// MEMORY: %[[STORE:.*]] = wave.store {{.*}} after %[[ALL_TOKEN]]
+// MEMORY-NEXT: %[[ALT_STORE:.*]] = wave.store {{.*}} after %[[ALL_TOKEN]]
+// MEMORY-NEXT: wave.materialization_variants %[[STORE]], %[[ALT_STORE]]
 // MEMORY: return
 module {
 func.func @nested_offsets(%storage: !wave.ptr<#wave.global, i32>,

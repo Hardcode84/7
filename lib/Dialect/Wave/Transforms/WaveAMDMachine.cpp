@@ -717,22 +717,64 @@ struct IntRange64 {
   int64_t hi = 0;
 };
 
+static bool isFullSignedRange(const ConstantIntRanges &range) {
+  unsigned bits = range.smin().getBitWidth();
+  if (bits == 0)
+    return true;
+  return range.smin() == APInt::getSignedMinValue(bits) &&
+         range.smax() == APInt::getSignedMaxValue(bits);
+}
+
+static std::optional<ConstantIntRanges>
+inferDeferredRange(WaveAMDMachineSelector &selector, Value value,
+                   DenseMap<Value, std::optional<ConstantIntRanges>> &cache) {
+  auto [cached, inserted] = cache.try_emplace(value, std::nullopt);
+  if (!inserted)
+    return cached->second;
+  const dataflow::IntegerValueRangeLattice *lattice =
+      selector.rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(
+          value);
+  if (lattice) {
+    IntegerValueRange range = lattice->getValue();
+    if (!range.isUninitialized() && !isFullSignedRange(range.getValue()))
+      return cache[value] = range.getValue();
+  }
+
+  std::optional<ConstantIntRanges> result;
+  if (Operation *def = value.getDefiningOp()) {
+    if (auto interface = dyn_cast<InferIntRangeInterface>(def)) {
+      SmallVector<ConstantIntRanges> operandRanges;
+      for (Value operand : def->getOperands()) {
+        std::optional<ConstantIntRanges> range =
+            inferDeferredRange(selector, operand, cache);
+        if (!range)
+          return std::nullopt;
+        operandRanges.push_back(*range);
+      }
+      interface.inferResultRanges(
+          operandRanges, [&](Value inferred, const ConstantIntRanges &range) {
+            if (inferred == value)
+              result = range;
+          });
+    }
+  }
+  return cache[value] = result;
+}
+
 std::optional<ConstantIntRanges>
 WaveAMDMachineSelector::finiteSignedRange(Value binding) {
-  const dataflow::IntegerValueRangeLattice *lattice =
-      rangeSolver.lookupState<dataflow::IntegerValueRangeLattice>(binding);
-  if (!lattice)
+  // O(V + E) time, O(V) storage per query. Selection can mutate IR between
+  // queries.
+  DenseMap<Value, std::optional<ConstantIntRanges>> cache;
+  std::optional<ConstantIntRanges> inferred =
+      inferDeferredRange(*this, binding, cache);
+  if (!inferred)
     return std::nullopt;
-  IntegerValueRange ivr = lattice->getValue();
-  if (ivr.isUninitialized())
-    return std::nullopt;
-  ConstantIntRanges range = ivr.getValue();
+  ConstantIntRanges range = *inferred;
   unsigned w = range.smin().getBitWidth();
   if (w == 0 || w > 64)
     return std::nullopt;
-  APInt sminBound = APInt::getSignedMinValue(w);
-  APInt smaxBound = APInt::getSignedMaxValue(w);
-  if (range.smin() == sminBound && range.smax() == smaxBound)
+  if (isFullSignedRange(range))
     return std::nullopt;
   return range;
 }

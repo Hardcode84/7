@@ -24,12 +24,13 @@
 // ASM: s_endpgm
 
 // CHECK-LABEL: func.func @independent_address_dependencies
-// CHECK: [[FIRST0:%.*]] = wave.store
-// CHECK: [[FIRST1:%.*]] = wave.store
-// CHECK: [[FIRST:%.*]] = wave.materialization_variants [[FIRST0]], [[FIRST1]]
-// CHECK: [[SECOND0:%.*]] = wave.store {{.*}} after [[FIRST]]
-// CHECK: [[SECOND1:%.*]] = wave.store {{.*}} after [[FIRST]]
-// CHECK: [[SECOND:%.*]] = wave.materialization_variants [[SECOND0]], [[SECOND1]]
+// CHECK: [[FIRST_STORE:%.*]] = wave.store
+// CHECK-NEXT: [[FIRST_ALT:%.*]] = wave.store {{.*}}
+// CHECK-NEXT: [[FIRST:%.*]] = wave.materialization_variants [[FIRST_STORE]], [[FIRST_ALT]]
+// CHECK: [[SECOND_STORE:%.*]] = wave.store {{.*}} after [[FIRST]]
+// CHECK-NEXT: [[SECOND_ALT:%.*]] = wave.store {{.*}} after [[FIRST]]
+// CHECK-NEXT: [[SECOND:%.*]] = wave.materialization_variants [[SECOND_STORE]], [[SECOND_ALT]]
+// CHECK: return [[SECOND]]
 // EXPAND-STORES-COUNT-8: waveamdmachine.buffer_store_b32
 // EXPAND-CANDIDATES-COUNT-4: waveamdmachine.candidate_yield
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {

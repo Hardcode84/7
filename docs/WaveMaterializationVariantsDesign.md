@@ -71,6 +71,11 @@ A dependent memory operation can still have an independent address choice.
 Access duplication requires removable effects. Reject calls and atomics that
 do not provide this contract.
 
+Automatic shared-offset choices require a complete, duplicable address-use
+graph. If an address reaches a non-removable access or a region boundary,
+apply the direct symbolic simplification. A use count alone does not establish
+that access duplication is legal.
+
 Prerequisite effects are not owned by an alternative merely because its token
 chain reaches them. Selecting one load must not delete a required preceding
 store. Removing an unselected memory operation must preserve required history

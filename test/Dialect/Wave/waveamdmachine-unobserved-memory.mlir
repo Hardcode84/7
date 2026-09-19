@@ -21,6 +21,14 @@ func.func @atomic_stays(%addr: !v, %value: !v) {
   return
 }
 
+// CHECK-LABEL: func.func @dead_load
+// CHECK-NEXT: return
+func.func @dead_load(%addr: !v, %dependency: !t) {
+  %value, %token = waveamdmachine.ds_load_b32 %addr after %dependency
+      : (!v, !t) -> (!v, !t)
+  return
+}
+
 // CHECK-LABEL: func.func @dead_recurrence
 // CHECK-NOT: ds_store
 // CHECK: return

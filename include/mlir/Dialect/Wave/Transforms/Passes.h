@@ -33,6 +33,9 @@
 namespace mlir {
 namespace wave {
 
+bool canCaptureMemoryVariants(PtrAddOp pointer);
+bool isCapturedMemoryVariant(PtrAddOp pointer);
+LogicalResult captureMemoryVariants(Operation *root);
 void registerWaveMaterializationPipelines();
 
 #define GEN_PASS_DECL

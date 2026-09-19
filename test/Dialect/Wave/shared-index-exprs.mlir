@@ -114,3 +114,33 @@ func.func @scoped_shared_offsets(%cond: i1, %p: !wave.ptr<#wave.global, i8>, %q:
   }
   return %result#0, %result#1 : !wave.simd<!wave.ptr<#wave.global, i8>, 32>, !wave.simd<!wave.ptr<#wave.global, i8>, 32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @shared_scalar_sum
+// CHECK-NOT: wave.binary
+// CHECK: %[[INDEX:.*]] = wave.index_expr <"1 + raw0">
+// CHECK: wave.ptr_add %{{.*}}, %[[INDEX]]
+// CHECK: wave.ptr_add %{{.*}}, %[[INDEX]]
+func.func @shared_scalar_sum(%p: !wave.ptr<#wave.global, i8>, %q: !wave.ptr<#wave.global, i8>, %x: index) -> (!wave.ptr<#wave.global, i8>, !wave.ptr<#wave.global, i8>) {
+  %one = arith.constant 1 : index
+  %sum = wave.binary addi %x, %one overflow<nsw> : index, index -> index
+  %a = wave.ptr_add %p, %sum : !wave.ptr<#wave.global, i8>, index -> !wave.ptr<#wave.global, i8>
+  %b = wave.ptr_add %q, %sum : !wave.ptr<#wave.global, i8>, index -> !wave.ptr<#wave.global, i8>
+  return %a, %b : !wave.ptr<#wave.global, i8>, !wave.ptr<#wave.global, i8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @shared_scalar_i64_sum
+// CHECK-NOT: wave.binary
+// CHECK: %[[INDEX:.*]] = wave.index_expr <"1 + raw0">
+// CHECK: wave.ptr_add %{{.*}}, %[[INDEX]]
+// CHECK: wave.ptr_add %{{.*}}, %[[INDEX]]
+func.func @shared_scalar_i64_sum(%p: !wave.ptr<#wave.global, i8>, %q: !wave.ptr<#wave.global, i8>, %x: i64) -> (!wave.ptr<#wave.global, i8>, !wave.ptr<#wave.global, i8>) {
+  %one = arith.constant 1 : i64
+  %sum = wave.binary addi %x, %one overflow<nsw> : i64, i64 -> i64
+  %a = wave.ptr_add %p, %sum : !wave.ptr<#wave.global, i8>, i64 -> !wave.ptr<#wave.global, i8>
+  %b = wave.ptr_add %q, %sum : !wave.ptr<#wave.global, i8>, i64 -> !wave.ptr<#wave.global, i8>
+  return %a, %b : !wave.ptr<#wave.global, i8>, !wave.ptr<#wave.global, i8>
+}

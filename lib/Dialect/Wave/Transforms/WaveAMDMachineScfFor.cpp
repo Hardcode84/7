@@ -182,6 +182,22 @@ materializeBodyNextBases(WaveAMDMachineSelector &S, Location loc,
 }
 
 static void
+appendSelectedMemoryDependencies(Value token,
+                                 SmallVectorImpl<Value> &dependencies) {
+  bool hasChoice = false;
+  for (Operation *user : token.getUsers()) {
+    auto choice = dyn_cast<waveamdmachine::MaterializationVariantsOp>(user);
+    if (!choice)
+      continue;
+    hasChoice = true;
+    if (!llvm::is_contained(dependencies, choice.getResult()))
+      dependencies.push_back(choice.getResult());
+  }
+  if (!hasChoice && !llvm::is_contained(dependencies, token))
+    dependencies.push_back(token);
+}
+
+static void
 delayBodyNextBasesAfterPointerUses(WaveAMDMachineSelector &S, Location loc,
                                    SmallVectorImpl<StridedBaseCarry> &groups) {
   for (StridedBaseCarry &group : groups) {
@@ -191,7 +207,7 @@ delayBodyNextBasesAfterPointerUses(WaveAMDMachineSelector &S, Location loc,
         continue;
       for (Value result : candidate.getResults())
         if (isa<waveamdmachine::MemTokenType>(result.getType()))
-          dependencies.push_back(result);
+          appendSelectedMemoryDependencies(result, dependencies);
     }
     if (dependencies.empty())
       continue;
@@ -571,11 +587,19 @@ static FailureOr<Value> copyPinnedLoopInit(WaveAMDMachineSelector &S,
 static LogicalResult normalizePinnedLoopInits(WaveAMDMachineSelector &S,
                                               scf::ForOp op,
                                               MutableArrayRef<Value> inits) {
+  DenseMap<Value, Value> copies;
   for (Value &init : inits) {
+    auto found = copies.find(init);
+    if (found != copies.end()) {
+      init = found->second;
+      continue;
+    }
+    Value source = init;
     FailureOr<Value> copy = copyPinnedLoopInit(S, op, init);
     if (failed(copy))
       return failure();
     init = *copy;
+    copies[source] = init;
   }
   return success();
 }

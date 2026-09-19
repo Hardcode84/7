@@ -12,7 +12,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM: ds_read_b64_tr_b4 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM: s_endpgm
-func.func @transpose_load_i8_i4()
+func.func @transpose_load_i8_i4(%out8: !wave.ptr<#wave.global, i8>)
+    -> !wave.mem.token
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i8>
   %lane = wave.lane_id : !wave.simd<i32, 64>
@@ -25,7 +26,15 @@ func.func @transpose_load_i8_i4()
   %v4, %tok4 = waveamd.transpose_load %ptr after %tok8
       : (!wave.simd<!wave.ptr<#wave.shared, i8>, 64>, !wave.mem.token)
         -> (!wave.simd<vector<16xi4>, 64>, !wave.mem.token)
-  return
+  %e8 = wave.extract %v8[0]
+      : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %out8_ptr = wave.ptr_add %out8, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 64>
+  %stored8 = wave.store %e8 -> %out8_ptr after %tok4
+      : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return %stored8 : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @transpose_load_b16_datatypes
@@ -38,7 +47,10 @@ func.func @transpose_load_i8_i4()
 // ASM: ds_read_b64_tr_b16 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM: ds_read_b64_tr_b16 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM: s_endpgm
-func.func @transpose_load_b16_datatypes()
+func.func @transpose_load_b16_datatypes(
+    %out_i16: !wave.ptr<#wave.global, i16>,
+    %out_f16: !wave.ptr<#wave.global, f16>,
+    %out_bf16: !wave.ptr<#wave.global, bf16>) -> !wave.mem.token
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %lds_i16 = wave.shared_memory_base : !wave.ptr<#wave.shared, i16>
@@ -62,7 +74,31 @@ func.func @transpose_load_b16_datatypes()
   %bf16, %tok_bf16 = waveamd.transpose_load %ptr_bf16 after %tok_f16
       : (!wave.simd<!wave.ptr<#wave.shared, bf16>, 64>, !wave.mem.token)
         -> (!wave.simd<vector<4xbf16>, 64>, !wave.mem.token)
-  return
+  %e_i16 = wave.extract %i16[0]
+      : !wave.simd<vector<4xi16>, 64> -> !wave.simd<i16, 64>
+  %e_f16 = wave.extract %f16[0]
+      : !wave.simd<vector<4xf16>, 64> -> !wave.simd<f16, 64>
+  %e_bf16 = wave.extract %bf16[0]
+      : !wave.simd<vector<4xbf16>, 64> -> !wave.simd<bf16, 64>
+  %out_i16_ptr = wave.ptr_add %out_i16, %lane
+      : !wave.ptr<#wave.global, i16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i16>, 64>
+  %out_f16_ptr = wave.ptr_add %out_f16, %lane
+      : !wave.ptr<#wave.global, f16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, f16>, 64>
+  %out_bf16_ptr = wave.ptr_add %out_bf16, %lane
+      : !wave.ptr<#wave.global, bf16>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, bf16>, 64>
+  %stored_i16 = wave.store %e_i16 -> %out_i16_ptr after %tok_bf16
+      : (!wave.simd<i16, 64>, !wave.simd<!wave.ptr<#wave.global, i16>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  %stored_f16 = wave.store %e_f16 -> %out_f16_ptr after %stored_i16
+      : (!wave.simd<f16, 64>, !wave.simd<!wave.ptr<#wave.global, f16>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  %stored_bf16 = wave.store %e_bf16 -> %out_bf16_ptr after %stored_f16
+      : (!wave.simd<bf16, 64>, !wave.simd<!wave.ptr<#wave.global, bf16>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return %stored_bf16 : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @transpose_load_b16_pack_words
@@ -126,7 +162,8 @@ func.func @transpose_load_b16_pack_words(%out: !wave.ptr<#wave.global, f16>) -> 
 // ASM-LABEL: transpose_load_b96_b6:
 // ASM: ds_read_b96_tr_b6 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM: s_endpgm
-func.func @transpose_load_b96_b6()
+func.func @transpose_load_b96_b6(%out: !wave.ptr<#wave.global, i32>)
+    -> !wave.mem.token
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lane = wave.lane_id : !wave.simd<i32, 64>
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared, i32>
@@ -136,7 +173,15 @@ func.func @transpose_load_b96_b6()
   %v, %tok = waveamd.transpose_load %ptr
       : (!wave.simd<!wave.ptr<#wave.shared, i32>, 64>)
         -> (!wave.simd<vector<3xi32>, 64>, !wave.mem.token)
-  return
+  %e = wave.extract %v[0]
+      : !wave.simd<vector<3xi32>, 64> -> !wave.simd<i32, 64>
+  %out_ptr = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %stored = wave.store %e -> %out_ptr after %tok
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return %stored : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @transpose_load_offsets
@@ -151,7 +196,8 @@ func.func @transpose_load_b96_b6()
 // ASM: ds_read_b96_tr_b6 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:48
 // ASM: ds_read_b64_tr_b16 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:64
 // ASM: s_endpgm
-func.func @transpose_load_offsets()
+func.func @transpose_load_offsets(
+    %out8: !wave.ptr<#wave.global, i8>) -> !wave.mem.token
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
@@ -187,7 +233,15 @@ func.func @transpose_load_offsets()
   %v16, %tok16 = waveamd.transpose_load %ptr16 after %tok6
       : (!wave.simd<!wave.ptr<#wave.shared>, 64>, !wave.mem.token)
         -> (!wave.simd<vector<4xi16>, 64>, !wave.mem.token)
-  return
+  %e8 = wave.extract %v8[0]
+      : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %out8_ptr = wave.ptr_add %out8, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 64>
+  %stored8 = wave.store %e8 -> %out8_ptr after %tok16
+      : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return %stored8 : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @transpose_load_large_const_offset
@@ -197,7 +251,8 @@ func.func @transpose_load_offsets()
 // ASM-NOT: 0x20800
 // ASM: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:2048
 // ASM: s_endpgm
-func.func @transpose_load_large_const_offset()
+func.func @transpose_load_large_const_offset(%out: !wave.ptr<#wave.global, i8>)
+    -> !wave.mem.token
     attributes {wave.kernel, waveamdmachine.lds_size = 262144 : i64} {
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
@@ -209,7 +264,15 @@ func.func @transpose_load_large_const_offset()
   %v, %tok = waveamd.transpose_load %ptr
       : (!wave.simd<!wave.ptr<#wave.shared>, 64>)
         -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
-  return
+  %e = wave.extract %v[0]
+      : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %out_ptr = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 64>
+  %stored = wave.store %e -> %out_ptr after %tok
+      : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return %stored : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @transpose_load_opaque_index_expr
@@ -218,7 +281,8 @@ func.func @transpose_load_large_const_offset()
 // ASM-LABEL: transpose_load_opaque_index_expr:
 // ASM: ds_read_b64_tr_b8 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}}
 // ASM: s_endpgm
-func.func @transpose_load_opaque_index_expr()
+func.func @transpose_load_opaque_index_expr(%out: !wave.ptr<#wave.global, i8>)
+    -> !wave.mem.token
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
@@ -230,7 +294,15 @@ func.func @transpose_load_opaque_index_expr()
   %v, %tok = waveamd.transpose_load %ptr
       : (!wave.simd<!wave.ptr<#wave.shared>, 64>)
         -> (!wave.simd<vector<8xi8>, 64>, !wave.mem.token)
-  return
+  %e = wave.extract %v[0]
+      : !wave.simd<vector<8xi8>, 64> -> !wave.simd<i8, 64>
+  %out_ptr = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i8>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i8>, 64>
+  %stored = wave.store %e -> %out_ptr after %tok
+      : (!wave.simd<i8, 64>, !wave.simd<!wave.ptr<#wave.global, i8>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return %stored : !wave.mem.token
 }
 
 // MACHINE-LABEL: func.func @generic_i8_shared_load_store

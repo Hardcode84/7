@@ -57,6 +57,35 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
     return
   }
 
+  // CHECK-LABEL: func.func @materialization_choice_does_not_fill_m0_gap
+  // CHECK: waveamdmachine.s_mov_m0
+  // CHECK-NEXT: waveamdmachine.materialization_variants
+  // CHECK-NEXT: waveamdmachine.v_add_u32
+  // CHECK-NEXT: waveamdmachine.buffer_load_lds_b128
+  func.func @materialization_choice_does_not_fill_m0_gap(
+      %off: !waveamdmachine.reg<vgpr, 1, 0>,
+      %desc: !waveamdmachine.reg<sgpr, 4, 4>,
+      %soff: !waveamdmachine.reg<sgpr, 1, 8>,
+      %dst: !waveamdmachine.reg<sgpr, 1, 9>,
+      %x: !waveamdmachine.reg<vgpr, 1, 10>,
+      %y: !waveamdmachine.reg<vgpr, 1, 11>,
+      %dep: !waveamdmachine.mem.token) {
+    %m0 = waveamdmachine.s_mov_m0 %dst
+        : (!waveamdmachine.reg<sgpr, 1, 9>) -> !waveamdmachine.m0
+    %choice = waveamdmachine.materialization_variants %dep, %dep
+        : !waveamdmachine.mem.token
+    %tok = waveamdmachine.buffer_load_lds_b128
+        %off, %desc, %soff, %m0 after %choice
+        : (!waveamdmachine.reg<vgpr, 1, 0>,
+           !waveamdmachine.reg<sgpr, 4, 4>,
+           !waveamdmachine.reg<sgpr, 1, 8>, !waveamdmachine.m0,
+           !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %fill = waveamdmachine.v_add_u32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1, 10>,
+           !waveamdmachine.reg<vgpr, 1, 11>) -> !waveamdmachine.reg<vgpr, 1, 12>
+    return
+  }
+
   // CHECK-LABEL: func.func @loop_carry_def_keeps_greedy_order
   // CHECK: waveamdmachine.uniform_loop
   // CHECK: [[M0:%.*]] = waveamdmachine.s_mov_m0

@@ -11,6 +11,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ROUNDTRIP: %[[BPERMUTE:.*]] = waveamdmachine.ds_bpermute_b32 {{.*}} offset 8
 // ROUNDTRIP: waveamdmachine.ds_store_addtid_b32 {{.*}} offset 16
 // ROUNDTRIP: %{{.*}}, %{{.*}} = waveamdmachine.ds_load_addtid_b32 {{.*}} offset 16
+// ROUNDTRIP: waveamdmachine.ds_store_addtid_b32 {{.*}} offset 20
 
 // ASM-LABEL: ds_lane_ops:
 // ASM: ds_swizzle_b32 {{v[0-9]+}}, {{v[0-9]+}} offset:swizzle
@@ -18,6 +19,7 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM: ds_bpermute_b32 {{v[0-9]+}}, {{v[0-9]+}}, {{v[0-9]+}} offset:8
 // ASM: ds_write_addtid_b32 {{v[0-9]+}} offset:16
 // ASM: ds_read_addtid_b32 {{v[0-9]+}} offset:16
+// ASM: ds_write_addtid_b32 {{v[0-9]+}} offset:20
 // ASM: s_endpgm
 func.func @ds_lane_ops() attributes {wave.kernel} {
   %addr = waveamdmachine.v_mbcnt_lo : !waveamdmachine.reg<vgpr, 1>
@@ -39,7 +41,10 @@ func.func @ds_lane_ops() attributes {wave.kernel} {
   %loaded, %token2 = waveamdmachine.ds_load_addtid_b32 %m0 after %token1 offset 16
       : (!waveamdmachine.m0, !waveamdmachine.mem.token)
         -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
-  waveamdmachine.s_endpgm
+  %token3 = waveamdmachine.ds_store_addtid_b32 %m0, %loaded after %token2 offset 20
+      : (!waveamdmachine.m0, !waveamdmachine.reg<vgpr, 1>,
+         !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+  waveamdmachine.s_endpgm after %token3 : !waveamdmachine.mem.token
   return
 }
 

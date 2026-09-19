@@ -10,7 +10,8 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-LABEL: transpose_load_b96_b6_offset:
 // ASM: ds_read_b96_tr_b6 {{v\[[0-9]+:[0-9]+\]}}, {{v[0-9]+}} offset:48
 // ASM: s_endpgm
-func.func @transpose_load_b96_b6_offset()
+func.func @transpose_load_b96_b6_offset(%out: !wave.ptr<#wave.global, i32>)
+    -> !wave.mem.token
     attributes {wave.kernel, waveamdmachine.lds_size = 256 : i64} {
   %lds = wave.shared_memory_base : !wave.ptr<#wave.shared>
   %lane = wave.lane_id : !wave.simd<i32, 64>
@@ -22,7 +23,15 @@ func.func @transpose_load_b96_b6_offset()
   %value, %token = waveamd.transpose_load %ptr
       : (!wave.simd<!wave.ptr<#wave.shared>, 64>)
         -> (!wave.simd<vector<3xi32>, 64>, !wave.mem.token)
-  return
+  %element = wave.extract %value[0]
+      : !wave.simd<vector<3xi32>, 64> -> !wave.simd<i32, 64>
+  %out_ptr = wave.ptr_add %out, %lane
+      : !wave.ptr<#wave.global, i32>, !wave.simd<i32, 64>
+      -> !wave.simd<!wave.ptr<#wave.global, i32>, 64>
+  %stored = wave.store %element -> %out_ptr after %token
+      : (!wave.simd<i32, 64>, !wave.simd<!wave.ptr<#wave.global, i32>, 64>,
+         !wave.mem.token) -> !wave.mem.token
+  return %stored : !wave.mem.token
 }
 
 }
