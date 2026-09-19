@@ -1,5 +1,75 @@
 // RUN: wave-opt %s --canonicalize | FileCheck %s
 
+// CHECK-LABEL: func.func @schedule_token_load
+// CHECK: %[[VALUE:.*]], %{{.*}} = wave.load %{{.*}} after %{{.*}}
+// CHECK: %[[ORDERED:.*]] = wave.schedule_token %[[VALUE]]
+// CHECK: return %[[ORDERED]]
+func.func @schedule_token_load(%ptr: !wave.ptr<#wave.global, i32>,
+                               %dependency: !wave.mem.token) -> !wave.mem.token {
+  %value, %read = wave.load %ptr after %dependency
+      : (!wave.ptr<#wave.global, i32>, !wave.mem.token)
+      -> (!wave.simd<i32, 32>, !wave.mem.token)
+  %ordered = wave.schedule_token %value
+      : !wave.simd<i32, 32> -> !wave.mem.token
+  return %ordered : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @schedule_token_dead_tree
+// CHECK-NOT: arith.addi
+// CHECK: wave.schedule_token %[[ARG:.*]] : i32 -> !wave.mem.token
+func.func @schedule_token_dead_tree(%arg: i32) -> !wave.mem.token {
+  %sum = arith.addi %arg, %arg : i32
+  %ordered = wave.schedule_token %sum : i32 -> !wave.mem.token
+  return %ordered : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @schedule_token_deduplicate
+// CHECK: wave.schedule_token %[[ARG:.*]] : i32 -> !wave.mem.token
+func.func @schedule_token_deduplicate(%arg: i32) -> !wave.mem.token {
+  %ordered = wave.schedule_token %arg, %arg : i32, i32 -> !wave.mem.token
+  return %ordered : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @schedule_token_deep_shared_tree
+// CHECK-NOT: arith.addi
+// CHECK: wave.schedule_token %[[ARG:.*]] : i32 -> !wave.mem.token
+func.func @schedule_token_deep_shared_tree(%arg: i32) -> !wave.mem.token {
+  %a = arith.addi %arg, %arg : i32
+  %b = arith.addi %a, %arg : i32
+  %c = arith.addi %a, %b : i32
+  %d = arith.addi %b, %c : i32
+  %e = arith.addi %c, %d : i32
+  %f = arith.addi %d, %e : i32
+  %g = arith.addi %e, %f : i32
+  %h = arith.addi %f, %g : i32
+  %i = arith.addi %g, %h : i32
+  %j = arith.addi %h, %i : i32
+  %ordered = wave.schedule_token %j : i32 -> !wave.mem.token
+  return %ordered : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @schedule_token_closed_tree
+// CHECK-NOT: arith.constant
+// CHECK-NOT: arith.addi
+// CHECK: %[[EMPTY:.*]] = wave.token
+// CHECK: return %[[EMPTY]]
+func.func @schedule_token_closed_tree() -> !wave.mem.token {
+  %one = arith.constant 1 : i32
+  %sum = arith.addi %one, %one : i32
+  %ordered = wave.schedule_token %sum : i32 -> !wave.mem.token
+  return %ordered : !wave.mem.token
+}
+
+// CHECK-LABEL: func.func @schedule_token_live_producer
+// CHECK: %[[SUM:.*]] = arith.addi
+// CHECK: %[[ORDERED:.*]] = wave.schedule_token %[[SUM]] : i32 -> !wave.mem.token
+// CHECK: return %[[SUM]], %[[ORDERED]]
+func.func @schedule_token_live_producer(%arg: i32) -> (i32, !wave.mem.token) {
+  %sum = arith.addi %arg, %arg : i32
+  %ordered = wave.schedule_token %sum : i32 -> !wave.mem.token
+  return %sum, %ordered : i32, !wave.mem.token
+}
+
 // CHECK-LABEL: func.func @dead_alloc
 // CHECK-NOT: wave.alloc
 // CHECK: return

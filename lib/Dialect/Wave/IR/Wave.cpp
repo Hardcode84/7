@@ -3203,7 +3203,78 @@ OpFoldResult MaskAnyOp::fold(FoldAdaptor adaptor) {
   return {};
 }
 
+static bool canPeelScheduleTokenProducer(Operation *producer,
+                                         ScheduleTokenOp consumer) {
+  // Keep memory effects and token inputs on their producer.
+  return producer && producer->getNumRegions() == 0 &&
+         isMemoryEffectFree(producer) && wouldOpBeTriviallyDead(producer) &&
+         llvm::none_of(producer->getOperandTypes(),
+                       [](Type type) { return isa<MemTokenType>(type); }) &&
+         llvm::all_of(producer->getResults(), [&](Value result) {
+           return llvm::all_of(result.getUsers(), [&](Operation *user) {
+             return user == consumer;
+           });
+         });
+}
+
 namespace {
+struct PeelDeadScheduleTokenProducers : OpRewritePattern<ScheduleTokenOp> {
+  using OpRewritePattern<ScheduleTokenOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ScheduleTokenOp op,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<Value> frontier;
+    SmallVector<Operation *> removable;
+    DenseSet<Operation *> removableSet;
+
+    for (Value value : op.getDependencies()) {
+      Operation *producer = value.getDefiningOp();
+      if (canPeelScheduleTokenProducer(producer, op)) {
+        if (removableSet.insert(producer).second) {
+          removable.push_back(producer);
+          llvm::append_range(frontier, producer->getOperands());
+        }
+      } else {
+        frontier.push_back(value);
+      }
+    }
+
+    if (removable.empty())
+      return failure();
+
+    Value replacement;
+    if (frontier.empty()) {
+      replacement =
+          TokenOp::create(rewriter, op.getLoc(), op.getResult().getType());
+    } else {
+      replacement = ScheduleTokenOp::create(rewriter, op.getLoc(),
+                                            op.getResult().getType(), frontier);
+    }
+    rewriter.replaceOp(op, replacement);
+    for (Operation *producer : removable)
+      rewriter.eraseOp(producer);
+    return success();
+  }
+};
+
+struct DeduplicateScheduleTokenInputs : OpRewritePattern<ScheduleTokenOp> {
+  using OpRewritePattern<ScheduleTokenOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ScheduleTokenOp op,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<Value> dependencies;
+    llvm::SmallDenseSet<Value, 8> seen;
+    for (Value dependency : op.getDependencies())
+      if (seen.insert(dependency).second)
+        dependencies.push_back(dependency);
+    if (dependencies.size() == op.getDependencies().size())
+      return failure();
+    rewriter.modifyOpInPlace(
+        op, [&] { op.getDependenciesMutable().assign(dependencies); });
+    return success();
+  }
+};
+
 struct CanonicalizeJoinOp : OpRewritePattern<JoinOp> {
   using OpRewritePattern<JoinOp>::OpRewritePattern;
 
@@ -3243,6 +3314,22 @@ struct CanonicalizeJoinOp : OpRewritePattern<JoinOp> {
   }
 };
 } // namespace
+
+LogicalResult ScheduleTokenOp::verify() {
+  if (getDependencies().empty())
+    return emitOpError("requires at least one value dependency");
+  if (llvm::any_of(getDependencies(), [](Value dependency) {
+        return isa<MemTokenType>(dependency.getType());
+      }))
+    return emitOpError("does not accept memory-token dependencies");
+  return success();
+}
+
+void ScheduleTokenOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *context) {
+  patterns.add<PeelDeadScheduleTokenProducers, DeduplicateScheduleTokenInputs>(
+      context);
+}
 
 OpFoldResult JoinOp::fold(FoldAdaptor) {
   if (getDependencies().size() == 1)

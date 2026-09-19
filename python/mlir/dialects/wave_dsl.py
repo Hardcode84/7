@@ -1948,6 +1948,10 @@ class FunctionBuilder:
         """Keep issue ordering without carrying completion."""
         return wave.IssueTokenOp(mem_token_type(), list(tokens)).result
 
+    def schedule_token(self, *values: Value) -> Value:
+        """Keep producer issue ordering without carrying completion."""
+        return wave.ScheduleTokenOp(mem_token_type(), list(values)).result
+
     def sched_barrier(self) -> None:
         """Cut greedy machine scheduling at this point."""
         wave.SchedBarrierOp()

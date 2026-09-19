@@ -19,6 +19,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -152,6 +153,38 @@ static void eraseRegAfterOps(func::FuncOp func) {
   for (waveamdmachine::RegAfterOp op : ops) {
     op.getResult().replaceAllUsesWith(op.getSource());
     op.erase();
+  }
+}
+
+static void eraseScheduleTokens(func::FuncOp func) {
+  SmallVector<waveamdmachine::ScheduleTokenOp> scheduleTokens;
+  func.walk([&](waveamdmachine::ScheduleTokenOp op) {
+    scheduleTokens.push_back(op);
+  });
+
+  SmallVector<Operation *> worklist;
+  for (waveamdmachine::ScheduleTokenOp op : scheduleTokens) {
+    for (Value dependency : op.getDependencies())
+      if (Operation *producer = dependency.getDefiningOp())
+        worklist.push_back(producer);
+    OpBuilder builder(op);
+    auto token = waveamdmachine::TokenOp::create(builder, op.getLoc(),
+                                                 op.getResult().getType());
+    op.getResult().replaceAllUsesWith(token.getResult());
+    op.erase();
+  }
+
+  DenseSet<Operation *> erased;
+  while (!worklist.empty()) {
+    Operation *op = worklist.pop_back_val();
+    if (erased.contains(op) || op->getNumRegions() != 0 ||
+        !isOpTriviallyDead(op))
+      continue;
+    erased.insert(op);
+    for (Value operand : op->getOperands())
+      if (Operation *producer = operand.getDefiningOp())
+        worklist.push_back(producer);
+    op->erase();
   }
 }
 
@@ -1482,6 +1515,8 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
       return failure();
     targetLimits = std::move(*limits);
   }
+  // Scheduling edges expire before allocation computes value lifetimes.
+  eraseScheduleTokens(func);
   eraseRegAfterOps(func);
   if (failed(splitLiveUpdateTupleBases(func)))
     return failure();

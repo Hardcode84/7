@@ -96,8 +96,8 @@ static SchedClass classifyMappedOp(Operation *op) {
       // Structural pseudos: emit no real instruction. Region terminators
       // only carry structured-control operands; actual branches come from
       // codegen lowering, not from this op directly.
-      .Case<LabelOp, AfterOp, ContinueIfOp, YieldOp, ExecIfOp, UniformIfOp,
-            UniformLoopOp>(
+      .Case<LabelOp, ScheduleTokenOp, AfterOp, ContinueIfOp, YieldOp, ExecIfOp,
+            UniformIfOp, UniformLoopOp>(
           [](auto) { return SchedClass::NoInst; })
       .Case<SWaitAluOp>(
           [](auto) { return SchedClass::WaitcntPseudo; })

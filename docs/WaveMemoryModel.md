@@ -89,14 +89,10 @@ Logical tokens have type `!wave.mem.token`. Machine tokens have type
 | Operation | Meaning |
 | --- | --- |
 | `wave.token` | Empty dependency set; suitable for an initial loop carry. |
-| `wave.after`, `wave.join` | Combine dependencies without ordering the input producers against each other. |
+| `wave.after`, `wave.join` | Combine memory tokens without ordering the input producers against each other. |
 | `wave.issue_token` | Retain producer issue order but carry none of their completion events. |
-| `wave.wait` | Require completion of the supplied dependencies. |
+| `wave.schedule_token` | Convert value producer issue order to a token without carrying completion events. |
 | Barrier operations | Perform their specified synchronization and consume explicit dependencies. |
-
-`wave.after` also accepts data values. These operands retain their producers
-and carry their completion events. Keep these SSA uses through register
-allocation until wait insertion has consumed them.
 
 A token edge constrains issue order. Its completion requirement depends on the
 consumer. Read-only memory issuers can overlap while forwarding incoming
@@ -106,6 +102,11 @@ consumer must wait for its data regardless of token use.
 
 `wave.issue_token` cannot make stored contents ready for a reader. Its live use
 can retain a store, but it does not transfer that store's completion events.
+`wave.schedule_token` cannot make data or memory ready. It supplies only a
+scheduling edge from a value producer to a token consumer. It requires at least
+one input value and does not accept memory tokens. A dead, effect-free producer
+can be replaced by dependencies on its inputs if none of those inputs is a
+memory token.
 
 Wait insertion tracks target events such as vector loads, stores, LDS, and
 scalar memory. It follows explicit dependencies. Hardware counters can require

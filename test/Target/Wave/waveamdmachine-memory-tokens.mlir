@@ -51,16 +51,17 @@ func.func @join_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
   return
 }
 
-// SELECT-LABEL: func.func @value_after_kernel
+// SELECT-LABEL: func.func @schedule_token_kernel
 // SELECT: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
-// SELECT: %[[ORDERED:.*]] = waveamdmachine.after %[[LANE]] : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token
+// SELECT: %[[ORDERED:.*]] = waveamdmachine.schedule_token %[[LANE]] : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token
 // SELECT: waveamdmachine.s_barrier %[[ORDERED]]
-// REGALLOC-LABEL: func.func @value_after_kernel
-// REGALLOC: waveamdmachine.after %{{.*}} : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token
+// REGALLOC-LABEL: func.func @schedule_token_kernel
+// REGALLOC-NOT: waveamdmachine.schedule_token
+// REGALLOC-NOT: waveamdmachine.v_mbcnt
 // REGALLOC: waveamdmachine.s_barrier
-func.func @value_after_kernel() attributes {wave.kernel} {
+func.func @schedule_token_kernel() attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
-  %ordered = wave.after %lane : !wave.simd<i32, 32> -> !wave.mem.token
+  %ordered = wave.schedule_token %lane : !wave.simd<i32, 32> -> !wave.mem.token
   %ready = wave.barrier %ordered : (!wave.mem.token) -> !wave.mem.token
   return
 }
