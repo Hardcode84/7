@@ -34,6 +34,7 @@ SMOKE_TESTS = {
 }
 PASS_ENV = (
     "ROCM_LIB",
+    "HIPCC",
     "HIP_RUNTIME_LIB",
     "MLIR_ROCM_RUNTIME",
     "ROCJITSU_RUNTIME_DIR",
@@ -123,6 +124,7 @@ def run_session(
         "LD_LIBRARY_PATH": str(sdk / "lib"),
         "USER": os.environ["USER"],
         "ROCM_LIB": str(sdk / "lib"),
+        "HIPCC": str(sdk / "bin/hipcc"),
         "HIP_RUNTIME_LIB": str(sdk / "lib/libamdhip64.so"),
         "MLIR_ROCM_RUNTIME": str(args.build_dir / "simulator/libmlir_rocm_runtime.so"),
         "WAVE_BUILD_DIR": str(args.build_dir),
