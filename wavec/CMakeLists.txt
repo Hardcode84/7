@@ -38,11 +38,6 @@ target_link_libraries(wavefront_lower PUBLIC
   MLIRCAPISCF
   WaveCAPI
 )
-set_target_properties(wavefront_lower PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-)
-
 add_subdirectory("${PROJECT_SOURCE_DIR}/tools/wavec" "${CMAKE_BINARY_DIR}/tools/wavec")
 
 function(wavec_add_c_test name source)
@@ -77,11 +72,6 @@ target_compile_options(wavec_lower_test PRIVATE
 )
 llvm_update_compile_flags(wavec_lower_test)
 target_link_libraries(wavec_lower_test PRIVATE wavefront_lower)
-set_target_properties(wavec_lower_test PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-)
-
 add_test(NAME wavec.lower_goldens
   COMMAND ${CMAKE_COMMAND}
     -DLOWER_TEST=$<TARGET_FILE:wavec_lower_test>

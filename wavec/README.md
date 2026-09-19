@@ -38,10 +38,10 @@ The bridge uses CMake targets, not archive globs: `WaveCAPI`,
 | Target | Language | Links | Role |
 |---|---|---|---|
 | `wavefront` (static lib) | C99 | libc only | lexer + parser + sema + astdump + diag + arena. No MLIR. |
-| `wavefront_lower` (static lib) | C++17 | MLIR CAPI + WaveCAPI | AST -> Wave IR via the generic `mlirOperationCreate` API. |
+| `wavefront_lower` (static lib) | C++20 | MLIR CAPI + WaveCAPI | AST -> Wave IR via the generic `mlirOperationCreate` API. |
 | `wavec` (exe) | C++ | `wavefront` + `wavefront_lower` + Wave backend | driver: source -> Wave IR, AMDGPU ASM, or HSACO. |
 | `wavec_arena_test` / `wavec_lex_test` / `wavec_parse_test` / `wavec_sema_test` | C99 | `wavefront` | per-stage unit tests, each at its own interface. |
-| `wavec_lower_test` (exe) | C++17 | `wavefront_lower` | lowering-stage test: hand-built ASTs -> IR, independent of the parser. |
+| `wavec_lower_test` (exe) | C++20 | `wavefront_lower` | lowering-stage test: hand-built ASTs -> IR, independent of the parser. |
 
 Source map:
 

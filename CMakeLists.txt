@@ -13,9 +13,11 @@ if(NOT WAVE_IS_MULTI_CONFIG AND "${CMAKE_BUILD_TYPE}" STREQUAL "")
     "Pass -DCMAKE_BUILD_TYPE=Release.")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Wave uses headers; C++ module dependency scanning needs a separate tool.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # Locate the LLVM/MLIR install.
 #

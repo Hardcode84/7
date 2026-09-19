@@ -49,6 +49,8 @@ docs/                             Design proposal + scratch notes
 
 ## Building
 
+Wave requires a C++20 compiler.
+
 LLVM/MLIR is pulled at the commit pinned in `llvm-commit.txt` (no
 submodule; the dep is fetched and built by a helper script). The
 ixsimpl symbolic engine ships as a git submodule under

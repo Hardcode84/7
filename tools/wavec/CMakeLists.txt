@@ -27,8 +27,6 @@ target_link_libraries(wavec PRIVATE
   wavefront_lower
 )
 set_target_properties(wavec PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
   RUNTIME_OUTPUT_DIRECTORY "${LLVM_RUNTIME_OUTPUT_INTDIR}"
 )
 
