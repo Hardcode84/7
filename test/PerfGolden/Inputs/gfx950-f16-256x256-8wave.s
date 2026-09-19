@@ -487,10 +487,10 @@ wmma_f16_matmul_tiled:
 		s_add_i32 m0, m0, 0x4000
 		s_nop 0
 		buffer_load_dwordx4 v12, s[16:19], 0 offen lds
-		ds_read_b128 v[20:23], v1
-		ds_read_b128 v[24:27], v1 offset:1024
-		ds_read_b128 v[28:31], v1 offset:16384
-		ds_read_b128 v[32:35], v1 offset:17408
+		ds_read_b128 v[20:23], v5
+		ds_read_b128 v[24:27], v5 offset:1024
+		ds_read_b128 v[28:31], v5 offset:16384
+		ds_read_b128 v[32:35], v5 offset:17408
 		s_setprio 0
 		s_waitcnt vmcnt(10) lgkmcnt(0)
 		s_barrier

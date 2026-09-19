@@ -603,9 +603,9 @@ func.func @multi_use_binding_expands(%idx_raw: !wave.simd<i32, 32>)
 
 // -----
 
-// CHECK-LABEL: func.func @multi_use_ptr_add_offset_stays_shared
+// CHECK-LABEL: func.func @multi_use_ptr_add_offset_expands
 // CHECK-SAME: (%{{.*}}: !wave.ptr<#wave.global, f32>, %{{.*}}: !wave.ptr<#wave.global, f32>, %[[IDX:.*]]: !wave.simd<i32, 32>)
-func.func @multi_use_ptr_add_offset_stays_shared(
+func.func @multi_use_ptr_add_offset_expands(
     %out_a: !wave.ptr<#wave.global, f32>,
     %out_b: !wave.ptr<#wave.global, f32>,
     %idx_raw: !wave.simd<i32, 32>)
@@ -616,16 +616,17 @@ func.func @multi_use_ptr_add_offset_stays_shared(
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
       : !wave.simd<i32, 32>
   %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
-  // CHECK: [[SUM:%.*]] = wave.binary addi
+  // CHECK-NOT: wave.binary addi
   %sum = wave.binary addi %idx, %s1
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<i32, 32>
-  // CHECK-NOT: wave.index_expr
-  // CHECK: wave.ptr_add %{{.*}}, [[SUM]]
+  // CHECK: [[A_OFF:%.*]] = wave.index_expr <"1 + raw0">
+  // CHECK: wave.ptr_add %{{.*}}, [[A_OFF]]
   %a = wave.ptr_add %out_a, %sum
       : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
-  // CHECK: wave.ptr_add %{{.*}}, [[SUM]]
+  // CHECK: [[B_OFF:%.*]] = wave.index_expr <"1 + raw0">
+  // CHECK: wave.ptr_add %{{.*}}, [[B_OFF]]
   %b = wave.ptr_add %out_b, %sum
       : !wave.ptr<#wave.global, f32>, !wave.simd<i32, 32>
       -> !wave.simd<!wave.ptr<#wave.global, f32>, 32>
@@ -736,8 +737,8 @@ func.func @address_contract_expands_index_expr_binding(%x: i32, %y: i32)
 
 // -----
 
-// CHECK-LABEL: func.func @multi_use_identity_binding_stays_shared
-func.func @multi_use_identity_binding_stays_shared(
+// CHECK-LABEL: func.func @multi_use_identity_binding_expands
+func.func @multi_use_identity_binding_expands(
     %idx_raw: !wave.simd<i32, 32>)
     -> (!wave.simd<index, 32>, !wave.simd<index, 32>) {
   %c1 = arith.constant 1 : i32
@@ -745,14 +746,14 @@ func.func @multi_use_identity_binding_stays_shared(
       [#wave.pred<"x >= 0">, #wave.pred<"x <= 31">]
       : !wave.simd<i32, 32>
   %s1 = wave.splat %c1 : i32 -> !wave.simd<i32, 32>
-  // CHECK: [[SUM:%.*]] = wave.binary addi
+  // CHECK-NOT: wave.binary addi
   %sum = wave.binary addi %idx, %s1
       : !wave.simd<i32, 32>, !wave.simd<i32, 32>
       -> !wave.simd<i32, 32>
-  // CHECK: wave.index_expr <"x"> ["x"]([[SUM]])
+  // CHECK: wave.index_expr <"1 + raw0">
   %a = wave.index_expr <"x"> ["x"](%sum)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
-  // CHECK: wave.index_expr <"y"> ["y"]([[SUM]])
+  // CHECK: wave.index_expr <"1 + raw0">
   %b = wave.index_expr <"y"> ["y"](%sum)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>
   return %a, %b : !wave.simd<index, 32>, !wave.simd<index, 32>

@@ -183,10 +183,6 @@ static bool isSignlessI32StorageType(Type type) {
   return intType && intType.isSignless() && intType.getWidth() == 32;
 }
 
-static bool isSignlessI32SimdType(Type type) {
-  return isa<SimdType>(type) && isSignlessI32StorageType(type);
-}
-
 static std::optional<int64_t> getPacketElementCount(Type type) {
   SimdType simd = dyn_cast<SimdType>(type);
   if (!simd)
@@ -987,6 +983,19 @@ private:
       skip = true;
       return failure();
     }
+    auto key = std::make_pair(value, depth);
+    auto cached = predicateCache.find(key);
+    if (cached != predicateCache.end())
+      return cached->second;
+    FailureOr<sym::PredHandle> result =
+        buildPredicateExprImpl(value, skip, depth);
+    if (!skip && succeeded(result))
+      predicateCache.try_emplace(key, *result);
+    return result;
+  }
+
+  FailureOr<sym::PredHandle> buildPredicateExprImpl(Value value, bool &skip,
+                                                    unsigned depth) {
     if (CmpIOp cmp = value.getDefiningOp<CmpIOp>())
       return buildCmpPredicate(cmp, skip, depth + 1);
     if (arith::CmpIOp cmp = value.getDefiningOp<arith::CmpIOp>())
@@ -1043,7 +1052,9 @@ private:
         offset.assumptions.empty()
             ? sym::simplifyExpr(store, expr)
             : sym::simplifyExpr(store, expr, offset.assumptions);
-    if (failed(simplified) || !shouldUseSimplifiedIndexExpr(*simplified, expr))
+    if (failed(simplified))
+      return failure();
+    if (!shouldUseSimplifiedIndexExpr(*simplified, expr))
       return expr;
     return *simplified;
   }
@@ -1072,6 +1083,21 @@ private:
       skip = true;
       return failure();
     }
+    // Depth and leaf mode determine where expansion must stop.
+    auto key = std::make_pair(value, depth);
+    auto &cache = expressionCache[allowLeaf];
+    auto cached = cache.find(key);
+    if (cached != cache.end())
+      return cached->second;
+    FailureOr<sym::ExprHandle> result =
+        buildExprImpl(value, skip, allowLeaf, depth);
+    if (!skip && succeeded(result))
+      cache.try_emplace(key, *result);
+    return result;
+  }
+
+  FailureOr<sym::ExprHandle> buildExprImpl(Value value, bool &skip,
+                                           bool allowLeaf, unsigned depth) {
     std::optional<int64_t> constant = foldWaveConstants
                                           ? getSplatOrConstantInt(value)
                                           : getConstantIntValue(value);
@@ -1916,6 +1942,9 @@ private:
   }
 
   SymbolicOffset offset;
+  std::array<llvm::DenseMap<std::pair<Value, unsigned>, sym::ExprHandle>, 2>
+      expressionCache;
+  llvm::DenseMap<std::pair<Value, unsigned>, sym::PredHandle> predicateCache;
   llvm::DenseMap<Value, StringRef> nameByValue;
   llvm::StringMap<Value> bindingByName;
   WaveDialect &dialect;
@@ -2209,10 +2238,6 @@ createGeneratedIndexExprBuilder(WaveDialect &dialect, DataFlowSolver &solver,
 static FailureOr<bool> rewritePtrAdd(PatternRewriter &rewriter, PtrAddOp op,
                                      WaveDialect &dialect,
                                      DataFlowSolver &solver) {
-  if (!op.getOffset().hasOneUse() &&
-      isSignlessI32SimdType(op.getOffset().getType()))
-    return false;
-
   SymbolicValueBuilder builder = createGeneratedIndexExprBuilder(
       dialect, solver, op, hasGlobalPointerBase(op));
   FailureOr<std::optional<SymbolicOffset>> offset =
@@ -2298,19 +2323,6 @@ static void seedBindingNames(IndexExprOp op, BindingState &state) {
   }
 }
 
-static bool isIdentityBinding(IndexExprOp op, StringRef name) {
-  sym::ExprView expr(op.getExpr().getValue());
-  return expr.getKind() == sym::ExprKind::Symbol &&
-         expr.getSymbolName() == name;
-}
-
-static bool shouldPreserveGeneratedBinding(Value value,
-                                           bool preserveI32Binding) {
-  if (preserveI32Binding && isSignlessI32SimdType(value.getType()))
-    return true;
-  return false;
-}
-
 static FailureOr<bool> preserveGeneratedBinding(BindingState &state,
                                                 StringRef name, Value value) {
   if (failed(appendBinding(state, name, value)))
@@ -2321,10 +2333,7 @@ static FailureOr<bool> preserveGeneratedBinding(BindingState &state,
 static FailureOr<bool> collectGeneratedBindingRewrite(
     IndexExprOp op, WaveDialect &dialect, BindingState &state, StringRef name,
     Value value, SmallVectorImpl<sym::ExprSubstitution> &substitutions,
-    DataFlowSolver &solver, bool preserveI32Binding = false) {
-  if (shouldPreserveGeneratedBinding(value, preserveI32Binding))
-    return preserveGeneratedBinding(state, name, value);
-
+    DataFlowSolver &solver) {
   SymbolicValueBuilder builder(
       dialect, solver,
       /*allowI64Integers=*/false,
@@ -2400,9 +2409,7 @@ static FailureOr<bool> rewriteIndexExpr(PatternRewriter &rewriter,
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     appendAssumePredicates(store, value, name, state.assumptions);
     FailureOr<bool> bindingChanged = collectGeneratedBindingRewrite(
-        op, dialect, state, name, value, substitutions, solver,
-        /*preserveI32Binding=*/!value.hasOneUse() &&
-            isIdentityBinding(op, name));
+        op, dialect, state, name, value, substitutions, solver);
     if (failed(bindingChanged))
       return failure();
     changed |= *bindingChanged;
