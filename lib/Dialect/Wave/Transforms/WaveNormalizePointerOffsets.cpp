@@ -310,18 +310,17 @@ static void
 populatePointerOffsetNormalizationPatterns(RewritePatternSet &patterns,
                                            const TypeConverter &converter) {
   MLIRContext *ctx = patterns.getContext();
-  patterns.add<NormalizePtrAddOp, ConvertWhereOp,
-               ConvertNoRegionOp<SharedMemoryBaseOp>,
-               ConvertNoRegionOp<LDSAddressOp>, ConvertNoRegionOp<AllocOp>,
-               ConvertNoRegionOp<AllocReleaseOp>, ConvertNoRegionOp<LoadOp>,
-               ConvertNoRegionOp<StoreOp>, ConvertNoRegionOp<AfterOp>,
-               ConvertNoRegionOp<SplatOp>,
-               ConvertNoRegionOp<YieldOp>, ConvertNoRegionOp<ReadFirstOp>,
-               ConvertNoRegionOp<PtrCastOp>, ConvertNoRegionOp<SelectOp>,
-               ConvertNoRegionOp<waveamd::MakeBufferOp>,
-               ConvertNoRegionOp<waveamd::TransposeLoadOp>,
-               ConvertNoRegionOp<waveamd::GlobalAtomicAddAcqRelOp>,
-               ConvertNoRegionOp<waveamd::DmaLoadLdsOp>>(converter, ctx);
+  patterns.add<
+      NormalizePtrAddOp, ConvertWhereOp, ConvertNoRegionOp<SharedMemoryBaseOp>,
+      ConvertNoRegionOp<LDSAddressOp>, ConvertNoRegionOp<AllocOp>,
+      ConvertNoRegionOp<AllocReleaseOp>, ConvertNoRegionOp<LoadOp>,
+      ConvertNoRegionOp<StoreOp>, ConvertNoRegionOp<AfterOp>,
+      ConvertNoRegionOp<SplatOp>, ConvertNoRegionOp<YieldOp>,
+      ConvertNoRegionOp<ReadFirstOp>, ConvertNoRegionOp<PtrCastOp>,
+      ConvertNoRegionOp<SelectOp>, ConvertNoRegionOp<waveamd::MakeBufferOp>,
+      ConvertNoRegionOp<waveamd::TransposeLoadOp>,
+      ConvertNoRegionOp<waveamd::GlobalAtomicAddAcqRelOp>,
+      ConvertNoRegionOp<waveamd::DmaLoadLdsOp>>(converter, ctx);
   populateAnyFunctionOpInterfaceTypeConversionPattern(patterns, converter);
   populateReturnOpTypeConversionPattern(patterns, converter);
   populateCallOpTypeConversionPattern(patterns, converter);
