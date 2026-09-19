@@ -1,12 +1,13 @@
 // RUN: wave-opt --waveamd-to-machine %s | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine %s | wave-opt | FileCheck %s --check-prefix=SELECT
 // RUN: wave-opt --waveamd-to-machine --waveamd-abi-lowering --waveamd-insert-ticket-waits %s | FileCheck %s --check-prefix=TICKET
+// RUN: wave-opt --waveamd-to-machine --waveamd-machine-schedule='apply-schedule=true require-selected-input=true' --waveamd-prepare-regalloc %s | FileCheck %s --check-prefix=REGALLOC
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
 // SELECT-LABEL: func.func @token_kernel
 // SELECT: waveamdmachine.global_store_b32{{.*}} : {{.*}} -> !waveamdmachine.mem.token
-// SELECT: waveamdmachine.token_join{{.*}} : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+// SELECT: waveamdmachine.after{{.*}} : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
 // SELECT: waveamdmachine.global_store_b32{{.*}} after {{.*}} : {{.*}} !waveamdmachine.mem.token) -> !waveamdmachine.mem.token
 // SELECT: waveamdmachine.s_barrier{{.*}} : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
 
@@ -47,6 +48,20 @@ func.func @join_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
   %b = wave.store %vx -> %ptrs : (!wave.simd<i32, 32>, !wave.simd<!wave.ptr<#wave.global, i32>, 32>) -> !wave.mem.token
   %both = wave.join %a, %b : !wave.mem.token, !wave.mem.token -> !wave.mem.token
   %ready = wave.barrier %both : (!wave.mem.token) -> !wave.mem.token
+  return
+}
+
+// SELECT-LABEL: func.func @value_after_kernel
+// SELECT: %[[LANE:.*]] = waveamdmachine.v_mbcnt_lo
+// SELECT: %[[ORDERED:.*]] = waveamdmachine.after %[[LANE]] : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token
+// SELECT: waveamdmachine.s_barrier %[[ORDERED]]
+// REGALLOC-LABEL: func.func @value_after_kernel
+// REGALLOC-NOT: waveamdmachine.after %{{.*}} : (!waveamdmachine.reg
+// REGALLOC: waveamdmachine.s_barrier
+func.func @value_after_kernel() attributes {wave.kernel} {
+  %lane = wave.lane_id : !wave.simd<i32, 32>
+  %ordered = wave.after %lane : !wave.simd<i32, 32> -> !wave.mem.token
+  %ready = wave.barrier %ordered : (!wave.mem.token) -> !wave.mem.token
   return
 }
 

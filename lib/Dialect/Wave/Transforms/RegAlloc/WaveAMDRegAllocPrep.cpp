@@ -24,6 +24,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
+#include <iterator>
 #include <optional>
 
 using namespace mlir;
@@ -153,6 +154,20 @@ static void eraseRegAfterOps(func::FuncOp func) {
     op.getResult().replaceAllUsesWith(op.getSource());
     op.erase();
   }
+}
+
+static void dropScheduledAfterValueDependencies(func::FuncOp func) {
+  func.walk([&](waveamdmachine::AfterOp op) {
+    SmallVector<Value> tokens;
+    llvm::copy_if(op.getDependencies(), std::back_inserter(tokens),
+                  [](Value dependency) {
+                    return isa<waveamdmachine::MemTokenType>(
+                        dependency.getType());
+                  });
+    if (tokens.size() == op.getDependencies().size())
+      return;
+    op.getDependenciesMutable().assign(tokens);
+  });
 }
 
 static bool isDeadCheapRegOp(Operation *op) {
@@ -1482,6 +1497,11 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
       return failure();
     targetLimits = std::move(*limits);
   }
+  // Data operands on `after` have constrained the final machine schedule.
+  // Drop them before register allocation so that the scheduling-only use does
+  // not extend a register lifetime. Keep memory-token operands because they
+  // still carry completion events into waits and barriers.
+  dropScheduledAfterValueDependencies(func);
   eraseRegAfterOps(func);
   if (failed(splitLiveUpdateTupleBases(func)))
     return failure();

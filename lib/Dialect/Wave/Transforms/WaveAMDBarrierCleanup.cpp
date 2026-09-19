@@ -134,7 +134,11 @@ static bool isFlattenableTokenProducer(Operation *op) {
   // Flattening would restore stripped completion deps.
   if (op->hasTrait<traits::CompletionFreeTokenOp>())
     return false;
-  return op->hasTrait<traits::TokenOp>() || op->hasTrait<traits::TokenJoinOp>();
+  if (op->hasTrait<traits::TokenOp>())
+    return true;
+  if (!op->hasTrait<traits::TokenJoinOp>())
+    return false;
+  return llvm::all_of(op->getOperands(), isMemToken);
 }
 
 static bool isFirstBarrierResult(Value value,

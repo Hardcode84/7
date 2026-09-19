@@ -8059,8 +8059,12 @@ LogicalResult WaveAMDMachineSelector::selectTokenJoin(Operation *op) {
   SmallVector<Value> operands;
   for (Value dependency : op->getOperands())
     operands.push_back(expect(dependency, op));
-  values[op->getResult(0)] = waveamdmachine::TokenJoinOp::create(
-      builder, op->getLoc(), getMemTokenType(op->getContext()), operands);
+  if (isa<AfterOp>(op))
+    values[op->getResult(0)] = waveamdmachine::AfterOp::create(
+        builder, op->getLoc(), getMemTokenType(op->getContext()), operands);
+  else
+    values[op->getResult(0)] = waveamdmachine::TokenJoinOp::create(
+        builder, op->getLoc(), getMemTokenType(op->getContext()), operands);
   eraseIfTopLevel(op);
   return success();
 }

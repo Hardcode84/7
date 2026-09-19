@@ -417,7 +417,9 @@ static Value getUnaryTokenWrapperInput(Operation *op) {
       return join.getDependencies().front();
 
   if (auto after = dyn_cast<waveamdmachine::AfterOp>(op))
-    if (after.getDependencies().size() == 1)
+    if (after.getDependencies().size() == 1 &&
+        isa<waveamdmachine::MemTokenType>(
+            after.getDependencies().front().getType()))
       return after.getDependencies().front();
 
   return {};

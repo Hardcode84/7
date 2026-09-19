@@ -539,6 +539,12 @@ def WaveAMDMachine_RegOrMemToken
                  "::llvm::isa<::mlir::waveamdmachine::MemTokenType>($_self)">,
            "WaveAMDMachine register or memory token">;
 
+def WaveAMDMachine_RegImmOrMemToken
+    : Type<CPred<"::llvm::isa<::mlir::waveamdmachine::RegType, "
+                 "::mlir::waveamdmachine::ImmType, "
+                 "::mlir::waveamdmachine::MemTokenType>($_self)">,
+           "WaveAMDMachine register, immediate, or memory token">;
+
 def WaveAMDMachine_PackedOpSel2Attr
     : ConfinedAttr<I64Attr, [IntMinValue<0>, IntMaxValue<3>]>;
 def WaveAMDMachine_PackedOpSel3Attr
@@ -944,7 +950,7 @@ def WaveAMDMachine_AfterOp : WaveAMDMachine_Op<"after",
     [Pure, WaveAMDMachine_TokenJoinTrait, WaveAMDMachine_NoMachineInst,
      WaveAMDMachine_NoAsmEmission]> {
   let summary = "derive a machine memory token after dependencies";
-  let arguments = (ins Variadic<WaveAMDMachine_MemToken>:$dependencies);
+  let arguments = (ins Variadic<WaveAMDMachine_RegImmOrMemToken>:$dependencies);
   let results = (outs WaveAMDMachine_MemToken:$result);
   let assemblyFormat = "$dependencies attr-dict `:` functional-type(operands, results)";
 }

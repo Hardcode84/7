@@ -658,7 +658,7 @@ def Wave_IssueTokenOp : Wave_Op<"issue_token", [Pure]> {
 
 def Wave_AfterOp : Wave_Op<"after", [Pure]> {
   let summary = "derive a memory token after one or more dependencies";
-  let arguments = (ins Variadic<Wave_MemToken>:$dependencies);
+  let arguments = (ins Variadic<AnyType>:$dependencies);
   let results = (outs Wave_MemToken:$result);
   let assemblyFormat = "$dependencies attr-dict `:` type($dependencies) `->` qualified(type($result))";
 }
