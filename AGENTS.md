@@ -102,6 +102,12 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 
 ## Implementation Discipline
 
+- **Keep index algebra symbolic.** Reassociate, factor, distribute, and
+  simplify address expressions in the `wave.index_expr` layer before
+  WaveAMDMachine selection. Apply the same rule to scalar and SIMD
+  materialization. Late machine or assembly cleanup must not reconstruct index
+  algebra.
+
 - **Review superlinear algorithms especially carefully.** State the input sizes
   and worst-case time and memory complexity. Include repeated scans, nested
   traversals, and work across iterations. Check production input bounds and
