@@ -94,6 +94,10 @@ Logical tokens have type `!wave.mem.token`. Machine tokens have type
 | `wave.wait` | Require completion of the supplied dependencies. |
 | Barrier operations | Perform their specified synchronization and consume explicit dependencies. |
 
+`wave.after` also accepts data values. These operands retain their producers
+and carry their completion events. Keep these SSA uses through register
+allocation until wait insertion has consumed them.
+
 A token edge constrains issue order. Its completion requirement depends on the
 consumer. Read-only memory issuers can overlap while forwarding incoming
 completion events to their result tokens. Memory-writing dependencies and

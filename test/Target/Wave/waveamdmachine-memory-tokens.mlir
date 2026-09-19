@@ -56,7 +56,7 @@ func.func @join_kernel(%out: !wave.ptr<#wave.global, i32>, %x: i32) attributes {
 // SELECT: %[[ORDERED:.*]] = waveamdmachine.after %[[LANE]] : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token
 // SELECT: waveamdmachine.s_barrier %[[ORDERED]]
 // REGALLOC-LABEL: func.func @value_after_kernel
-// REGALLOC-NOT: waveamdmachine.after %{{.*}} : (!waveamdmachine.reg
+// REGALLOC: waveamdmachine.after %{{.*}} : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token
 // REGALLOC: waveamdmachine.s_barrier
 func.func @value_after_kernel() attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
