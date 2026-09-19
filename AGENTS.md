@@ -102,6 +102,17 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
 
 ## Implementation Discipline
 
+- **Do not pass hidden state between passes.** Do not add ad hoc flags,
+  attributes, or side tables to record pass history or control later rewrites.
+  Derive facts from SSA uses, types, regions, and explicit dependencies. Keep
+  temporary bookkeeping local to the pass. Make rewrites converge from IR
+  structure; do not add "processed", "skip", or "bridge" markers to hide a
+  representation or pass-order defect. If information must cross a pass boundary
+  and cannot be derived from IR, define a typed semantic IR contract or a shared
+  analysis with explicit invalidation. State its meaning, owner, lifetime, and
+  preservation or invalidation rules for cloning, CSE, and rewriting. Naming a
+  flag and documenting its cleanup does not establish a semantic contract.
+
 - **Keep index algebra symbolic.** Reassociate, factor, distribute, and
   simplify address expressions in the `wave.index_expr` layer before
   WaveAMDMachine selection. Apply the same rule to scalar and SIMD
