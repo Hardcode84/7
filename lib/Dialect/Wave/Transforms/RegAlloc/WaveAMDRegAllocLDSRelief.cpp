@@ -184,6 +184,11 @@ static waveamdmachine::RegType getVirtualSGPR1(MLIRContext *ctx) {
                                       /*width=*/1, /*index=*/-1);
 }
 
+static waveamdmachine::RegType getVirtualVGPR1(MLIRContext *ctx) {
+  return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::VGPR,
+                                      /*width=*/1, /*index=*/-1);
+}
+
 static waveamdmachine::RegType getSCCType(MLIRContext *ctx) {
   return waveamdmachine::RegType::get(ctx, waveamdmachine::RegClass::SCC,
                                       /*width=*/1, /*index=*/-1);
@@ -971,6 +976,31 @@ getLDSAddTidOffset(wave::regalloc::LDSSpillPlan plan) {
   return offset;
 }
 
+static std::pair<Value, int64_t>
+materializeExplicitLDSAddress(OpBuilder &builder, Location loc,
+                              wave::regalloc::LDSSpillPlan plan) {
+  MLIRContext *ctx = builder.getContext();
+  Value workitem = getOrCreateWorkitemId(builder, loc);
+  waveamdmachine::VLshlrevB32Op address =
+      waveamdmachine::VLshlrevB32Op::create(
+          builder, loc, getVirtualVGPR1(ctx), workitem,
+          createImm(builder, loc, llvm::Log2_32(plan.valueBytes)));
+  markRegAllocTemp(address, builder);
+
+  std::pair<int64_t, int64_t> range = waveamdmachine::instOffsetRange(
+      waveamdmachine::DsStoreB32Op::getAddressFieldSpec());
+  int64_t offset = static_cast<int64_t>(plan.slotBase);
+  if (offset >= range.first && offset <= range.second)
+    return std::make_pair(address.getResult(), offset);
+
+  waveamdmachine::VAddU32Op fullAddress =
+      waveamdmachine::VAddU32Op::create(
+          builder, loc, getVirtualVGPR1(ctx), address.getResult(),
+          createImm(builder, loc, plan.slotBase));
+  markRegAllocTemp(fullAddress, builder);
+  return std::make_pair(fullAddress.getResult(), int64_t{0});
+}
+
 static Value materializeLDSM0(OpBuilder &builder, Location loc,
                               const LDSAddTidContext &context) {
   waveamdmachine::SMovM0Op mov = waveamdmachine::SMovM0Op::create(
@@ -981,15 +1011,23 @@ static Value materializeLDSM0(OpBuilder &builder, Location loc,
 }
 
 static FailureOr<Value> storeLDSScalarValue(OpBuilder &builder,
-                                            const LDSAddTidContext &context,
+                                            const LDSAddTidContext *context,
                                             Location loc, Value value,
                                             Value token,
                                             wave::regalloc::LDSSpillPlan plan) {
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  if (!context) {
+    std::pair<Value, int64_t> address =
+        materializeExplicitLDSAddress(builder, loc, plan);
+    waveamdmachine::DsStoreB32Op store = waveamdmachine::DsStoreB32Op::create(
+        builder, loc, tokenType, address.first, value, token, address.second);
+    markRegAllocTemp(store, builder);
+    return store.getToken();
+  }
   FailureOr<int64_t> offset = getLDSAddTidOffset(plan);
   if (failed(offset))
     return failure();
-  Value m0 = materializeLDSM0(builder, loc, context);
-  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  Value m0 = materializeLDSM0(builder, loc, *context);
   waveamdmachine::DsStoreAddTidB32Op store =
       waveamdmachine::DsStoreAddTidB32Op::create(builder, loc, tokenType, m0,
                                                  value, token, *offset);
@@ -998,11 +1036,11 @@ static FailureOr<Value> storeLDSScalarValue(OpBuilder &builder,
 }
 
 static FailureOr<Value>
-storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext &context,
+storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext *context,
                 Location loc, Value value, waveamdmachine::RegType type,
                 Value token, ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
   Operation *point = getInsertionPointOp(builder);
-  Value liveM0 = point
+  Value liveM0 = point && context
                      ? findLiveResourceAt<wave::HardwareResourceKind::M0>(point)
                      : Value{};
   unsigned width = type.getWidth();
@@ -1010,7 +1048,7 @@ storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext &context,
     FailureOr<Value> stored =
         storeLDSScalarValue(builder, context, loc, value, token, plans.front());
     if (failed(stored) ||
-        (point && failed(restoreLiveM0(builder, liveM0, point))))
+        (point && context && failed(restoreLiveM0(builder, liveM0, point))))
       return failure();
     return stored;
   }
@@ -1029,17 +1067,17 @@ storeLDSValueAt(OpBuilder &builder, const LDSAddTidContext &context,
   Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
   Value joined =
       wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc);
-  if (point && failed(restoreLiveM0(builder, liveM0, point)))
+  if (point && context && failed(restoreLiveM0(builder, liveM0, point)))
     return failure();
   return joined;
 }
 
 static FailureOr<Value> storeLDSValue(OpBuilder &builder,
-                                      const LDSAddTidContext &context,
+                                      const LDSAddTidContext *context,
                                       const LDSReliefSlot &slot, Value token) {
   wave::regalloc::setInsertionPointForMemorySpillStore(slot.value, builder);
-  if (auto arg = dyn_cast<BlockArgument>(slot.value)) {
-    Operation *baseDef = context.waveBaseBytes.getDefiningOp();
+  if (auto arg = dyn_cast<BlockArgument>(slot.value); arg && context) {
+    Operation *baseDef = context->waveBaseBytes.getDefiningOp();
     if (baseDef && baseDef->getBlock() == arg.getOwner())
       builder.setInsertionPointAfter(baseDef);
   }
@@ -1048,14 +1086,23 @@ static FailureOr<Value> storeLDSValue(OpBuilder &builder,
 }
 
 static FailureOr<wave::regalloc::MemorySpillLoadResult>
-loadLDSScalarValue(OpBuilder &builder, const LDSAddTidContext &context,
+loadLDSScalarValue(OpBuilder &builder, const LDSAddTidContext *context,
                    Location loc, Type type, Value token,
                    wave::regalloc::LDSSpillPlan plan) {
+  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  if (!context) {
+    std::pair<Value, int64_t> address =
+        materializeExplicitLDSAddress(builder, loc, plan);
+    waveamdmachine::DsLoadB32Op load = waveamdmachine::DsLoadB32Op::create(
+        builder, loc, type, tokenType, address.first, token, address.second);
+    markRegAllocTemp(load, builder);
+    return wave::regalloc::MemorySpillLoadResult{load.getResult(),
+                                                 load.getToken()};
+  }
   FailureOr<int64_t> offset = getLDSAddTidOffset(plan);
   if (failed(offset))
     return failure();
-  Value m0 = materializeLDSM0(builder, loc, context);
-  Type tokenType = waveamdmachine::MemTokenType::get(builder.getContext());
+  Value m0 = materializeLDSM0(builder, loc, *context);
   waveamdmachine::DsLoadAddTidB32Op load =
       waveamdmachine::DsLoadAddTidB32Op::create(builder, loc, type, tokenType,
                                                 m0, token, *offset);
@@ -1065,11 +1112,11 @@ loadLDSScalarValue(OpBuilder &builder, const LDSAddTidContext &context,
 }
 
 static FailureOr<wave::regalloc::MemorySpillLoadResult>
-loadLDSValue(OpBuilder &builder, const LDSAddTidContext &context, Location loc,
+loadLDSValue(OpBuilder &builder, const LDSAddTidContext *context, Location loc,
              Type type, Value token,
              ArrayRef<wave::regalloc::LDSSpillPlan> plans) {
   Operation *point = getInsertionPointOp(builder);
-  Value liveM0 = point
+  Value liveM0 = point && context
                      ? findLiveResourceAt<wave::HardwareResourceKind::M0>(point)
                      : Value{};
   unsigned width = cast<waveamdmachine::RegType>(type).getWidth();
@@ -1077,7 +1124,7 @@ loadLDSValue(OpBuilder &builder, const LDSAddTidContext &context, Location loc,
     FailureOr<wave::regalloc::MemorySpillLoadResult> loaded =
         loadLDSScalarValue(builder, context, loc, type, token, plans.front());
     if (failed(loaded) ||
-        (point && failed(restoreLiveM0(builder, liveM0, point))))
+        (point && context && failed(restoreLiveM0(builder, liveM0, point))))
       return failure();
     return loaded;
   }
@@ -1100,7 +1147,7 @@ loadLDSValue(OpBuilder &builder, const LDSAddTidContext &context, Location loc,
   wave::regalloc::MemorySpillLoadResult result{
       wave::regalloc::joinMemorySpillValue(type, elements, builder, loc),
       wave::regalloc::joinMemorySpillTokens(tokenType, tokens, builder, loc)};
-  if (point && failed(restoreLiveM0(builder, liveM0, point)))
+  if (point && context && failed(restoreLiveM0(builder, liveM0, point)))
     return failure();
   return result;
 }
@@ -1120,8 +1167,14 @@ static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
   FailureOr<unsigned> ldsBaseBytes = getLDSBaseBytes(func, candidate);
   if (failed(ldsBaseBytes))
     return failure();
-  LDSAddTidContext context =
-      materializeLDSAddTidContext(builder, func, *ldsBaseBytes, candidate);
+  std::optional<LDSAddTidContext> addTidContext;
+  // Keep M0 as zero-based addtid state. When spills follow another LDS
+  // allocation, materialize the complete workitem address in a VGPR.
+  if (*ldsBaseBytes == 0)
+    addTidContext =
+        materializeLDSAddTidContext(builder, func, *ldsBaseBytes, candidate);
+  const LDSAddTidContext *context =
+      addTidContext ? &*addTidContext : nullptr;
   auto store = [&](const LDSReliefSlot &slot, Value token) {
     return storeLDSValue(builder, context, slot, token);
   };
@@ -1141,6 +1194,8 @@ static LogicalResult materializeLDSRelief(OpBuilder &builder, func::FuncOp func,
   if (failed(materializeMemoryRelief<LDSReliefSlot>(builder, candidate, store,
                                                     load, reserve, loopStore)))
     return failure();
+  if (!context)
+    return success();
   return restoreGeneratedLDSM0(func, builder);
 }
 

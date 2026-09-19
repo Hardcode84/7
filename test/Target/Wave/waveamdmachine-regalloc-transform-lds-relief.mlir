@@ -889,13 +889,12 @@ module attributes {transform.with_named_sequence} {
     // CHECK-SAME: wave.lds_size = 2048 : i64
     // CHECK-SAME: waveamdmachine.lds_spill_bytes = 256 : i64
     // CHECK-NOT: waveamdmachine.regalloc_transform_state
-    // CHECK: [[WAVE_BASE:%.*]], {{%.*}} = waveamdmachine.s_lshl_b32
-    // CHECK: [[USER_BYTES:%.*]] = waveamdmachine.imm 2560
-    // CHECK: [[SPILL_BASE:%.*]], {{%.*}} = waveamdmachine.s_add_i32 [[WAVE_BASE]], [[USER_BYTES]]
-    // CHECK: [[STORE_M0:%.*]] = waveamdmachine.s_mov_m0 [[SPILL_BASE]]
-    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_addtid_b32 [[STORE_M0]],
-    // CHECK: [[LOAD_M0:%.*]] = waveamdmachine.s_mov_m0 [[SPILL_BASE]]
-    // CHECK: waveamdmachine.ds_load_addtid_b32 [[LOAD_M0]] after [[STORE]]
+    // CHECK: [[STORE_ADDR:%.*]] = waveamdmachine.v_lshlrev_b32
+    // CHECK: [[STORE:%.*]] = waveamdmachine.ds_store_b32 [[STORE_ADDR]],
+    // CHECK-SAME: offset 2560
+    // CHECK: [[LOAD_ADDR:%.*]] = waveamdmachine.v_lshlrev_b32
+    // CHECK: waveamdmachine.ds_load_b32 [[LOAD_ADDR]] after [[STORE]]
+    // CHECK-SAME: offset 2560
     func.func @lds_relief_after_fixed_and_dynamic_lds()
         attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>,
                     wave.lds_size = 2048 : i64,
