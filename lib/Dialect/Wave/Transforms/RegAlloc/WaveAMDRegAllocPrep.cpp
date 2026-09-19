@@ -155,6 +155,39 @@ static void eraseRegAfterOps(func::FuncOp func) {
   }
 }
 
+static LogicalResult materializeScheduledAfterCompletionTokens(func::FuncOp func) {
+  WalkResult result = func.walk([&](waveamdmachine::AfterOp op) {
+    SmallVector<Value> tokens;
+    for (Value dependency : op.getDependencies()) {
+      if (isa<waveamdmachine::MemTokenType>(dependency.getType())) {
+        if (!llvm::is_contained(tokens, dependency))
+          tokens.push_back(dependency);
+        continue;
+      }
+
+      Operation *def = dependency.getDefiningOp();
+      if (!def || !waveamdmachine::getWaitcntInfo(def).isIssuer())
+        continue;
+
+      bool foundCompletionToken = false;
+      for (Value value : def->getResults()) {
+        if (!isa<waveamdmachine::MemTokenType>(value.getType()))
+          continue;
+        foundCompletionToken = true;
+        if (!llvm::is_contained(tokens, value))
+          tokens.push_back(value);
+      }
+      if (!foundCompletionToken) {
+        op.emitOpError("memory result dependency has no completion token");
+        return WalkResult::interrupt();
+      }
+    }
+    op.getDependenciesMutable().assign(tokens);
+    return WalkResult::advance();
+  });
+  return failure(result.wasInterrupted());
+}
+
 static bool isDeadCheapRegOp(Operation *op) {
   return op && op->getNumResults() != 0 && allResultsDead(op) &&
          wave::regalloc::isCheapVGPRPressureReliefExpr(op);
@@ -1482,6 +1515,11 @@ LogicalResult mlir::wave::prepareWaveAMDRegAllocIR(func::FuncOp func) {
       return failure();
     targetLimits = std::move(*limits);
   }
+  // The scheduler has consumed value dependencies on `after`. Preserve direct
+  // memory-result completion through the issuer token, then remove the value
+  // edges so that they do not extend register lifetimes through allocation.
+  if (failed(materializeScheduledAfterCompletionTokens(func)))
+    return failure();
   eraseRegAfterOps(func);
   if (failed(splitLiveUpdateTupleBases(func)))
     return failure();
