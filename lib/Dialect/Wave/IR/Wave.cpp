@@ -4526,15 +4526,6 @@ mlir::wave::getIndexExprMaterializationCost(sym::ExprHandle expr) {
 
 bool mlir::wave::shouldUseSimplifiedIndexExpr(sym::ExprHandle candidate,
                                               sym::ExprHandle baseline) {
-  llvm::DenseSet<StringRef> candidateSymbols;
-  llvm::DenseSet<StringRef> baselineSymbols;
-  collectIndexExprFreeSymbols(candidate, candidateSymbols);
-  collectIndexExprFreeSymbols(baseline, baselineSymbols);
-  bool removesSymbols =
-      candidateSymbols.size() < baselineSymbols.size() &&
-      llvm::all_of(
-          candidateSymbols,
-          [&](StringRef name) { return baselineSymbols.contains(name); });
   sym::ExprKind candidateKind = sym::ExprView(candidate).getKind();
   if (candidateKind == sym::ExprKind::Integer)
     return true;
@@ -4547,9 +4538,7 @@ bool mlir::wave::shouldUseSimplifiedIndexExpr(sym::ExprHandle candidate,
     return false;
   if (!baselineCost)
     return true;
-  if (*candidateCost != *baselineCost)
-    return *candidateCost < *baselineCost;
-  return removesSymbols;
+  return *candidateCost <= *baselineCost;
 }
 
 FailureOr<bool> mlir::wave::shouldUseSimplifiedIndexExpr(

@@ -34,7 +34,7 @@ func.func @group_two_cyclic_offsets(
 // -----
 
 // CHECK-LABEL: func.func @group_fact_equivalent_bases(
-// CHECK: %[[INIT:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c, 16*a)">
+// CHECK: %[[INIT:.*]] = wave.index_expr <"32 + 16*a + 4*b + 8*c">
 // CHECK: scf.for {{.*}} iter_args(%[[OFF:.*]] = %[[INIT]])
 // CHECK: %[[PEER:.*]] = wave.index_expr <"8192 + offset"> ["offset"](%[[OFF]])
 // CHECK: wave.ptr_add %arg0, %[[OFF]]

@@ -293,18 +293,17 @@ func.func @global_addr64_two_uniform_products(%out: !wave.ptr<#wave.global, i32>
   return %tok : !wave.mem.token
 }
 
-// SELECT-LABEL: func.func @global_addr64_xor
+// SELECT-LABEL: func.func @global_addr64_disjoint_xor
+// SELECT: waveamdmachine.s_mov_b64_imm 4294967296
 // SELECT: waveamdmachine.s_mov_b64_imm 4
-// SELECT: waveamdmachine.s_mov_b64_imm 1073741824
-// SELECT: waveamdmachine.v_xor_b64
 // SELECT: waveamdmachine.v_mul_u64
 // SELECT: waveamdmachine.v_add_u64
 // SELECT: waveamdmachine.global_store_b32_addr64
-// ASM-LABEL: global_addr64_xor:
-// ASM: v_xor_b32
+// ASM-LABEL: global_addr64_disjoint_xor:
+// ASM-NOT: v_xor_b32
 // ASM: v_mul_lo_u32
 // ASM: global_store_b32 v[{{[0-9]+}}:{{[0-9]+}}], v{{[0-9]+}}, off
-func.func @global_addr64_xor(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
+func.func @global_addr64_disjoint_xor(%out: !wave.ptr<#wave.global, i32>) -> !wave.mem.token attributes {wave.kernel} {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %off = wave.index_expr <"xor(lid, 1073741824)"> ["lid"] (%lane)
       : (!wave.simd<i32, 32>) -> !wave.simd<index, 32>

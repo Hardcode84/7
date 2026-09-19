@@ -887,11 +887,11 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 v[48:51], v1 offset:5120
 		ds_read_b128 v[52:55], v1 offset:6144
 		ds_read_b128 v[56:59], v1 offset:7168
+		v_and_b32_e32 v1, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_lshr_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 7
-		v_and_b32_e32 v1, 63, v0
-		v_add_lshl_u32 v1, s9, v1, 2
+		s_lshl_b32 s9, s9, 9
+		v_lshl_add_u32 v1, v1, 2, s9
 		v_add_u32_e32 v1, 0x20000, v1
 		ds_read_b32 v24, v1
 		s_mov_b32 s9, 0
@@ -901,11 +901,11 @@ wmma_f16_matmul_tiled:
 		s_mov_b32 s9, 0
 		s_waitcnt lgkmcnt(0)
 		scratch_store_dword off, v24, s9 offset:220
+		v_and_b32_e32 v1, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_and_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 8
-		v_and_b32_e32 v1, 63, v0
-		v_add_lshl_u32 v1, s9, v1, 2
+		s_lshl_b32 s9, s9, 10
+		v_lshl_add_u32 v1, v1, 2, s9
 		v_add_u32_e32 v1, 0x20000, v1
 		ds_read_b32 v24, v1 offset:4096
 		s_mov_b32 s9, 0
@@ -1156,21 +1156,21 @@ wmma_f16_matmul_tiled:
 		scratch_store_dword off, v229, s9 offset:464
 		scratch_store_dword off, v230, s9 offset:468
 		scratch_store_dword off, v231, s9 offset:472
+		v_and_b32_e32 v6, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_lshr_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 7
-		s_add_i32 s9, s9, 0x200
-		v_and_b32_e32 v6, 63, v0
-		v_add_lshl_u32 v6, s9, v6, 2
+		s_lshl_b32 s9, s9, 9
+		s_add_i32 s9, s9, 0x800
+		v_lshl_add_u32 v6, v6, 2, s9
 		v_add_u32_e32 v6, 0x20000, v6
 		ds_read_b32 v7, v6
 		ds_read_b32 v74, v6 offset:256
+		v_and_b32_e32 v6, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_and_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 8
-		s_add_i32 s9, s9, 0x200
-		v_and_b32_e32 v6, 63, v0
-		v_add_lshl_u32 v6, s9, v6, 2
+		s_lshl_b32 s9, s9, 10
+		s_add_i32 s9, s9, 0x800
+		v_lshl_add_u32 v6, v6, 2, s9
 		v_add_u32_e32 v6, 0x20000, v6
 		ds_read_b32 v75, v6 offset:4096
 		ds_read_b32 v78, v6 offset:4352

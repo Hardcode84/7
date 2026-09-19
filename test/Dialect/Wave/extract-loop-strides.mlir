@@ -66,14 +66,14 @@ func.func @non_unit_step(%a: !wave.ptr<#wave.global, f16>, %n: i32)
 
 // -----
 
-// CHECK-LABEL: func.func @preserve_cheaper_xor_base
-// CHECK: %[[BASE:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c, 16*a)">
+// CHECK-LABEL: func.func @canonicalize_equal_cost_xor_base
+// CHECK: %[[BASE:.*]] = wave.index_expr <"32 + 16*a + 4*b + 8*c">
 // CHECK: %[[BASE_PTR:.*]] = wave.ptr_add %{{.*}}, %[[BASE]]
 // CHECK: %[[STRIDE:.*]] = wave.index_expr <"128"> []() : () -> index
 // CHECK: scf.for {{.*}} iter_args(%[[PTR:.*]] = %[[BASE_PTR]])
 // CHECK: %[[NEXT:.*]] = wave.ptr_add %[[PTR]], %[[STRIDE]]
 // CHECK: scf.yield %[[NEXT]]
-func.func @preserve_cheaper_xor_base(
+func.func @canonicalize_equal_cost_xor_base(
     %p: !wave.ptr<#wave.global, i8>, %a: !wave.simd<i32, 32>,
     %b: !wave.simd<i32, 32>, %c: !wave.simd<i32, 32>, %n: i32)
     attributes {wave.kernel} {

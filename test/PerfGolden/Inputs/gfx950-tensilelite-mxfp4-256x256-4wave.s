@@ -1230,11 +1230,11 @@ wmma_f16_matmul_tiled:
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[148:151], v[28:31], v[40:43], a[148:151], v17, v68 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4
 		ds_read_b128 v[192:195], v3 offset:7168
 		v_mfma_scale_f32_16x16x128_f8f6f4 a[152:155], v[28:31], v[44:47], a[152:155], v17, v69 op_sel_hi:[0,0,0] cbsz:4 blgp:4
+		v_and_b32_e32 v3, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_lshr_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 8
-		v_and_b32_e32 v3, 63, v0
-		v_add_lshl_u32 v3, s9, v3, 2
+		s_lshl_b32 s9, s9, 10
+		v_lshl_add_u32 v3, v3, 2, s9
 		v_add_u32_e32 v3, 0x20000, v3
 		ds_read_b32 v20, v3
 		s_mov_b32 m0, s15
@@ -1256,11 +1256,11 @@ wmma_f16_matmul_tiled:
 		s_waitcnt lgkmcnt(0)
 		s_nop 0
 		ds_write_addtid_b32 v20 offset:23552
+		v_and_b32_e32 v3, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_and_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 8
-		v_and_b32_e32 v3, 63, v0
-		v_add_lshl_u32 v3, s9, v3, 2
+		s_lshl_b32 s9, s9, 10
+		v_lshl_add_u32 v3, v3, 2, s9
 		v_add_u32_e32 v3, 0x20000, v3
 		ds_read_b32 v108, v3 offset:4096
 		ds_read_b32 v109, v3 offset:4352
@@ -1384,23 +1384,23 @@ wmma_f16_matmul_tiled:
 		ds_read_b128 a[236:239], v14 offset:5120
 		ds_read_b128 a[240:243], v14 offset:6144
 		ds_read_b128 a[244:247], v14 offset:7168
+		v_and_b32_e32 v15, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_lshr_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 8
-		s_add_i32 s9, s9, 0x200
-		v_and_b32_e32 v15, 63, v0
-		v_add_lshl_u32 v15, s9, v15, 2
+		s_lshl_b32 s9, s9, 10
+		s_add_i32 s9, s9, 0x800
+		v_lshl_add_u32 v15, v15, 2, s9
 		v_add_u32_e32 v15, 0x20000, v15
 		ds_read_b32 v16, v15
 		ds_read_b32 v17, v15 offset:256
 		ds_read_b32 v44, v15 offset:512
 		ds_read_b32 v45, v15 offset:768
+		v_and_b32_e32 v15, 63, v0
 		s_lshr_b32 s9, s4, 6
 		s_and_b32 s9, s9, 1
-		s_lshl_b32 s9, s9, 8
-		s_add_i32 s9, s9, 0x200
-		v_and_b32_e32 v15, 63, v0
-		v_add_lshl_u32 v15, s9, v15, 2
+		s_lshl_b32 s9, s9, 10
+		s_add_i32 s9, s9, 0x800
+		v_lshl_add_u32 v15, v15, 2, s9
 		v_add_u32_e32 v15, 0x20000, v15
 		ds_read_b32 v46, v15 offset:4096
 		ds_read_b32 v47, v15 offset:4352

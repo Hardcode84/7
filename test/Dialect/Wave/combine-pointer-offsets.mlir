@@ -372,10 +372,10 @@ func.func @merge_keeps_cheaper_simplification(
 
 // -----
 
-// CHECK-LABEL: func.func @merge_rejects_equal_cost_simplification
-// CHECK: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c)">
+// CHECK-LABEL: func.func @merge_accepts_equal_cost_simplification
+// CHECK: %[[OFF:.*]] = wave.index_expr <"32 + 4*b + 8*c">
 // CHECK: wave.ptr_add %arg0, %[[OFF]]
-func.func @merge_rejects_equal_cost_simplification(
+func.func @merge_accepts_equal_cost_simplification(
     %out: !wave.ptr<#wave.global, i32>,
     %b: !wave.simd<i32, 32>, %c: !wave.simd<i32, 32>)
     attributes {wave.kernel} {
@@ -395,11 +395,11 @@ func.func @merge_rejects_equal_cost_simplification(
 
 // -----
 
-// CHECK-LABEL: func.func @ptr_chain_rejects_equal_cost_simplification
+// CHECK-LABEL: func.func @ptr_chain_accepts_equal_cost_simplification
 // CHECK: wave.index_expr <"xor(32 + 4*b, 8*c)">
-// CHECK: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c)">
+// CHECK: %[[OFF:.*]] = wave.index_expr <"32 + 4*b + 8*c">
 // CHECK: wave.ptr_add %arg0, %[[OFF]]
-func.func @ptr_chain_rejects_equal_cost_simplification(
+func.func @ptr_chain_accepts_equal_cost_simplification(
     %out: !wave.ptr<#wave.global, i32>,
     %b: !wave.simd<i32, 32>, %c: !wave.simd<i32, 32>)
     attributes {wave.kernel} {

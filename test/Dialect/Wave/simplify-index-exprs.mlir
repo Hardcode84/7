@@ -52,12 +52,12 @@ func.func @divisibility_survives_on_live_symbol(%k_raw: i32) -> index {
 
 // -----
 
-// CHECK-LABEL: func.func @preserves_equal_cost_scaled_sum
+// CHECK-LABEL: func.func @canonicalizes_equal_cost_scaled_sum
 // CHECK-SAME: (%[[K:.*]]: i32)
 // CHECK: %[[LANE:.*]] = wave.lane_id : !wave.simd<i32, 32>
-// CHECK: %[[OFF:.*]] = wave.index_expr <"4*(64*K + lid)"> assuming [#wave.pred<"lid >= 0 & -31 + lid <= 0">] ["K", "lid"](%[[K]], %[[LANE]]) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
+// CHECK: %[[OFF:.*]] = wave.index_expr <"256*K + 4*lid"> assuming [#wave.pred<"lid >= 0 & -31 + lid <= 0">] ["K", "lid"](%[[K]], %[[LANE]]) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
 // CHECK: return %[[OFF]] : !wave.simd<index, 32>
-func.func @preserves_equal_cost_scaled_sum(%k: i32)
+func.func @canonicalizes_equal_cost_scaled_sum(%k: i32)
     -> !wave.simd<index, 32> {
   %lane = wave.lane_id : !wave.simd<i32, 32>
   %off = wave.index_expr <"4*(64*K + lid)"> ["K", "lid"](%k, %lane) : (i32, !wave.simd<i32, 32>) -> !wave.simd<index, 32>
@@ -66,14 +66,14 @@ func.func @preserves_equal_cost_scaled_sum(%k: i32)
 
 // -----
 
-// CHECK-LABEL: func.func @preserves_xor_bit_permutation
+// CHECK-LABEL: func.func @canonicalizes_disjoint_xor_bits
 // CHECK-SAME: (%[[A:.*]]: i32, %[[B:.*]]: i32, %[[C:.*]]: i32)
-// CHECK: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c, 16*a)">
+// CHECK: %[[OFF:.*]] = wave.index_expr <"32 + 16*a + 4*b + 8*c">
 // CHECK: return %[[OFF]] : index
-// CANON-LABEL: func.func @preserves_xor_bit_permutation
-// CANON: %[[OFF:.*]] = wave.index_expr <"xor(32 + 4*b, 8*c, 16*a)">
+// CANON-LABEL: func.func @canonicalizes_disjoint_xor_bits
+// CANON: %[[OFF:.*]] = wave.index_expr <"32 + 16*a + 4*b + 8*c">
 // CANON: return %[[OFF]] : index
-func.func @preserves_xor_bit_permutation(%a: i32, %b: i32, %c: i32)
+func.func @canonicalizes_disjoint_xor_bits(%a: i32, %b: i32, %c: i32)
     -> index {
   %off = wave.index_expr <"xor(16*a, xor(32 + 4*b, 8*c))">
       assuming [#wave.pred<"a >= 0 & -1 + a <= 0">,
