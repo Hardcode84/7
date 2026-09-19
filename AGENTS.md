@@ -108,6 +108,14 @@ Same rule covers docstrings, commit bodies, and PR descriptions. Wit is welcome,
   materialization. Late machine or assembly cleanup must not reconstruct index
   algebra.
 
+- **Make algebraic choices explicit.** For every non-trivial algebraic
+  simplification or choice, including a decision not to simplify, document
+  the correctness or cost reason in code or design docs, represent equivalent
+  alternatives with `materialization_variants`, or both. Follow the
+  [materialization variants contract](docs/WaveMaterializationVariantsDesign.md)
+  for equivalence and selection. Preserving current ASM alone is not a reason
+  to block a legal transform.
+
 - **Review superlinear algorithms especially carefully.** State the input sizes
   and worst-case time and memory complexity. Include repeated scans, nested
   traversals, and work across iterations. Check production input bounds and
