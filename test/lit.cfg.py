@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from importlib.metadata import entry_points
 from pathlib import Path
 
 import lit.formats
@@ -17,6 +18,12 @@ config.suffixes = [".mlir", ".py"]
 # Exclude lit's own config files (they share the `.py` suffix); also drop
 # build-system staging dirs that we never want walked.
 config.excludes = ["Inputs", "lit.cfg.py", "lit.site.cfg.py"]
+
+if any(
+    entry.name == "tlx_wave" and entry.value == "wave_tlx"
+    for entry in entry_points(group="triton.backends")
+):
+    config.available_features.add("tlx-wave-backend")
 
 # Surface the staged Wave Python bindings to the test runners. The
 # build target `WavePythonModules` drops everything (the upstream
