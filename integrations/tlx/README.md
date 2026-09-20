@@ -290,7 +290,8 @@ The unified LLVM-versus-Wave performance sweep covers f16 and MXFP GEMMs, GLU,
 and flash attention:
 
 ```bash
-python "$TLX_TRITON_DIR/third_party/tlx/tutorials/run_wave_perf_sweeps.py"
+WAVE_TLX_TRITON_SOURCE_DIR="$TLX_TRITON_DIR" \
+  python integrations/tlx/workloads/run_wave_perf_sweeps.py
 ```
 
 Use the sweep's `--help` output for kernel subsets, input distributions,

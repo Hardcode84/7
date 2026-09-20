@@ -35,6 +35,9 @@ select = ["B", "C4", "E", "F", "I", "PIE", "PTH", "RET", "RUF", "SIM", "UP"]
 "integrations/tlx/src/wave_tlx/*.py" = ["E501"]
 "integrations/tlx/src/wave_tlx/converter/*.py" = ["E501"]
 "integrations/tlx/tests/*.py" = ["E501"]
+# Python rewrites can change Triton JIT control-flow semantics.
+"integrations/tlx/workloads/*.py" = ["ALL"]
+"integrations/tlx/workloads/**/*.py" = ["ALL"]
 
 [tool.mypy]
 python_version = "3.12"

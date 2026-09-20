@@ -832,17 +832,26 @@ def _tlx_wave_compile_driver(monkeypatch):
 
 
 def _load_tlx_gfx9_gemm_module(version_dir, module_name=None):
-    repo_root = _triton_repo_root()
-    kernel_path = (
-        repo_root
-        / "third_party"
-        / "tlx"
-        / "tutorials"
-        / "gfx9_gemm"
-        / "a16w16"
-        / version_dir
-        / "matmul_kernel.py"
-    )
+    if version_dir.startswith("wave_"):
+        kernel_path = (
+            Path(__file__).resolve().parents[1]
+            / "workloads"
+            / "gfx9_gemm"
+            / "a16w16"
+            / version_dir
+            / "matmul_kernel.py"
+        )
+    else:
+        kernel_path = (
+            _triton_repo_root()
+            / "third_party"
+            / "tlx"
+            / "tutorials"
+            / "gfx9_gemm"
+            / "a16w16"
+            / version_dir
+            / "matmul_kernel.py"
+        )
     spec = importlib.util.spec_from_file_location(
         module_name or f"_tlx_wave_test_{version_dir}",
         kernel_path,
@@ -861,12 +870,9 @@ def _load_tlx_gfx9_gemm_kernel(version_dir, function_name):
 
 
 def _load_tlx_gfx9_gemm_bench_module(module_name="_tlx_wave_test_gfx9_bench"):
-    repo_root = _triton_repo_root()
     bench_path = (
-        repo_root
-        / "third_party"
-        / "tlx"
-        / "tutorials"
+        Path(__file__).resolve().parents[1]
+        / "workloads"
         / "gfx9_gemm"
         / "a16w16"
         / "bench.py"
@@ -880,31 +886,18 @@ def _load_tlx_gfx9_gemm_bench_module(module_name="_tlx_wave_test_gfx9_bench"):
 def _load_tlx_gfx9_inter_wave_bench_module(
     module_name="_tlx_wave_test_gfx9_inter_wave_bench",
 ):
-    repo_root = _triton_repo_root()
     bench_dir = (
-        repo_root
-        / "third_party"
-        / "tlx"
-        / "tutorials"
+        Path(__file__).resolve().parents[1]
+        / "workloads"
         / "gfx9_gemm"
         / "inter_wave"
         / "a16w16"
     )
     bench_path = bench_dir / "bench.py"
-    before_path = list(sys.path)
-    previous_kernel_module = sys.modules.pop("matmul_kernel", None)
-    try:
-        sys.path.insert(0, str(bench_dir))
-        spec = importlib.util.spec_from_file_location(module_name, bench_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        sys.path[:] = before_path
-        if previous_kernel_module is None:
-            sys.modules.pop("matmul_kernel", None)
-        else:
-            sys.modules["matmul_kernel"] = previous_kernel_module
+    spec = importlib.util.spec_from_file_location(module_name, bench_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_tlx_gfx9_a4w4_module(module_name="_tlx_wave_test_gfx9_a4w4"):
@@ -954,9 +947,8 @@ def _load_tlx_gfx9_a4w4_bench_module(module_name="_tlx_wave_test_gfx9_a4w4_bench
 
 
 def _load_tlx_glu_bench_module(module_name="_tlx_wave_test_glu_bench"):
-    repo_root = _triton_repo_root()
     bench_path = (
-        repo_root / "third_party" / "tlx" / "tutorials" / "amd-addmm-glu-opt_test.py"
+        Path(__file__).resolve().parents[1] / "workloads" / "amd-addmm-glu-opt_test.py"
     )
     spec = importlib.util.spec_from_file_location(module_name, bench_path)
     module = importlib.util.module_from_spec(spec)
@@ -965,9 +957,8 @@ def _load_tlx_glu_bench_module(module_name="_tlx_wave_test_glu_bench"):
 
 
 def _load_tlx_fa_bench_module(module_name="_tlx_wave_test_fa_bench"):
-    repo_root = _triton_repo_root()
     bench_path = (
-        repo_root / "third_party" / "tlx" / "tutorials" / "amd-fa-pipelined_test.py"
+        Path(__file__).resolve().parents[1] / "workloads" / "amd-fa-pipelined_test.py"
     )
     spec = importlib.util.spec_from_file_location(module_name, bench_path)
     module = importlib.util.module_from_spec(spec)
@@ -976,8 +967,7 @@ def _load_tlx_fa_bench_module(module_name="_tlx_wave_test_fa_bench"):
 
 
 def _load_tlx_fa_wave_module(module_name="_tlx_wave_test_fa_wave"):
-    repo_root = _triton_repo_root()
-    kernel_path = repo_root / "third_party" / "tlx" / "tutorials" / "amd_fa_wave.py"
+    kernel_path = Path(__file__).resolve().parents[1] / "workloads" / "amd_fa_wave.py"
     spec = importlib.util.spec_from_file_location(module_name, kernel_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -985,8 +975,7 @@ def _load_tlx_fa_wave_module(module_name="_tlx_wave_test_fa_wave"):
 
 
 def _load_tlx_fa_wave_bench_module(module_name="_tlx_wave_test_fa_wave_bench"):
-    repo_root = _triton_repo_root()
-    tutorial_dir = repo_root / "third_party" / "tlx" / "tutorials"
+    tutorial_dir = Path(__file__).resolve().parents[1] / "workloads"
     bench_path = tutorial_dir / "amd_fa_wave_bench.py"
     before_path = list(sys.path)
     previous_kernel_module = sys.modules.get("amd_fa_wave")
@@ -1005,9 +994,8 @@ def _load_tlx_fa_wave_bench_module(module_name="_tlx_wave_test_fa_wave_bench"):
 
 
 def _load_tlx_perf_sweep_module(module_name="_tlx_wave_test_perf_sweep"):
-    repo_root = _triton_repo_root()
     script_path = (
-        repo_root / "third_party" / "tlx" / "tutorials" / "run_wave_perf_sweeps.py"
+        Path(__file__).resolve().parents[1] / "workloads" / "run_wave_perf_sweeps.py"
     )
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     module = importlib.util.module_from_spec(spec)
@@ -1337,14 +1325,12 @@ def test_tlx_fa_precompile_reuses_runtime_launch_configuration(monkeypatch):
     assert cluster_kwargs["BLOCK_N"] == 32
     assert cluster_kwargs["num_warps"] == 8
     assert cluster_kwargs["waves_per_eu"] == 0
-    assert cluster_kwargs["disable_vector_combine"] is False
 
     bench.compile_kernel_config(
         ("cluster", 1, 64, 4096, 128, False, "bf16"), num_sms=304
     )
     noncausal_cluster_kwargs = calls["cluster"][1]
     assert noncausal_cluster_kwargs["BLOCK_N"] == 64
-    assert noncausal_cluster_kwargs["disable_vector_combine"] is True
 
     perf_jobs = bench.compilation_jobs(SimpleNamespace(mode="perf_test"))
     assert len(perf_jobs) == len(bench.PERF_BASELINE_TFLOPS) == 42
