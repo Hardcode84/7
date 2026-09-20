@@ -10,20 +10,31 @@ The backend currently targets `gfx942` and `gfx950` in wave64 mode. It is a
 separate backend, selected with `TRITON_DEFAULT_BACKEND=tlx_wave`; it does not
 silently fall back to the AMD LLVM lowering when an operation is unsupported.
 
-## Build and run
+## Quick start
 
-Build Wave with its pinned bundled LLVM and Python bindings:
+Run all commands from the Wave checkout. Use one Python environment for Wave,
+TLX Triton, and the backend package.
+
+### 1. Build Wave
+
+Build Wave against its pinned bundled LLVM. Clear LLVM package overrides so
+CMake cannot select another LLVM installation.
 
 ```bash
+unset LLVM_INSTALL_DIR LLVM_DIR MLIR_DIR Clang_DIR LLD_DIR
 git submodule update --init --recursive
 python build_tools/build_llvm.py --python-bindings -j "$(nproc)"
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_INSTALL_DIR="$PWD/build/llvm-install" \
   -DWAVE_ENABLE_PYTHON_BINDINGS=ON
-cmake --build build -j "$(nproc)"
+cmake --build build --target wave-opt wave-translate WavePythonModules \
+  -j "$(nproc)"
 ```
 
-Install a TLX-enabled Triton checkout, then install this backend as a separate
-distribution:
+### 2. Install TLX Triton and the backend
+
+Set `TLX_TRITON_DIR` to the TLX Triton checkout. Install Triton first, then
+install this backend as a separate editable distribution.
 
 ```bash
 export TLX_TRITON_DIR=../triton
@@ -34,10 +45,30 @@ python -m pip install -e integrations/tlx --no-build-isolation
 Triton discovers the backend through its `triton.backends` entry-point group.
 The backend is not part of the Triton build or `libtriton`.
 
-Select the backend when running a TLX program:
+### 3. Verify the installation
+
+Verify that Triton loads the external package and that this checkout contains
+the required Wave tool.
 
 ```bash
-TRITON_DEFAULT_BACKEND=tlx_wave python path/to/program.py
+python - <<'PY'
+from triton.backends import backends
+
+backend = backends["tlx_wave"]
+assert backend.compiler.__module__ == "wave_tlx.compiler"
+assert backend.driver.__module__ == "wave_tlx.driver"
+print("tlx_wave backend ready")
+PY
+test -x build/bin/wave-opt
+```
+
+### 4. Use the backend
+
+Set `TRITON_DEFAULT_BACKEND` for each TLX program that must compile through
+Wave.
+
+```bash
+TRITON_DEFAULT_BACKEND=tlx_wave python my_tlx_program.py
 ```
 
 The compiler exposes the high-level Wave module as `compiled.asm["wave"]` and
