@@ -31,6 +31,10 @@ select = ["B", "C4", "E", "F", "I", "PIE", "PTH", "RET", "RUF", "SIM", "UP"]
 # FileCheck CHECK patterns embed long MLIR type strings that ruff's 88-col
 # wrap target cannot meaningfully break without changing semantics.
 "test/python/dialects/*.py" = ["E501"]
+# Converter diagnostics and test fixtures contain indivisible MLIR syntax.
+"integrations/tlx/src/wave_tlx/*.py" = ["E501"]
+"integrations/tlx/src/wave_tlx/converter/*.py" = ["E501"]
+"integrations/tlx/tests/*.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

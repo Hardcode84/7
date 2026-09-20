@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wave-tlx-backend"
+version = "0.1.0"
+description = "TLX backend that lowers Triton AMD TTGIR through Wave"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0 WITH LLVM-exception" }
+
+[project.entry-points."triton.backends"]
+tlx_wave = "wave_tlx"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
