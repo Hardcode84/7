@@ -6,9 +6,9 @@ AMD TTGIR pipeline, translates the resulting program into structural
 Wave/WaveAMD IR, and lets Wave perform target scheduling, register allocation,
 and machine lowering.
 
-The backend currently targets `gfx942` and `gfx950` in wave64 mode. It is a
-separate backend, selected with `TRITON_DEFAULT_BACKEND=tlx_wave`; it does not
-silently fall back to the AMD LLVM lowering when an operation is unsupported.
+The backend uses wave64 mode. It is a separate backend, selected with
+`TRITON_DEFAULT_BACKEND=tlx_wave`; it does not silently fall back to the AMD
+LLVM lowering when an operation is unsupported.
 
 ## Quick start
 

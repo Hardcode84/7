@@ -113,7 +113,7 @@ pseudo-random f16 values derived from `--seed`, runs `wave-opt` and
 ```bash
 PYTHONPATH=build/python_packages/wave_mlir \
 python examples/wave/wmma_matmul_tiled.py \
-  --chip=gfx950 --m=32 --n=32 --k=64 --bm=2 --bn=2 \
+  --chip=gfx1100 --m=32 --n=32 --k=64 --bm=2 --bn=2 \
   --wave-k-tiles=2 --compare-cpu --seed=7
 ```
 
