@@ -68,6 +68,10 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
+The helper applies `build_tools/llvm_patches` before the build and checks the
+patch fingerprint before it reuses an install. External LLVM installs must
+include these patches.
+
 Environment overrides for callers who already have a usable LLVM:
 
 | Variable | Meaning |

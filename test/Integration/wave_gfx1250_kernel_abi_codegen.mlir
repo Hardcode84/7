@@ -20,6 +20,13 @@
 // RUN:   | FileCheck %s --check-prefix=KD
 // RUN: llvm-readobj --notes %t.wave.o \
 // RUN:   | FileCheck %s --check-prefix=META
+// RUN: llvm-readobj --file-headers %t.wave.o \
+// RUN:   | FileCheck %s --check-prefix=ELF
+
+// ELF: Flags [ (0x449)
+// ELF-NEXT: EF_AMDGPU_FEATURE_SRAMECC_ANY_V4 (0x400)
+// ELF-NEXT: EF_AMDGPU_MACH_AMDGCN_GFX1250 (0x49)
+// ELF-NEXT: ]
 
 module attributes {
   waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1250"

@@ -1,0 +1,64 @@
+--- a/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
++++ b/llvm/lib/Target/AMDGPU/MCTargetDesc/AMDGPUTargetStreamer.cpp
+@@ -932,8 +932,12 @@
+   // mach.
+   EFlagsV4 |= getElfMach(STI.getCPU());
+
+-  // xnack.
+-  switch (getTargetID()->getXnackSetting()) {
++  // ELF target-ID modes exclude XNACK that is fixed by the processor.
++  AMDGPU::TargetIDSetting XnackSetting = getTargetID()->getXnackSetting();
++  if (!AMDGPU::getFeatureBitset(AMDGPU::parseArchAMDGCN(STI.getCPU()))
++           .test(AMDGPU::FEAT_XNACK_ON_OFF_MODES))
++    XnackSetting = AMDGPU::TargetIDSetting::Unsupported;
++  switch (XnackSetting) {
+   case AMDGPU::TargetIDSetting::Unsupported:
+     EFlagsV4 |= ELF::EF_AMDGPU_FEATURE_XNACK_UNSUPPORTED_V4;
+     break;
+--- /dev/null
++++ b/llvm/test/MC/AMDGPU/hsa-fixed-xnack-flags.s
+@@ -0,0 +1,44 @@
++// RUN: split-file %s %t
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1250 --amdhsa-code-object-version=4 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=GFX1250
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1251 --amdhsa-code-object-version=4 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=GFX1251
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1250-strict --amdhsa-code-object-version=4 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=STRICT
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=4 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=ANY
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=4 --filetype=obj %t/on.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=ON
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=4 --filetype=obj %t/off.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=OFF
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1100 --amdhsa-code-object-version=4 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=NONE
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1250 --amdhsa-code-object-version=5 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=GFX1250
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1251 --amdhsa-code-object-version=5 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=GFX1251
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1250-strict --amdhsa-code-object-version=5 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=STRICT
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=5 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=ANY
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=5 --filetype=obj %t/on.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=ON
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=5 --filetype=obj %t/off.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=OFF
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1100 --amdhsa-code-object-version=5 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=NONE
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1250 --amdhsa-code-object-version=6 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=GFX1250
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1251 --amdhsa-code-object-version=6 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=GFX1251
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1250-strict --amdhsa-code-object-version=6 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=STRICT
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=6 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=ANY
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=6 --filetype=obj %t/on.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=ON
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx950 --amdhsa-code-object-version=6 --filetype=obj %t/off.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=OFF
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx1100 --amdhsa-code-object-version=6 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=NONE
++// RUN: llvm-mc --triple=amdgcn-amd-amdhsa --mcpu=gfx12-5-generic --amdhsa-code-object-version=6 --filetype=obj %t/default.s -o - | llvm-readobj --file-headers - | FileCheck %s --check-prefix=GENERIC
++
++// Fixed hardware XNACK does not add a selectable target-ID mode.
++// GFX1250: Flags [ (0x449)
++// GFX1251: Flags [ (0x45A)
++// STRICT: Flags [ (0x4EB)
++// GENERIC: Flags [ (0x100045B)
++// ANY: Flags [ (0x54F)
++// ON: Flags [ (0x74F)
++// OFF: Flags [ (0x64F)
++// NONE: Flags [ (0x41)
++
++//--- default.s
++s_endpgm
++
++//--- on.s
++.amdgcn_target "amdgcn-amd-amdhsa--gfx950:xnack+"
++s_endpgm
++
++//--- off.s
++.amdgcn_target "amdgcn-amd-amdhsa--gfx950:xnack-"
++s_endpgm
