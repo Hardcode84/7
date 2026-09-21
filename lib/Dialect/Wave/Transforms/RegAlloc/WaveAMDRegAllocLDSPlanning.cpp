@@ -115,7 +115,8 @@ static std::optional<LDSTargetInfo> getLDSTargetInfo(func::FuncOp func) {
   info.addressableLocalMemorySize =
       llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(**sti);
   info.wavefrontSize = *wavefrontSize;
-  info.eusPerCU = llvm::AMDGPU::IsaInfo::getEUsPerCU(**sti);
+  info.eusPerCU =
+      llvm::AMDGPU::getNumWorkGroupSIMDs(llvm::AMDGPU::isFullSIMDMode(**sti));
   return info;
 }
 

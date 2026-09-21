@@ -283,7 +283,7 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.readonly}) -> !transform.any_op {
     %candidates = transform.collect_matching @waveamd_match_materialization_candidates in %root
         : (!transform.any_op) -> !transform.any_op
-    %funcs = transform.get_parent_op %candidates {op_name = "func.func", deduplicate}
+    %funcs = transform.get_parent_op %candidates <{op_name = "func.func", deduplicate}>
         : (!transform.any_op) -> !transform.any_op
     %rclean = transform.apply_registered_pass "waveamd-cleanup-materialization-variants" to %funcs
         : (!transform.any_op) -> !transform.any_op

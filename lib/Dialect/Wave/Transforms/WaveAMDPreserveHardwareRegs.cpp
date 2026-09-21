@@ -222,8 +222,7 @@ public:
 
 private:
   void initializeLiveIn() {
-    for (const std::pair<Value, unsigned> &entry : info.lastUse) {
-      Value value = entry.first;
+    for (const auto &[value, lastUse] : info.lastUse) {
       if (info.definedInBlock.contains(value))
         continue;
       std::optional<wave::HardwareResourceKind> kind =

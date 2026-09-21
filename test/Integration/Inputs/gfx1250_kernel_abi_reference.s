@@ -6,8 +6,9 @@
 	.p2align	8
 	.type	no_scratch,@function
 no_scratch:
-	global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+	s_mov_b64 s[64:65], 0
 	v_nop
+	global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 	s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 	s_mov_b32 s2, ttmp9
 	s_lshr_b32 s5, ttmp6, 12
@@ -102,8 +103,9 @@ no_scratch:
 	.p2align	8
 	.type	z_only,@function
 z_only:
-	global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+	s_mov_b64 s[64:65], 0
 	v_nop
+	global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 	s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 	s_lshr_b32 s4, ttmp7, 16
 	s_lshr_b32 s5, ttmp6, 20
@@ -170,8 +172,9 @@ z_only:
 	.p2align	8
 	.type	with_scratch,@function
 with_scratch:
-	global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+	s_mov_b64 s[64:65], 0
 	v_nop
+	global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 	s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 	s_endpgm
 .Lwith_scratch.end:

@@ -357,7 +357,7 @@ FailureOr<WaveAMDRegisterLimits> getWaveAMDRegisterLimits(Operation *op) {
                                         **sti, /*DynamicVGPRBlockSize=*/0);
   unsigned maxWavesPerEU = capabilities
                                ? capabilities->maxWavesPerEU
-                               : llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(**sti);
+                               : llvm::AMDGPU::getMaxWavesPerEU(gpuKind);
   WaveAMDRegisterLimits limits;
   limits.sgprTupleLegalBases = getSGPRTupleLegalBases(**sti, addressableSGPRs);
   limits.addressableSGPRs = addressableSGPRs;

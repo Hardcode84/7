@@ -4909,8 +4909,11 @@ void IndexExprOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
   patterns.add<CanonicalizeIndexExprOp>(context);
 }
 
+// Generated legacy builders call deprecated overloads.
+LLVM_SUPPRESS_DEPRECATED_DECLARATIONS_PUSH
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOps.cpp.inc"
+LLVM_SUPPRESS_DEPRECATED_DECLARATIONS_POP
 
 #define GET_TYPEDEF_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveOpsTypes.cpp.inc"

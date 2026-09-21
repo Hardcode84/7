@@ -197,7 +197,7 @@
 // PIPELINE-NEXT: %{{.*}} = transform.include @waveamd_backend_postschedule
 // PIPELINE: transform.named_sequence @waveamd_cleanup_materialization_variants
 // PIPELINE: transform.collect_matching @waveamd_match_materialization_candidates
-// PIPELINE: transform.get_parent_op %{{.*}} {op_name = "func.func", deduplicate}
+// PIPELINE: transform.get_parent_op %{{.*}} <{op_name = "func.func", deduplicate}>
 // PIPELINE: transform.apply_registered_pass "waveamd-cleanup-materialization-variants"
 // PIPELINE: transform.named_sequence @waveamd_backend
 // PIPELINE: transform.include @waveamd_backend_preschedule

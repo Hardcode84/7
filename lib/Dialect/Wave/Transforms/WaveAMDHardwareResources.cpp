@@ -142,8 +142,7 @@ static SmallVectorImpl<Value> &liveSet(HardwareResourceKind kind,
 
 static void initializeLiveResources(const ResourceBlockInfo &info,
                                     LiveResources &live) {
-  for (const std::pair<Value, unsigned> &entry : info.lastUse) {
-    Value value = entry.first;
+  for (const auto &[value, lastUse] : info.lastUse) {
     if (info.definedInBlock.contains(value))
       continue;
     std::optional<HardwareResourceKind> kind =

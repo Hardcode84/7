@@ -60,7 +60,7 @@ module attributes {transform.with_named_sequence} {
       %root: !transform.any_op {transform.readonly}) {
     %func = transform.collect_matching @match_func in %root
         : (!transform.any_op) -> !transform.any_op
-    %parent = transform.get_parent_op %func {op_name = "builtin.module"}
+    %parent = transform.get_parent_op %func <{op_name = "builtin.module"}>
         : (!transform.any_op) -> !transform.any_op
     %r = wave.transform.regalloc_loop from %parent body = @iteration
         {max_iterations = 2 : i64}

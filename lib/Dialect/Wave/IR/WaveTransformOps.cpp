@@ -40,8 +40,11 @@
 #include <limits>
 #include <optional>
 
+// Generated legacy builders call deprecated overloads.
+LLVM_SUPPRESS_DEPRECATED_DECLARATIONS_PUSH
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Wave/IR/WaveTransformOps.cpp.inc"
+LLVM_SUPPRESS_DEPRECATED_DECLARATIONS_POP
 
 using namespace mlir;
 

@@ -580,10 +580,10 @@ gfx1250 requires:
 - target-consistent XNACK fields;
 - next-free SGPR/VGPR values rounded with target granules.
 
-The startup `global_prefetch_b8 ... scope:SCOPE_SE` plus `v_nop` sequence used
-by current gfx1250 code generation is a target workaround. Model it as an
-entry-sequence capability and emit it through MCInst before user instructions.
-Keep its reserved input registers visible to entry-register accounting.
+The entry sequence must start with `s_mov_b64 s[64:65], 0`, then `v_nop`,
+then `global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE`. Emit this sequence
+through MCInst when the target requires initial unclaused VMEM. The temporary
+SGPR pair is dead before user instructions and does not overlap ABI inputs.
 Targets with LLVM's wait-xcnt feature also set replay mode through LLVM's
 HWREG encoding.
 

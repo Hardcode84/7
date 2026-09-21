@@ -26,8 +26,9 @@ module attributes {
 } {
 
 // ASM-LABEL: no_scratch:
-// ASM-NEXT: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// ASM-NEXT: s_mov_b64 s[64:65], 0
 // ASM-NEXT: v_nop
+// ASM-NEXT: global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 // ASM-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // ASM-NEXT: s_mov_b32 s2, ttmp9
 // ASM-NEXT: s_lshr_b32 s5, ttmp6, 12
@@ -70,8 +71,9 @@ func.func @no_scratch() attributes {wave.kernel} {
 }
 
 // ASM-LABEL: z_only:
-// ASM-NEXT: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// ASM-NEXT: s_mov_b64 s[64:65], 0
 // ASM-NEXT: v_nop
+// ASM-NEXT: global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 // ASM-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // ASM-NEXT: s_lshr_b32 s4, ttmp7, 16
 // ASM-NEXT: s_lshr_b32 s5, ttmp6, 20
@@ -97,8 +99,9 @@ func.func @z_only() attributes {wave.kernel} {
 }
 
 // ASM-LABEL: with_scratch:
-// ASM-NEXT: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// ASM-NEXT: s_mov_b64 s[64:65], 0
 // ASM-NEXT: v_nop
+// ASM-NEXT: global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 // ASM-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // ASM: .amdhsa_kernel with_scratch
 // ASM: .amdhsa_private_segment_fixed_size 8
@@ -122,8 +125,9 @@ func.func @with_scratch() attributes {
 }
 
 // DIS-LABEL: <no_scratch>:
-// DIS-NEXT: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// DIS-NEXT: s_mov_b64 s[64:65], 0
 // DIS-NEXT: v_nop
+// DIS-NEXT: global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 // DIS-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // DIS-NEXT: s_mov_b32 s2, ttmp9
 // DIS-NEXT: s_lshr_b32 s5, ttmp6, 12
@@ -135,8 +139,9 @@ func.func @with_scratch() attributes {
 // DIS-NEXT: s_add_co_i32 s5, s4, 1
 // DIS-NEXT: s_endpgm
 // DIS-LABEL: <z_only>:
-// DIS-NEXT: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// DIS-NEXT: s_mov_b64 s[64:65], 0
 // DIS-NEXT: v_nop
+// DIS-NEXT: global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 // DIS-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // DIS-NEXT: s_lshr_b32 s4, ttmp7, 16
 // DIS: s_cselect_b32 s4, s4, s6
@@ -144,8 +149,9 @@ func.func @with_scratch() attributes {
 // DIS-NEXT: s_add_co_i32 s5, s4, 1
 // DIS-NEXT: s_endpgm
 // DIS-LABEL: <with_scratch>:
-// DIS-NEXT: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// DIS-NEXT: s_mov_b64 s[64:65], 0
 // DIS-NEXT: v_nop
+// DIS-NEXT: global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 // DIS-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // DIS: s_endpgm
 

@@ -362,11 +362,8 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
   capabilities.isa = llvm::AMDGPU::getIsaVersion(sti.getCPU());
   capabilities.defaultWavefrontSize =
       llvm::AMDGPU::IsaInfo::getWavefrontSize(sti);
-  bool supportsAlternateWaveSize = llvm::AMDGPU::supportsWave32(sti);
-  capabilities.supportsWave32 =
-      capabilities.defaultWavefrontSize == 32 || supportsAlternateWaveSize;
-  capabilities.supportsWave64 =
-      capabilities.defaultWavefrontSize == 64 || supportsAlternateWaveSize;
+  capabilities.supportsWave32 = isAMDGPUWavefrontSizeSupported(sti, 32);
+  capabilities.supportsWave64 = isAMDGPUWavefrontSizeSupported(sti, 64);
   capabilities.addressableSGPRs = llvm::AMDGPU::getAddressableNumSGPRs(kind);
   capabilities.addressableVGPRs =
       llvm::AMDGPU::IsaInfo::getAddressableNumArchVGPRs(sti);
@@ -380,9 +377,11 @@ mlir::waveamdmachine::getAMDGPUTargetCapabilities(
   capabilities.addressableLocalMemoryBytes =
       llvm::AMDGPU::IsaInfo::getAddressableLocalMemorySize(sti);
   capabilities.localMemoryBankCount = getAMDGPULocalMemoryBankCount(sti);
-  capabilities.executionUnitsPerCU = llvm::AMDGPU::IsaInfo::getEUsPerCU(sti);
-  capabilities.maxWavesPerEU = llvm::AMDGPU::IsaInfo::getMaxWavesPerEU(sti);
-  capabilities.totalVGPRs = llvm::AMDGPU::IsaInfo::getTotalNumVGPRs(sti);
+  capabilities.executionUnitsPerCU =
+      llvm::AMDGPU::getNumWorkGroupSIMDs(llvm::AMDGPU::isFullSIMDMode(sti));
+  capabilities.maxWavesPerEU = llvm::AMDGPU::getMaxWavesPerEU(kind);
+  capabilities.totalVGPRs = llvm::AMDGPU::getTotalNumVGPRs(
+      kind, capabilities.defaultWavefrontSize == 32);
   capabilities.scheduleIssueWidth = sti.getSchedModel().IssueWidth;
   capabilities.maxUserSGPRs = llvm::AMDGPU::getMaxNumUserSGPRs(sti);
   if (sti.hasFeature(llvm::AMDGPU::Feature45BitNumRecordsBufferResource)) {
@@ -683,7 +682,13 @@ bool mlir::waveamdmachine::isAMDGPUWavefrontSizeSupported(
   unsigned defaultWidth = llvm::AMDGPU::IsaInfo::getWavefrontSize(sti);
   if (width == defaultWidth)
     return true;
-  return (width == 32 || width == 64) && llvm::AMDGPU::supportsWave32(sti);
+  const llvm::AMDGPU::AMDGPUFeatureBitset &features =
+      llvm::AMDGPU::getFeatureBitset(
+          llvm::AMDGPU::parseArchAMDGCN(sti.getCPU()));
+  return (width == 32 || width == 64) &&
+         features.test(llvm::AMDGPU::FEAT_SUPPORTS_WAVE32) &&
+         !features.test(llvm::AMDGPU::FEAT_WAVEFRONTSIZE32) &&
+         !features.test(llvm::AMDGPU::FEAT_WAVEFRONTSIZE64);
 }
 
 static FailureOr<unsigned> readWavefrontSizeAttr(ModuleOp mod,
@@ -785,8 +790,8 @@ mlir::waveamdmachine::getAMDGPUD16PreservesUnusedBits(Operation *op,
   if (target->isa.Major < 9)
     return false;
 
-  bool supportsSRAMECC = llvm::AMDGPU::getArchAttrAMDGCN(target->kind) &
-                         llvm::AMDGPU::FEATURE_SRAMECC;
+  bool supportsSRAMECC = llvm::AMDGPU::getFeatureBitset(target->kind)
+                             .test(llvm::AMDGPU::FEAT_SRAMECC_SUPPORT);
   if (!supportsSRAMECC)
     return true;
   if (std::optional<bool> sramecc = getTargetIDFeature(*target, "sramecc"))

@@ -50,7 +50,6 @@ path = [
     "**/*.in",
     "LICENSE.TXT",
     "llvm-commit.txt",
-    "build_tools/llvm_patches/*.patch",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 wave-mlir contributors"

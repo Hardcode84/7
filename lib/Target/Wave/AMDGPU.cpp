@@ -2351,33 +2351,23 @@ private:
     return getIntAttr(func, "waveamdmachine.sgpr_count", *minimum);
   }
 
-  LogicalResult
-  emitKernelEntrySequence(func::FuncOp func,
-                          const wave::WaveAMDKernelEntryRegs &entryRegs) {
+  LogicalResult emitKernelEntrySequence() {
     if (requiresInitialUnclausedVmem()) {
-      if (entryRegs.kernargSegmentPtrWidth != 2)
-        return func.emitError(
-            "wave-to-amdgpu-asm target entry sequence requires an SGPR pair "
-            "kernarg pointer");
-      unsigned kernargPtr = mcSGPRReg(entryRegs.kernargSegmentPtrSGPR,
-                                      entryRegs.kernargSegmentPtrWidth);
-      unsigned workitemX = mcVGPRReg(entryRegs.workitemIdVGPR(0), /*width=*/1);
-      unsigned requiredKernargPtr =
-          llvm::AMDGPU::getMCReg(llvm::AMDGPU::SGPR0_SGPR1, *sti).id();
-      unsigned requiredWorkitemX =
+      unsigned address =
+          llvm::AMDGPU::getMCReg(llvm::AMDGPU::SGPR64_SGPR65, *sti).id();
+      unsigned workitemX =
           llvm::AMDGPU::getMCReg(llvm::AMDGPU::VGPR0, *sti).id();
-      if (kernargPtr != requiredKernargPtr || workitemX != requiredWorkitemX)
-        return func.emitError(
-            "wave-to-amdgpu-asm entry register layout does not satisfy "
-            "target prologue operands");
-      if (failed(emitMC(
-              globalPrefetchB8(),
-              {llvm::MCOperand::createReg(kernargPtr),
-               llvm::MCOperand::createReg(workitemX),
-               llvm::MCOperand::createImm(0),
-               llvm::MCOperand::createImm(llvm::AMDGPU::CPol::SCOPE_SE |
-                                          llvm::AMDGPU::CPol::TH_RT)})) ||
-          failed(emitMC(vNop(), {})))
+      // Hardware requires a null-address prefetch before kernel VMEM.
+      if (failed(emitMC(sMovB64(), {llvm::MCOperand::createReg(address),
+                                    llvm::MCOperand::createImm(0)})) ||
+          failed(emitMC(vNop(), {})) ||
+          failed(
+              emitMC(globalPrefetchB8(),
+                     {llvm::MCOperand::createReg(address),
+                      llvm::MCOperand::createReg(workitemX),
+                      llvm::MCOperand::createImm(0),
+                      llvm::MCOperand::createImm(llvm::AMDGPU::CPol::SCOPE_SE |
+                                                 llvm::AMDGPU::CPol::TH_RT)})))
         return failure();
     }
 
@@ -2627,7 +2617,7 @@ private:
     mcBuffer.clear();
     llvm::SaveAndRestore<bool> saveBuffering(bufferingMC, true);
     llvm::SaveAndRestore<Operation *> saveSource(emissionSource, func);
-    if (isKernel && failed(emitKernelEntrySequence(func, entryRegs)))
+    if (isKernel && failed(emitKernelEntrySequence()))
       return failure();
     if (emitPreloadCompatProlog) {
       std::string realEntryLabel = funcLabelPrefix + ".kernarg_preload_entry";

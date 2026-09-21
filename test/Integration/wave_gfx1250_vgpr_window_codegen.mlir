@@ -17,8 +17,9 @@ module attributes {
 } {
 
 // ASM-LABEL: automatic_vgpr_window_codegen:
-// ASM: global_prefetch_b8 v0, s[0:1] scope:SCOPE_SE
+// ASM: s_mov_b64 s[64:65], 0
 // ASM-NEXT: v_nop
+// ASM-NEXT: global_prefetch_b8 v0, s[64:65] scope:SCOPE_SE
 // ASM-NEXT: s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 25, 1), 1
 // ASM: windowed:
 // ASM-NEXT: s_nop 0
