@@ -1805,14 +1805,15 @@ def test_tlx_wave_gfx9_a4w4_scale_loads_keep_requested_packet_layouts(
 
     a_load = re.search(
         r"amdg\.buffer_load %a_scales_ptr\[[^\]]+\] "
-        r"\{tlx\.layout_is_explicit\} : tensor<256x8xi8, (#[^>]+)>",
+        r": tensor<256x8xi8, (#[^>]+)>",
         ttgir,
     )
     b_load = re.search(
         r"amdg\.buffer_load %b_scales_ptr\[[^\]]+\] "
-        r"\{tlx\.layout_is_explicit\} : tensor<128x8xi8, (#[^>]+)>",
+        r": tensor<128x8xi8, (#[^>]+)>",
         ttgir,
     )
+    assert "tlx.layout_is_explicit" not in ttgir
     assert a_load is not None
     assert b_load is not None
     assert re.search(
