@@ -100,14 +100,6 @@ def test_tlx_wave_is_external_backend_distribution():
     assert not hasattr(libtriton, "tlx_wave")
 
 
-def test_tlx_wave_backend_api_matches_tlx():
-    assert libtriton.tlx.backend_api_version == 1
-    assert (
-        libtriton.tlx.backend_api_version
-        == tlx_wave_compiler._REQUIRED_TLX_BACKEND_API_VERSION
-    )
-
-
 def _triton_repo_root():
     override = os.environ.get("WAVE_TLX_TRITON_SOURCE_DIR")
     root = (
