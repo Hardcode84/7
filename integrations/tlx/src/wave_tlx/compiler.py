@@ -138,6 +138,7 @@ class TLXWaveBackend(amd_compiler.HIPBackend):
             source="tlx_wave_enable_multi_wave_specialize",
         )
         opts["backend_name"] = "tlx_wave"
+        opts.setdefault("relax_local_load_layout_anchor", True)
         # Match the AMD/HIP backend contract: matrix_instr_nonkdim=0 leaves
         # Triton's AMD matmul pass free to derive the MFMA shape from the tile.
         # The bridge validates the concrete TTGIR layout before emitting Wave IR.

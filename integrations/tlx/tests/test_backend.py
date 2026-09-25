@@ -21827,6 +21827,13 @@ def test_tlx_wave_backend_defaults_and_accepts_mfma_options(monkeypatch):
 
     default_options = backend.parse_options({})
     assert default_options.matrix_instr_nonkdim == 0
+    assert default_options.relax_local_load_layout_anchor is True
+    assert (
+        backend.parse_options(
+            {"relax_local_load_layout_anchor": False}
+        ).relax_local_load_layout_anchor
+        is False
+    )
     assert not hasattr(backend.parse_options({}), "tlx_wave_schedule_max_region_ops")
     assert default_options.tlx_wave_enable_multi_wave_specialize is False
     assert (
