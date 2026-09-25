@@ -5459,12 +5459,20 @@ def _convert_sched_barrier(builder, op):
             "rocdl.sched.barrier must not produce values",
             source_op_index=op.index,
         )
+    mask = int(op.attrs.get("mask", 0) or 0)
+    if mask != 0:
+        fail(
+            "TLXW_OP_UNSUPPORTED_SCHED_BARRIER_MASK",
+            STAGE,
+            "masked ROCDL scheduling barriers require class-aware Wave lowering",
+            source_op_index=op.index,
+        )
     border = op.attrs.get("triton.warp_pipeline.border")
     builder.add_op(
         "sched_barrier",
         attrs={
             "border": "" if border is None else str(border),
-            "mask": int(op.attrs.get("mask", 0) or 0),
+            "mask": mask,
         },
         source_op_index=op.index,
     )

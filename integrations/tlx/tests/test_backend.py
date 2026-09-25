@@ -5656,7 +5656,7 @@ def test_tlx_wave_converter_pipeline_lowers_sched_barrier(tmp_path):
     del ctx
 
 
-def test_tlx_wave_converter_pipeline_lowers_partial_sched_barrier(tmp_path):
+def test_tlx_wave_converter_pipeline_rejects_partial_sched_barrier(tmp_path):
     local_func = """
   tt.func public @converter_partial_sched_barrier() attributes {noinline = false} {
     rocdl.sched.barrier valu
@@ -5665,11 +5665,9 @@ def test_tlx_wave_converter_pipeline_lowers_partial_sched_barrier(tmp_path):
 """
     mod, ctx = _parse_ttgir(tmp_path, local_func, num_warps=1)
 
-    output = converter_pipeline.convert_ttgir_to_wave(mod)
-
-    assert output.emitted_module.text.count("wave.sched_barrier") == 1
-    assert "wave.barrier" not in output.emitted_module.text
-    _run_wave_verify(output.emitted_module.text)
+    with pytest.raises(converter_diagnostics.Diagnostic) as exc_info:
+        converter_pipeline.convert_ttgir_to_wave(mod)
+    assert exc_info.value.code == "TLXW_OP_UNSUPPORTED_SCHED_BARRIER_MASK"
     del ctx
 
 

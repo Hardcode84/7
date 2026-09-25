@@ -636,7 +636,7 @@ def _accumulate_prefix_body(
     acc0 = _pv_mfma(p0, value_fragments.v00, acc0, p_layout, v_layout, mma_layout)
     acc1 = _pv_mfma(p0, value_fragments.v01, acc1, p_layout, v_layout, mma_layout)
     acc2 = _pv_mfma(p0, value_fragments.v02, acc2, p_layout, v_layout, mma_layout)
-    tlx.sched_barrier()
+    tlx.amd_sched_barrier()
     acc3 = _pv_mfma(p0, value_fragments.v03, acc3, p_layout, v_layout, mma_layout)
     acc0 = _pv_mfma(p1, value_fragments.v10, acc0, p_layout, v_layout, mma_layout)
     acc1 = _pv_mfma(p1, value_fragments.v11, acc1, p_layout, v_layout, mma_layout)
