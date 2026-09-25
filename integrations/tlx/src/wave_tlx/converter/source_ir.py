@@ -78,3 +78,4 @@ class SourceProgram:
     values: dict[int, SourceValue]
     regions: tuple[SourceRegion, ...]
     top_region_id: int
+    context_owner: object | None = None

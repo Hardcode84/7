@@ -13,6 +13,10 @@ LinearLayout = _linear_layout.LinearLayout
 STAGE = "type_layout"
 
 
+def _linear_layout_owner(linear):
+    return linear if isinstance(linear, LinearLayout) else None
+
+
 @dataclass(frozen=True)
 class LayoutMap:
     layout_map_id: int
@@ -65,13 +69,20 @@ class _MmaComponentModel:
 
 
 def build_layout_map(
-    layout_map_id, value_id, source_type, lane_width, warp_count=1, block_count=1
+    layout_map_id,
+    value_id,
+    source_type,
+    lane_width,
+    warp_count=1,
+    block_count=1,
+    *,
+    context_owner=None,
 ):
     if source_type.kind not in {"tensor", "memdesc"}:
         return None
     attr = source_type.encoding_attr
     kind, properties = _layout_kind_and_properties(
-        attr, value_id, encoding=str(source_type.encoding or "")
+        attr, value_id, context_owner, encoding=str(source_type.encoding or "")
     )
     distributed_kinds = {
         "amd_mfma",
@@ -85,8 +96,12 @@ def build_layout_map(
     if source_type.kind == "memdesc" and source_type.alloc_shape:
         canonical_shape = tuple(source_type.alloc_shape[-len(source_type.shape) :])
     if kind in distributed_kinds:
-        linear_layout = _linear_layout.to_linear_layout(canonical_shape, attr)
+        assert context_owner is not None, "source layout requires MLIR context owner"
+        linear_layout = _linear_layout.to_linear_layout(
+            canonical_shape, attr, context_owner
+        )
     elif kind in {"shared_linear", "swizzled_shared"}:
+        assert context_owner is not None, "source layout requires MLIR context owner"
         component_rank = len(properties["order"])
         if component_rank <= 0 or component_rank > len(canonical_shape):
             fail(
@@ -96,7 +111,7 @@ def build_layout_map(
                 source_value_id=value_id,
             )
         linear_layout = _linear_layout.to_linear_layout(
-            canonical_shape[-component_rank:], attr
+            canonical_shape[-component_rank:], attr, context_owner
         )
     elif kind == "padded_shared":
         # Padding is composed after the canonical linear component.
@@ -233,6 +248,7 @@ def direct_to_lds_packet_layout(
         tuple(f"dim{dim}" for dim in range(len(shape))),
         shape,
         False,
+        _linear_layout_owner(component),
     )
     if not linear.is_surjective():
         return None
@@ -245,19 +261,23 @@ def direct_to_lds_packet_layout(
         linear_layout_in_dim_size(linear, "register"),
         lane_width,
         {"direct_to_lds_packet": True},
-        linear,
+        _linear_layout_owner(linear),
     )
 
 
-def _layout_kind_and_properties(attr, value_id, *, encoding=None):
+def _layout_kind_and_properties(attr, value_id, context_owner, *, encoding=None):
     if attr is None:
         return "none", {}
     if _attr_bool(attr, "is_tlx_no_verify_layout"):
         inner = _attr_value(attr, "get_tlx_no_verify_layout")
-        return _layout_kind_and_properties(inner, value_id, encoding=str(inner))
+        return _layout_kind_and_properties(
+            inner, value_id, context_owner, encoding=str(inner)
+        )
     if _attr_bool(attr, "is_tlx_user_layout"):
         inner = _attr_value(attr, "get_tlx_user_layout")
-        return _layout_kind_and_properties(inner, value_id, encoding=str(inner))
+        return _layout_kind_and_properties(
+            inner, value_id, context_owner, encoding=str(inner)
+        )
     if _attr_bool(attr, "is_blocked_encoding"):
         return "blocked", {
             "size_per_thread": _int_tuple(
@@ -287,7 +307,7 @@ def _layout_kind_and_properties(attr, value_id, *, encoding=None):
     if _attr_bool(attr, "is_slice_encoding"):
         parent = _attr_value(attr, "get_slice_parent")
         parent_kind, parent_properties = _layout_kind_and_properties(
-            parent, value_id, encoding=str(parent or "")
+            parent, value_id, context_owner, encoding=str(parent or "")
         )
         return "slice", {
             "dim": int(_attr_value(attr, "get_slice_dim")),
@@ -297,7 +317,7 @@ def _layout_kind_and_properties(attr, value_id, *, encoding=None):
     if _attr_bool(attr, "is_dot_operand_encoding"):
         parent = _attr_value(attr, "get_dot_operand_parent")
         parent_kind, parent_properties = _layout_kind_and_properties(
-            parent, value_id, encoding=str(parent or "")
+            parent, value_id, context_owner, encoding=str(parent or "")
         )
         return "dot_operand", {
             "op_idx": int(_attr_value(attr, "get_dot_operand_op_idx")),
@@ -330,7 +350,9 @@ def _layout_kind_and_properties(attr, value_id, *, encoding=None):
     if _attr_bool(attr, "is_shared_linear_encoding"):
         return "shared_linear", {
             "alignment": int(_attr_value(attr, "get_shared_linear_alignment")),
-            "linear_component": _attr_value(attr, "get_shared_linear_layout"),
+            "linear_component": _attr_value(
+                attr, "get_shared_linear_layout", context_owner
+            ),
             "order": _int_tuple(_attr_value(attr, "get_shared_linear_order")),
         }
     if _attr_bool(attr, "is_padded_shared_encoding"):
@@ -338,7 +360,9 @@ def _layout_kind_and_properties(attr, value_id, *, encoding=None):
             "intervals": _int_tuple(_attr_value(attr, "get_padded_shared_intervals")),
             "paddings": _int_tuple(_attr_value(attr, "get_padded_shared_paddings")),
             "order": _int_tuple(_attr_value(attr, "get_padded_shared_order")),
-            "linear_component": _attr_value(attr, "get_padded_shared_linear_component"),
+            "linear_component": _attr_value(
+                attr, "get_padded_shared_linear_component", context_owner
+            ),
         }
     fail(
         "TLXW_TYPE_UNSUPPORTED_LAYOUT",
@@ -870,6 +894,7 @@ def relabel_linear_output(linear, target_shape, *, order=None):
         tuple(f"dim{index}" for index in range(len(target_shape))),
         target_shape,
         False,
+        linear,
     )
 
 
@@ -1428,6 +1453,7 @@ def local_memory_bit_offset_relation(
                 tuple(f"dim{dim}" for dim in range(len(physical_shape))),
                 physical_shape,
                 False,
+                _linear_layout_owner(item_linear),
             )
         physical_layout = _compose_linear_layouts(
             item_linear,
@@ -2184,6 +2210,7 @@ def _complete_packet_physical_dims(linear):
         [str(name) for name, _size in linear.out_dims],
         [int(size) for _name, size in linear.out_dims],
         False,
+        _linear_layout_owner(linear),
     )
 
 
@@ -2238,6 +2265,7 @@ def _packet_item_linear_layout(
         physical_names,
         [physical_extents[name] for name in physical_names],
         False,
+        _linear_layout_owner(linear),
     )
     return _compose_linear_layouts(adapter, linear)
 
@@ -2271,6 +2299,7 @@ def _compose_linear_layouts(inner, outer):
         outer_outputs,
         [int(extent) for _name, extent in outer.out_dims],
         False,
+        _linear_layout_owner(outer),
     )
 
 
@@ -2300,6 +2329,7 @@ def _joined_packet_layout(layout):
         [name for name, _size in out_dims] + [selector],
         [size for _name, size in out_dims] + [2],
         False,
+        _linear_layout_owner(linear),
     )
 
 
@@ -2406,6 +2436,7 @@ def _packet_destination_layout(
         [name for name, _size in source_dims],
         source_shape,
         False,
+        _linear_layout_owner(result),
     )
 
 
@@ -2583,6 +2614,7 @@ def _preferred_packet_relation(
         list(_PACKET_PHYSICAL_DIMS),
         [physical_extents[name] for name in _PACKET_PHYSICAL_DIMS],
         False,
+        _linear_layout_owner(source),
     )
 
 
@@ -2713,7 +2745,7 @@ def _attr_bool(attr, method):
     return bool(fn()) if fn is not None else False
 
 
-def _attr_value(attr, method):
+def _attr_value(attr, method, *args):
     fn = getattr(attr, method, None)
     if fn is None:
         fail(
@@ -2721,7 +2753,7 @@ def _attr_value(attr, method):
             STAGE,
             f"layout encoding is missing {method}",
         )
-    return fn()
+    return fn(*args)
 
 
 def _int_tuple(values):

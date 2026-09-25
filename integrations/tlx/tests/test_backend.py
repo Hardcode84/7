@@ -1,4 +1,5 @@
 import ast
+import gc
 import importlib.util
 import math
 import os
@@ -1804,13 +1805,11 @@ def test_tlx_wave_gfx9_a4w4_scale_loads_keep_requested_packet_layouts(
     wave = next(cache_dir.rglob("_a4w4_kernel.wave")).read_text(errors="ignore")
 
     a_load = re.search(
-        r"amdg\.buffer_load %a_scales_ptr\[[^\]]+\] "
-        r": tensor<256x8xi8, (#[^>]+)>",
+        r"amdg\.buffer_load %a_scales_ptr\[[^\]]+\] " r": tensor<256x8xi8, (#[^>]+)>",
         ttgir,
     )
     b_load = re.search(
-        r"amdg\.buffer_load %b_scales_ptr\[[^\]]+\] "
-        r": tensor<128x8xi8, (#[^>]+)>",
+        r"amdg\.buffer_load %b_scales_ptr\[[^\]]+\] " r": tensor<128x8xi8, (#[^>]+)>",
         ttgir,
     )
     assert "tlx.layout_is_explicit" not in ttgir
@@ -3420,6 +3419,7 @@ def test_tlx_wave_local_load_layout_flows_through_reshape_and_loop(tmp_path):
                 64,
                 4,
                 1,
+                context_owner=source.context_owner,
             ).linear_layout
         )
     for op in source.ops:
@@ -3447,7 +3447,13 @@ def test_tlx_wave_local_load_layout_flows_through_reshape_and_loop(tmp_path):
     shared_load = next(op for op in shared_source.ops if op.name == "ttg.local_load")
     load_id = shared_load.results[0]
     original = converter_layouts.build_layout_map(
-        0, load_id, shared_source.values[load_id].type, 64, 4, 1
+        0,
+        load_id,
+        shared_source.values[load_id].type,
+        64,
+        4,
+        1,
+        context_owner=shared_source.context_owner,
     )
     actual = shared_types.layouts[shared_types.values[load_id].layout_map_id]
     assert actual.linear_layout == original.linear_layout
@@ -3545,9 +3551,9 @@ def test_tlx_wave_converter_type_layout_reuses_equivalent_layout_analysis(
         calls += 1
         return original(*args, **kwargs)
 
-    def counted_to_linear_layout(shape, attr):
+    def counted_to_linear_layout(shape, attr, context_owner):
         canonical_calls.append((tuple(shape), attr))
-        return original_to_linear_layout(shape, attr)
+        return original_to_linear_layout(shape, attr, context_owner)
 
     monkeypatch.setattr(
         converter_types,
@@ -12859,7 +12865,17 @@ def test_tlx_wave_converter_packetizes_padded_dma_into_memdesc_subslice(tmp_path
     wave = _run_wave_lower_symbolic_memory(raw_wave)
     assert wave.count("waveamd.dma_load_lds") == 1
     _run_wave_verify(wave)
-    del ctx
+    alloc_op = next(
+        op for op in output.source_program.ops if op.name == "ttg.local_alloc"
+    )
+    source_type = output.source_program.values[alloc_op.results[0]].type
+    attr = source_type.encoding_attr
+    component = attr.get_padded_shared_linear_component(ctx)
+    with pytest.raises(ValueError, match="layout and context must match"):
+        attr.get_padded_shared_linear_component(ir.context())
+    del output, mod, ctx, alloc_op, source_type, attr
+    gc.collect()
+    assert component.apply({str(name): 0 for name, _ in component.bases}) == {"dim0": 0}
 
 
 def test_tlx_wave_converter_rejects_out_of_bounds_memdesc_subslice():
@@ -15386,7 +15402,20 @@ def test_tlx_wave_converter_preserves_memdesc_reshape_as_structural_view(tmp_pat
     assert reshape_layout.kind == "shared_linear"
     assert reshape_layout.shape == (256, 64)
     _run_wave_verify(output.emitted_module.text)
-    del ctx
+    source_reshape = next(
+        op for op in output.source_program.ops if op.name == "ttg.memdesc_reshape"
+    )
+    source_type = output.source_program.values[source_reshape.results[0]].type
+    attr = source_type.encoding_attr
+    component = attr.get_shared_linear_layout(ctx)
+    with pytest.raises(ValueError, match="layout and context must match"):
+        attr.get_shared_linear_layout(ir.context())
+    del output, mod, ctx, source_reshape, source_type, attr
+    gc.collect()
+    assert component.apply({str(name): 0 for name, _ in component.bases}) == {
+        "dim0": 0,
+        "dim1": 0,
+    }
 
 
 def test_tlx_wave_converter_lowers_replicated_generic_linear_make_range(tmp_path):
@@ -16147,12 +16176,55 @@ def test_tlx_wave_distributed_layouts_are_canonical_triton_layouts(tmp_path):
         canonical = triton_linear_layout.to_linear_layout(
             source_type.shape,
             source_type.encoding_attr,
+            source.context_owner,
         )
         assert layout.linear_layout == canonical
         assert (
             tuple(int(size) for _name, size in canonical.out_dims) == source_type.shape
         )
-    del ctx
+        assert canonical.apply({str(name): 0 for name, _ in canonical.bases}) == {
+            f"dim{index}": 0 for index in range(len(source_type.shape))
+        }
+    with pytest.raises(ValueError, match="layout and context must match"):
+        triton_linear_layout.to_linear_layout(
+            source_type.shape,
+            source_type.encoding_attr,
+            ir.context(),
+        )
+    retained = canonical
+    del mod, ctx, source, converted, constants, op, source_type, layout, canonical
+    gc.collect()
+    assert retained.apply({str(name): 0 for name, _ in retained.bases}) == {
+        "dim0": 0,
+        "dim1": 0,
+    }
+    derived = LinearLayout.from_bases(
+        retained.bases,
+        [str(name) for name, _ in retained.out_dims],
+        [int(size) for _, size in retained.out_dims],
+        False,
+        retained,
+    )
+    del retained
+    gc.collect()
+    assert derived.apply({str(name): 0 for name, _ in derived.bases}) == {
+        "dim0": 0,
+        "dim1": 0,
+    }
+    standalone = LinearLayout.from_bases(
+        derived.bases,
+        [str(name) for name, _ in derived.out_dims],
+        [int(size) for _, size in derived.out_dims],
+        False,
+    )
+    with pytest.raises(ValueError, match="linear layouts must use the same context"):
+        derived.compose(standalone)
+    inverse = derived.pseudoinvert()
+    del derived
+    gc.collect()
+    assert set(inverse.apply({str(name): 0 for name, _ in inverse.bases}).values()) == {
+        0
+    }
 
 
 @pytest.mark.parametrize(
@@ -16355,6 +16427,7 @@ def test_tlx_wave_converter_rejects_modular_distributed_ownership(tmp_path):
             lane_width=64,
             warp_count=1,
             block_count=1,
+            context_owner=source.context_owner,
         )
 
     diagnostic = exc_info.value

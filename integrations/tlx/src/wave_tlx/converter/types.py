@@ -50,6 +50,7 @@ def convert_source_program(program):
                 lane_width,
                 warp_count,
                 block_count,
+                context_owner=program.context_owner,
             )
         template = layout_templates[layout_key]
         layout = (
