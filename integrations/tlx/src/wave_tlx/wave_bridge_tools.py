@@ -56,6 +56,7 @@ def _candidate_wave_tool_paths(tool_name, override=None):
 
     for wave_build_dir in _wave_build_dirs():
         yield wave_build_dir / "bin" / tool_name
+        yield wave_build_dir / "llvm-install" / "bin" / tool_name
 
     installed = shutil.which(tool_name)
     if installed:

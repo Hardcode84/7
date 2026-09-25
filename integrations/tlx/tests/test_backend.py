@@ -3,7 +3,6 @@ import importlib.util
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -38,6 +37,7 @@ if "tlx_wave" in backends:
     from wave_tlx.converter import domains as converter_domains
     from wave_tlx.converter import emission as converter_emission
     from wave_tlx.converter import facts as converter_facts
+    from wave_tlx.converter import invariant_bits as converter_invariant_bits
     from wave_tlx.converter import (
         layout_domains as converter_layout_domains,
     )
@@ -64,6 +64,7 @@ else:
     converter_domains = None
     converter_emission = None
     converter_facts = None
+    converter_invariant_bits = None
     converter_layout_domains = None
     converter_layouts = None
     converter_op_conversion = None
@@ -400,7 +401,17 @@ def _assert_packet_relation_semantics(target_program, op, relations, attrs):
                         oracle_attrs,
                         selector,
                     )
-                    assert source_coords == expected, (
+                    invariant_bits = frozenset(attrs.get("source_invariant_bits", ()))
+                    source_offset = 0
+                    equivalent = True
+                    for actual, wanted, extent in zip(
+                        source_coords, expected, source_shape, strict=True
+                    ):
+                        for bit in range(int(extent).bit_length() - 1):
+                            if source_offset + bit not in invariant_bits:
+                                equivalent &= ((actual ^ wanted) & (1 << bit)) == 0
+                        source_offset += int(extent).bit_length() - 1
+                    assert equivalent, (
                         kind,
                         point,
                         mapped,
@@ -429,6 +440,8 @@ def _assert_mechanical_layout_transform(
     else:
         expected = {}
     attrs = converter_target_ir.attrs_dict(op)
+    if "source_invariant_bits" in attrs:
+        expected["source_invariant_bits"] = attrs["source_invariant_bits"]
     relation_name = "relations" if op.kind == "split" else "relation"
     relations = attrs.pop(relation_name)
     if relation_name == "relation":
@@ -3474,6 +3487,41 @@ def test_tlx_wave_converter_type_layout_reuses_equivalent_layout_analysis(
     assert converted.layouts[1].layout_map_id == 1
     assert converted.layouts[0].value_id != converted.layouts[1].value_id
     assert converted.layouts[0].properties == converted.layouts[1].properties
+    del ctx
+
+
+def test_tlx_wave_invariant_bits_follow_source_ssa_through_loop(tmp_path):
+    preamble = """
+#source = #ttg.blocked<{sizePerThread = [1, 1, 1], threadsPerWarp = [1, 32, 2], warpsPerCTA = [8, 1, 1], order = [1, 2, 0]}>
+#broadcast = #ttg.blocked<{sizePerThread = [1, 1, 1], threadsPerWarp = [1, 2, 32], warpsPerCTA = [8, 1, 1], order = [2, 1, 0]}>
+#flat = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [8], order = [0]}>
+#result = #ttg.linear<{register = [[0, 0, 1]], lane = [[0, 1, 0], [0, 2, 0], [0, 4, 0], [0, 8, 0], [0, 16, 0], [0, 0, 0]], warp = [[1, 0, 0], [2, 0, 0], [4, 0, 0]], block = []}>
+"""
+    public_funcs = """
+  tt.func public @invariant_bits(%arg: tensor<8x1x32xf32, #broadcast>) -> tensor<8x32x2xf32, #result> {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %c2 = arith.constant 2 : i32
+    %duplicated = tt.broadcast %arg : tensor<8x1x32xf32, #broadcast> -> tensor<8x2x32xf32, #broadcast>
+    %flat_value = tt.reshape %duplicated : tensor<8x2x32xf32, #broadcast> -> tensor<512xf32, #flat>
+    %carried = scf.for %i = %c0 to %c2 step %c1 iter_args(%state = %flat_value) -> tensor<512xf32, #flat> : i32 {
+      %updated = arith.addf %state, %flat_value : tensor<512xf32, #flat>
+      scf.yield %updated : tensor<512xf32, #flat>
+    }
+    %unflat = tt.reshape %carried : tensor<512xf32, #flat> -> tensor<8x2x32xf32, #broadcast>
+    %transposed = tt.trans %unflat {order = array<i32: 0, 2, 1>} : tensor<8x2x32xf32, #broadcast> -> tensor<8x32x2xf32, #source>
+    %converted = ttg.convert_layout %transposed : tensor<8x32x2xf32, #source> -> tensor<8x32x2xf32, #result>
+    tt.return %converted : tensor<8x32x2xf32, #result>
+  }
+"""
+    mod, ctx = _parse_ttgir(tmp_path, public_funcs, num_warps=8, preamble=preamble)
+    source = converter_source_import.import_source_program(mod)
+    converted = next(op for op in source.ops if op.name == "ttg.convert_layout")
+
+    assert "tlx.source_invariant_bits" not in converted.attrs
+    assert converter_invariant_bits.analyze_invariant_bits(source)[
+        converted.operands[0]
+    ] == (8,)
     del ctx
 
 
@@ -10048,8 +10096,7 @@ def test_tlx_wave_compile_gfx950_fa_prologue_partial_wait(tmp_path, monkeypatch)
 
     hsaco_path = tmp_path / "fa-prologue-partial-wait.hsaco"
     hsaco_path.write_bytes(compiled.asm["hsaco"])
-    objdump = os.environ.get("LLVM_OBJDUMP") or shutil.which("llvm-objdump")
-    assert objdump, "set LLVM_OBJDUMP to a gfx950-capable llvm-objdump"
+    objdump = wave_bridge_tools._wave_tool("llvm-objdump")
     result = subprocess.run(
         [objdump, "-d", "--mcpu=gfx950", str(hsaco_path)],
         capture_output=True,

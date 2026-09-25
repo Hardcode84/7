@@ -1852,7 +1852,7 @@ def _verify_layout_transform(op, target_program):
         "split": frozenset({"relations"}),
     }
     if op.kind == "layout_convert":
-        allowed = {"fact_policy", "relation", "transform"}
+        allowed = {"fact_policy", "relation", "source_invariant_bits", "transform"}
         if attrs.get("transform") == "trans":
             allowed.add("order")
         allowed_attrs["layout_convert"] = frozenset(allowed)

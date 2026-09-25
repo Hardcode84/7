@@ -47,6 +47,7 @@ class SourceOp:
     parent_region_id: int | None = None
     parent_op_index: int | None = None
     region_index: int | None = None
+    is_elementwise: bool = False
 
 
 @dataclass(frozen=True)
