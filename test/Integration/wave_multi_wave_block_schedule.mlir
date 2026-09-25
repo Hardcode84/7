@@ -176,6 +176,9 @@ func.func @multi_workgroup_block_schedule(
 
 // CHECK-LABEL: func.func @post_barrier_issue_token(
 // CHECK: waveamdmachine.uniform_if
+// CHECK: %[[SUM:.*]] = waveamdmachine.v_add_u32
+// CHECK: waveamdmachine.ds_load_b32
+// CHECK: %[[FREE:.*]] = waveamdmachine.v_add_u32 %[[SUM]],
 // CHECK: %[[BARRIER:.*]] = waveamdmachine.s_barrier
 // CHECK: waveamdmachine.issue_token %[[BARRIER]]
 func.func @post_barrier_issue_token(
@@ -193,14 +196,22 @@ func.func @post_barrier_issue_token(
     %sum = waveamdmachine.v_add_u32 %a, %b
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>
-    %barrier = waveamdmachine.s_barrier %root
+    %loaded, %read = waveamdmachine.ds_load_b32 %a after %root
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+          -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.mem.token)
+    %barrier = waveamdmachine.s_barrier %read
         : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
     %issued = waveamdmachine.issue_token %barrier
         : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
     %later = waveamdmachine.v_add_u32 %sum, %a
         : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
           -> !waveamdmachine.reg<vgpr, 1>
-    %ready = waveamdmachine.s_barrier %issued
+    %free_issue = waveamdmachine.schedule_token %later
+        : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.mem.token
+    %joined = waveamdmachine.token_join %issued, %free_issue
+        : (!waveamdmachine.mem.token, !waveamdmachine.mem.token)
+          -> !waveamdmachine.mem.token
+    %ready = waveamdmachine.s_barrier %joined
         : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
   }
