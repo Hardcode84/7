@@ -104,9 +104,10 @@ consumer must wait for its data regardless of token use.
 can retain a store, but it does not transfer that store's completion events.
 `wave.schedule_token` cannot make data or memory ready. It supplies only a
 scheduling edge from a value producer to a token consumer. It requires at least
-one input value and does not accept memory tokens. A dead, effect-free producer
-can be replaced by dependencies on its inputs if none of those inputs is a
-memory token.
+one input value and does not accept memory tokens or pointers. A pointer has
+separate base and offset producers. Use the data values that compute its address.
+A dead, effect-free producer can be replaced by dependencies on its inputs if
+none of those inputs is a memory token.
 
 Wait insertion tracks target events such as vector loads, stores, LDS, and
 scalar memory. It follows explicit dependencies. Hardware counters can require

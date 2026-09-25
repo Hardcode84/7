@@ -2634,10 +2634,14 @@ MultiWaveGreedyCoordinator::getTrailingBarrier(unsigned classId,
   Operation *barrier = nullptr;
   for (unsigned position :
        llvm::seq<unsigned>(previousSize, classState.result.order.size())) {
-    Operation *op = regions[classId].ops[classState.result.order[position]];
-    if (!isBarrierOp(op))
+    unsigned index = classState.result.order[position];
+    Operation *op = regions[classId].ops[index];
+    if (!isBarrierOp(op)) {
+      if (barrier && !classState.noInsts.test(index))
+        return failure();
       continue;
-    if (barrier || position + 1 != classState.result.order.size())
+    }
+    if (barrier)
       return failure();
     barrier = op;
   }

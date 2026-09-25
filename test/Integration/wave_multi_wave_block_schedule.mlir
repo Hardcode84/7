@@ -174,4 +174,37 @@ func.func @multi_workgroup_block_schedule(
   return
 }
 
+// CHECK-LABEL: func.func @post_barrier_issue_token(
+// CHECK: waveamdmachine.uniform_if
+// CHECK: %[[BARRIER:.*]] = waveamdmachine.s_barrier
+// CHECK: waveamdmachine.issue_token %[[BARRIER]]
+func.func @post_barrier_issue_token(
+    %cond: !waveamdmachine.reg<scc, 1>,
+    %root: !waveamdmachine.mem.token,
+    %a: !waveamdmachine.reg<vgpr, 1>,
+    %b: !waveamdmachine.reg<vgpr, 1>)
+    attributes {gpu.known_block_size = array<i32: 256, 1, 1>,
+                wave.kernel,
+                wave.workgroup_size = array<i32: 256, 1, 1>,
+                waveamdmachine.enable_multi_wave_specialization,
+                waveamdmachine.schedule_input,
+                waveamdmachine.target_waves = 1 : i64} {
+  waveamdmachine.uniform_loop {
+    %sum = waveamdmachine.v_add_u32 %a, %b
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %barrier = waveamdmachine.s_barrier %root
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %issued = waveamdmachine.issue_token %barrier
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    %later = waveamdmachine.v_add_u32 %sum, %a
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
+    %ready = waveamdmachine.s_barrier %issued
+        : (!waveamdmachine.mem.token) -> !waveamdmachine.mem.token
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+  }
+  return
+}
+
 }

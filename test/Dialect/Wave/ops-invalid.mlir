@@ -17,6 +17,14 @@ func.func @schedule_token_memory_dependency() {
 
 // -----
 
+func.func @schedule_token_pointer_dependency(%ptr: !wave.ptr<#wave.global, i32>) {
+  // expected-error @+1 {{does not accept pointer dependencies}}
+  %ordered = wave.schedule_token %ptr : !wave.ptr<#wave.global, i32> -> !wave.mem.token
+  return
+}
+
+// -----
+
 func.func @set_priority_below_range() {
   // expected-error @+1 {{attribute 'priority' failed to satisfy constraint}}
   waveamd.set_priority -1

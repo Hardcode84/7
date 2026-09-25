@@ -3322,6 +3322,13 @@ LogicalResult ScheduleTokenOp::verify() {
         return isa<MemTokenType>(dependency.getType());
       }))
     return emitOpError("does not accept memory-token dependencies");
+  if (llvm::any_of(getDependencies(), [](Value dependency) {
+        Type type = dependency.getType();
+        if (auto simd = dyn_cast<SimdType>(type))
+          type = simd.getElementType();
+        return isa<PtrType>(type);
+      }))
+    return emitOpError("does not accept pointer dependencies");
   return success();
 }
 

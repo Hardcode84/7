@@ -829,6 +829,82 @@ def linear_layout_bases(linear, in_dim):
     return ()
 
 
+def relabel_linear_output(linear, target_shape, *, order=None):
+    source_shape = tuple(int(extent) for _name, extent in linear.out_dims)
+    target_shape = tuple(int(extent) for extent in target_shape)
+    if order is None:
+        if any(
+            not _is_power_of_two(extent) for extent in (*source_shape, *target_shape)
+        ):
+            return None
+        if _product(source_shape) != _product(target_shape):
+            return None
+
+        def relabel(basis):
+            flat = 0
+            for coordinate, extent in zip(basis, source_shape, strict=True):
+                flat = flat * extent + int(coordinate)
+            result = []
+            for extent in reversed(target_shape):
+                result.append(flat % extent)
+                flat //= extent
+            return tuple(reversed(result))
+
+    else:
+        if (
+            len(order) != len(source_shape)
+            or sorted(order) != list(range(len(source_shape)))
+            or tuple(source_shape[index] for index in order) != target_shape
+        ):
+            return None
+
+        def relabel(basis):
+            return tuple(int(basis[index]) for index in order)
+
+    bases = tuple(
+        (name, tuple(relabel(basis) for basis in vectors))
+        for name, vectors in linear.bases
+    )
+    return LinearLayout.from_bases(
+        bases,
+        tuple(f"dim{index}" for index in range(len(target_shape))),
+        target_shape,
+        False,
+    )
+
+
+def layout_map_from_linear(
+    layout_map_id, value_id, source_type, linear, lane_width, warp_count, block_count
+):
+    shape = tuple(source_type.shape)
+    coordinate_domain = classify_coordinate_domain(shape, lane_width, linear)
+    _require_supported_coordinate_domain(shape, coordinate_domain, value_id)
+    properties = {
+        f"{name}_bases": linear_layout_bases(linear, name)
+        for name in ("register", "lane", "warp", "block")
+    }
+    properties["linear_encoding_kind"] = "linear"
+    properties["coordinate_domain"] = coordinate_domain
+    return LayoutMap(
+        layout_map_id,
+        value_id,
+        "linear",
+        shape,
+        source_type.element_type,
+        int(coordinate_domain["component_count"]),
+        int(lane_width),
+        properties,
+        linear,
+        active_relation=_distributed_active_relation(
+            linear,
+            lane_width=lane_width,
+            warp_count=warp_count,
+            block_count=block_count,
+            source_value_id=value_id,
+        ),
+    )
+
+
 def _distributed_active_relation(
     linear,
     *,

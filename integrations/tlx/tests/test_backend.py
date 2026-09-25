@@ -3361,6 +3361,98 @@ def test_tlx_wave_converter_import_stage_builds_source_snapshot(tmp_path):
     del ctx
 
 
+def test_tlx_wave_local_load_layout_flows_through_reshape_and_loop(tmp_path):
+    preamble = """
+#mma = #ttg.amd_mfma<{version = 4, warpsPerCTA = [2, 2], instrShape = [16, 16, 32], isTransposed = true}>
+#dot0 = #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 8}>
+#dot1 = #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 8}>
+#linear3 = #ttg.linear<{register = [[0, 1, 0], [0, 2, 0], [0, 4, 0]], lane = [[0, 0, 1], [0, 0, 2], [0, 0, 4], [0, 0, 8], [0, 8, 0], [0, 16, 0]], warp = [[0, 0, 0], [0, 0, 16]], block = []}>
+#linear2 = #ttg.linear<{register = [[1, 0], [2, 0], [4, 0]], lane = [[0, 1], [0, 2], [0, 4], [0, 8], [8, 0], [16, 0]], warp = [[0, 0], [0, 16]], block = []}>
+#blocked2 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [8, 8], warpsPerCTA = [2, 2], order = [1, 0]}>
+#shared3 = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [2, 1, 0]}>
+#shared2 = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+"""
+    local_func = """
+  tt.func public @local_load_loop_layout() attributes {noinline = false} {
+    %a_alloc = ttg.local_alloc : () -> !ttg.memdesc<1x32x32xf16, #shared3, #smem, mutable>
+    %b_alloc = ttg.local_alloc : () -> !ttg.memdesc<32x32xf16, #shared2, #smem, mutable>
+    %a_init = arith.constant dense<1.000000e+00> : tensor<1x32x32xf16, #linear3>
+    %b_init = arith.constant dense<1.000000e+00> : tensor<32x32xf16, #blocked2>
+    ttg.local_store %a_init, %a_alloc : tensor<1x32x32xf16, #linear3> -> !ttg.memdesc<1x32x32xf16, #shared3, #smem, mutable>
+    ttg.local_store %b_init, %b_alloc : tensor<32x32xf16, #blocked2> -> !ttg.memdesc<32x32xf16, #shared2, #smem, mutable>
+    %a = ttg.local_load %a_alloc : !ttg.memdesc<1x32x32xf16, #shared3, #smem, mutable> -> tensor<1x32x32xf16, #linear3>
+    %view = tt.reshape %a : tensor<1x32x32xf16, #linear3> -> tensor<32x32xf16, #linear2>
+    %b = ttg.local_load %b_alloc : !ttg.memdesc<32x32xf16, #shared2, #smem, mutable> -> tensor<32x32xf16, #dot1>
+    %acc = arith.constant dense<0.000000e+00> : tensor<32x32xf32, #mma>
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %c2 = arith.constant 2 : i32
+    %result:2 = scf.for %i = %c0 to %c2 step %c1 iter_args(%fragment = %view, %carry = %acc) -> (tensor<32x32xf16, #linear2>, tensor<32x32xf32, #mma>) : i32 {
+      %dot_a = ttg.convert_layout %fragment : tensor<32x32xf16, #linear2> -> tensor<32x32xf16, #dot0>
+      %dot = tt.dot %dot_a, %b, %carry : tensor<32x32xf16, #dot0> * tensor<32x32xf16, #dot1> -> tensor<32x32xf32, #mma>
+      %next = ttg.local_load %a_alloc : !ttg.memdesc<1x32x32xf16, #shared3, #smem, mutable> -> tensor<1x32x32xf16, #linear3>
+      %next_view = tt.reshape %next : tensor<1x32x32xf16, #linear3> -> tensor<32x32xf16, #linear2>
+      scf.yield %next_view, %dot : tensor<32x32xf16, #linear2>, tensor<32x32xf32, #mma>
+    }
+    %final_a = ttg.convert_layout %result#0 : tensor<32x32xf16, #linear2> -> tensor<32x32xf16, #dot0>
+    %final = tt.dot %final_a, %b, %result#1 : tensor<32x32xf16, #dot0> * tensor<32x32xf16, #dot1> -> tensor<32x32xf32, #mma>
+    tt.return
+  }
+"""
+    mod, ctx = _parse_ttgir(tmp_path, local_func, num_warps=4, preamble=preamble)
+
+    output = converter_pipeline.convert_ttgir_to_wave(mod)
+    source = output.source_program
+    converted = output.type_layout_program
+    load_ops = [op for op in source.ops if op.name == "ttg.local_load"]
+    assert len(load_ops) == 3
+    for op in (load_ops[0], load_ops[2]):
+        layout = converted.layouts[converted.values[op.results[0]].layout_map_id]
+        assert layout.kind == "linear"
+        assert (
+            layout.linear_layout
+            != converter_layouts.build_layout_map(
+                0,
+                op.results[0],
+                source.values[op.results[0]].type,
+                64,
+                4,
+                1,
+            ).linear_layout
+        )
+    for op in source.ops:
+        if op.name != "ttg.convert_layout":
+            continue
+        source_layout = converted.layouts[
+            converted.values[op.operands[0]].layout_map_id
+        ]
+        result_layout = converted.layouts[converted.values[op.results[0]].layout_map_id]
+        assert source_layout.linear_layout == result_layout.linear_layout
+    assert "wave.gather" in output.emitted_module.text
+    _run_wave_verify(output.emitted_module.text)
+    del ctx
+
+    extra_use = """    ttg.local_store %view, %b_alloc : tensor<32x32xf16, #linear2> -> !ttg.memdesc<32x32xf16, #shared2, #smem, mutable>
+    %b = ttg.local_load"""
+    shared_view, shared_ctx = _parse_ttgir(
+        tmp_path,
+        local_func.replace("    %b = ttg.local_load", extra_use, 1),
+        num_warps=4,
+        preamble=preamble,
+    )
+    shared_source = converter_source_import.import_source_program(shared_view)
+    shared_types = converter_types.convert_source_program(shared_source)
+    shared_load = next(op for op in shared_source.ops if op.name == "ttg.local_load")
+    load_id = shared_load.results[0]
+    original = converter_layouts.build_layout_map(
+        0, load_id, shared_source.values[load_id].type, 64, 4, 1
+    )
+    actual = shared_types.layouts[shared_types.values[load_id].layout_map_id]
+    assert actual.linear_layout == original.linear_layout
+    del shared_ctx
+
+
 def test_tlx_wave_converter_import_stage_reports_structured_diagnostics(tmp_path):
     local_func = """
   tt.func private @not_public() attributes {noinline = false} {
@@ -6094,6 +6186,117 @@ def test_tlx_wave_barrier_token_carries_lds_consumer_frontier():
     assert ordered.values[consumer_order.results[0]].event_domain == (
         converter_target_ir.EVENT_DOMAIN_LDS_CONSUMER_ORDER
     )
+
+
+def test_tlx_wave_lds_consumer_frontier_tracks_loop_results_individually():
+    builder = converter_target_ir.TargetBuilder()
+    scalar = converter_target_ir.TargetType("scalar", "scalar", "i32")
+    tensor = converter_target_ir.TargetType("tensor", "simd_tuple", "f16", 64, 1)
+    pointer = converter_target_ir.TargetType("pointer", "uniform_pointer", "f16")
+    memdesc = builder.add_value(
+        converter_target_ir.TargetType("memdesc", "memdesc", "f16")
+    )
+    lower, upper, step = (builder.add_value(scalar) for _ in range(3))
+    address = builder.add_value(pointer)
+    loaded = builder.add_value(tensor)
+    builder.add_op(
+        "local_load",
+        operands=(memdesc,),
+        results=(loaded,),
+        attrs={"data_result_count": 1, "completion_result_count": 0},
+    )
+    induction = builder.add_value(scalar)
+    data_arg = builder.add_value(tensor)
+    address_arg = builder.add_value(pointer)
+    body = builder.add_region(block_arg_ids=(induction, data_arg, address_arg))
+    builder.set_region_yields(body, (data_arg, address_arg))
+    data_result = builder.add_value(tensor)
+    address_result = builder.add_value(pointer)
+    builder.add_op(
+        "for_loop",
+        operands=(lower, upper, step, loaded, address),
+        results=(data_result, address_result),
+        attrs={"init_arg_count": 2, "source_result_count": 2},
+        region_ids=(body,),
+    )
+    builder.add_op(
+        "barrier",
+        attrs={
+            "address_space": 31,
+            "dependency_count": 0,
+            "orders_memory_issue": True,
+            "compiler_membar_barrier": True,
+        },
+    )
+
+    ordered = converter_barrier_order.thread_barrier_issue_order(builder.build())
+    consumer_order = next(op for op in ordered.ops if op.kind == "lds_consumer_order")
+    assert consumer_order.operands == (data_result,)
+    assert address_result not in consumer_order.operands
+
+
+def test_tlx_wave_lds_consumer_frontier_tracks_branch_results_individually():
+    builder = converter_target_ir.TargetBuilder()
+    scalar = converter_target_ir.TargetType("scalar", "scalar", "i1")
+    tensor = converter_target_ir.TargetType("tensor", "simd_tuple", "f16", 64, 1)
+    pointer = converter_target_ir.TargetType("pointer", "uniform_pointer", "f16")
+    mask = converter_target_ir.TargetType("mask", "mask", "i1", 64, 1)
+    memdesc = builder.add_value(
+        converter_target_ir.TargetType("memdesc", "memdesc", "f16")
+    )
+    mask_memdesc = builder.add_value(
+        converter_target_ir.TargetType("memdesc", "memdesc", "i1")
+    )
+    loaded_mask = builder.add_value(mask)
+    builder.add_op(
+        "local_load",
+        operands=(mask_memdesc,),
+        results=(loaded_mask,),
+        attrs={"data_result_count": 1, "completion_result_count": 0},
+    )
+    condition = builder.add_value(scalar)
+    builder.add_op(
+        "warp_vote",
+        operands=(loaded_mask,),
+        results=(condition,),
+        attrs={"kind": "all"},
+    )
+    address = builder.add_value(pointer)
+    fallback = builder.add_value(tensor)
+    loaded = builder.add_value(tensor)
+    then_region = builder.add_region()
+    with builder.insertion_region(then_region):
+        builder.add_op(
+            "local_load",
+            operands=(memdesc,),
+            results=(loaded,),
+            attrs={"data_result_count": 1, "completion_result_count": 0},
+        )
+    builder.set_region_yields(then_region, (loaded, address))
+    else_region = builder.add_region()
+    builder.set_region_yields(else_region, (fallback, address))
+    data_result = builder.add_value(tensor)
+    address_result = builder.add_value(pointer)
+    builder.add_op(
+        "if",
+        operands=(condition,),
+        results=(data_result, address_result),
+        region_ids=(then_region, else_region),
+    )
+    builder.add_op(
+        "barrier",
+        attrs={
+            "address_space": 31,
+            "dependency_count": 0,
+            "orders_memory_issue": True,
+            "compiler_membar_barrier": True,
+        },
+    )
+
+    ordered = converter_barrier_order.thread_barrier_issue_order(builder.build())
+    consumer_order = next(op for op in ordered.ops if op.kind == "lds_consumer_order")
+    assert consumer_order.operands == (data_result,)
+    assert address_result not in consumer_order.operands
 
 
 def _target_async_wait_local_load_program(load_kind):
@@ -21866,13 +22069,6 @@ def test_tlx_wave_backend_defaults_and_accepts_mfma_options(monkeypatch):
 
     default_options = backend.parse_options({})
     assert default_options.matrix_instr_nonkdim == 0
-    assert default_options.relax_local_load_layout_anchor is True
-    assert (
-        backend.parse_options(
-            {"relax_local_load_layout_anchor": False}
-        ).relax_local_load_layout_anchor
-        is False
-    )
     assert not hasattr(backend.parse_options({}), "tlx_wave_schedule_max_region_ops")
     assert default_options.tlx_wave_enable_multi_wave_specialize is False
     assert (
