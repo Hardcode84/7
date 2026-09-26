@@ -556,8 +556,8 @@ class SoftmaxState:
         registers1 = _pin_score_register_layout(exponentiated_scores.registers1)
         tile_sum = _reduce_score_registers(registers0, registers1)
         row_sum = self.row_sum + tile_sum
-        registers0 = tlx.cast_preserve_layout(registers0, out_dtype)
-        registers1 = tlx.cast_preserve_layout(registers1, out_dtype)
+        registers0 = registers0.to(out_dtype)
+        registers1 = registers1.to(out_dtype)
         p0, p1 = _registers_to_probability_fragments(registers0)
         p2, p3 = _registers_to_probability_fragments(registers1)
         probabilities = ProbabilityFragments(
@@ -636,7 +636,7 @@ def _accumulate_prefix_body(
     acc0 = _pv_mfma(p0, value_fragments.v00, acc0, p_layout, v_layout, mma_layout)
     acc1 = _pv_mfma(p0, value_fragments.v01, acc1, p_layout, v_layout, mma_layout)
     acc2 = _pv_mfma(p0, value_fragments.v02, acc2, p_layout, v_layout, mma_layout)
-    tlx.sched_barrier()
+    tlx.amd_sched_barrier()
     acc3 = _pv_mfma(p0, value_fragments.v03, acc3, p_layout, v_layout, mma_layout)
     acc0 = _pv_mfma(p1, value_fragments.v10, acc0, p_layout, v_layout, mma_layout)
     acc1 = _pv_mfma(p1, value_fragments.v11, acc1, p_layout, v_layout, mma_layout)
@@ -757,7 +757,7 @@ def _normalize_output_fragment(
     acc = tlx.require_layout(acc, mma_layout)
     row_scale = _workitems_to_rows(inverse_row_sum)
     output = acc * row_scale[:, None]
-    output = tlx.cast_preserve_layout(output, out_dtype)
+    output = output.to(out_dtype)
     return tlx.release_layout(output)
 
 

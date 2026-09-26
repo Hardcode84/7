@@ -93,6 +93,7 @@ def import_source_program(
         values,
         tuple(regions),
         top_region_id,
+        mod.context,
     )
 
 
@@ -204,6 +205,7 @@ def _collect_region(
                 region_id,
                 parent_op_index,
                 region_index,
+                op.has_elementwise_trait(),
             )
             ops[op_index] = source_op
             for result_index in range(op.get_num_results()):
@@ -241,7 +243,6 @@ def _source_attrs(op):
         "offsets",
         "operandSegmentSizes",
         "order",
-        "tlx.source_invariant_bits",
     ):
         values = op.get_int_array_attr(name)
         if values is not None:

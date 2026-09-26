@@ -19,19 +19,6 @@ from .wave_bridge_tools import (
 )
 
 _ENABLE_MULTI_WAVE_SPECIALIZE_ENV = "TRITON_TLX_WAVE_ENABLE_MULTI_WAVE_SPECIALIZE"
-_REQUIRED_TLX_BACKEND_API_VERSION = 1
-
-
-def _require_tlx_backend_api():
-    actual = getattr(tlx, "backend_api_version", None)
-    if actual != _REQUIRED_TLX_BACKEND_API_VERSION:
-        raise RuntimeError(
-            "tlx_wave requires TLX backend API version "
-            f"{_REQUIRED_TLX_BACKEND_API_VERSION}, got {actual!r}"
-        )
-
-
-_require_tlx_backend_api()
 
 
 def _barrier_ops(mod):

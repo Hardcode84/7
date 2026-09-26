@@ -1,5 +1,6 @@
 """Explicit memory ordering around ordering barriers."""
 
+from collections import defaultdict, deque
 from dataclasses import replace
 
 from . import target_ir
@@ -29,6 +30,7 @@ def thread_barrier_issue_order(target_program):
     values = list(target_program.values)
     ops = list(target_program.ops)
     regions = []
+    lds_derived_values = _lds_data_descendants(target_program)
 
     def resource_targets(target_value_ids):
         return tuple(
@@ -122,6 +124,7 @@ def thread_barrier_issue_order(target_program):
             original_op_ids,
             ops,
             values,
+            lds_derived_values,
         )
         has_later_issue_barrier = _suffix_matches(
             original_op_ids,
@@ -255,10 +258,82 @@ def thread_barrier_issue_order(target_program):
     return _thread_structured_memory_issue(ordered_program)
 
 
-def _lds_consumer_frontiers(region, op_ids, ops, values):
+def _connect_structured_lds_flow(program, op, connect):
+    if op.kind == "for_loop":
+        body = program.regions[int(op.region_ids[0])]
+        for init, argument, yielded, result in zip(
+            op.operands[3:],
+            body.block_arg_ids[1:],
+            body.yield_value_ids,
+            op.results,
+            strict=True,
+        ):
+            connect(init, argument)
+            connect(yielded, argument)
+            connect(init, result)
+            connect(yielded, result)
+    else:
+        for region_id in op.region_ids:
+            child = program.regions[int(region_id)]
+            for yielded, result in zip(child.yield_value_ids, op.results, strict=True):
+                connect(yielded, result)
+
+
+def _lds_data_graph(program):
+    values = program.values
+    direct_users = defaultdict(list)
+    op_users = defaultdict(list)
+    data_results = {}
+    seeds = []
+
+    def connect(source, target):
+        if values[int(target)].type.representation != "token":
+            direct_users[int(source)].append(int(target))
+
+    for op in program.ops:
+        results = tuple(
+            int(result)
+            for result in op.results
+            if values[int(result)].type.representation != "token"
+        )
+        if op.kind == "local_load":
+            seeds.extend(results)
+        elif op.region_ids or op.kind == "for_loop":
+            _connect_structured_lds_flow(program, op, connect)
+        else:
+            data_results[op.target_op_id] = results
+            for operand in op.operands:
+                if values[int(operand)].type.representation != "token":
+                    op_users[int(operand)].append(op.target_op_id)
+    return seeds, direct_users, op_users, data_results
+
+
+def _lds_data_descendants(target_program):
+    seeds, direct_users, op_users, data_results = _lds_data_graph(target_program)
+    derived = set(seeds)
+    pending = deque(seeds)
+    visited_ops = set()
+    while pending:
+        source = pending.popleft()
+        for result in direct_users[source]:
+            if result not in derived:
+                derived.add(result)
+                pending.append(result)
+        for op_id in op_users[source]:
+            if op_id in visited_ops:
+                continue
+            visited_ops.add(op_id)
+            for result in data_results[op_id]:
+                if result not in derived:
+                    derived.add(result)
+                    pending.append(result)
+    return derived
+
+
+def _lds_consumer_frontiers(region, op_ids, ops, values, lds_derived_values):
     """Return dataflow consumer sinks of LDS reads before each ordering barrier."""
     crossing_by_position = {}
-    derived_values = set()
+    derived_values = set(region.block_arg_ids) & lds_derived_values
     consumer_frontier = []
     for position, op_id in enumerate(op_ids):
         op = ops[op_id]
@@ -281,12 +356,13 @@ def _lds_consumer_frontiers(region, op_ids, ops, values):
         derived_operands = tuple(
             int(value_id) for value_id in op.operands if int(value_id) in derived_values
         )
-        if not derived_operands:
+        if not derived_operands and not op.region_ids:
             continue
         data_results = tuple(
             int(result_id)
             for result_id in op.results
             if values[int(result_id)].type.representation != "token"
+            and (not op.region_ids or int(result_id) in lds_derived_values)
         )
         if not data_results:
             continue

@@ -33,7 +33,8 @@ cmake --build build --target wave-opt wave-translate WavePythonModules \
 ### 2. Install TLX Triton and the backend
 
 Use the [TLX companion branch](https://github.com/Hardcode84/tlx_triton/tree/wave-integration),
-which supplies TLX backend API version 1. Set `TLX_TRITON_DIR` to that checkout.
+which supplies the structural source IR and layout bindings. Set
+`TLX_TRITON_DIR` to that checkout.
 Install Triton first, then install this backend as a separate editable distribution.
 
 ```bash

@@ -4,7 +4,7 @@ import re
 import struct
 from dataclasses import dataclass, replace
 
-from . import domains, layouts, target_ir
+from . import domains, invariant_bits, layouts, target_ir
 from .diagnostics import fail
 
 STAGE = "op_conversion"
@@ -481,6 +481,7 @@ class ConversionInput:
     threads_per_warp: int
     value_element_byte_widths: dict[int, int | None]
     value_divisibilities: dict[int, int | None]
+    logical_invariant_bits: dict[int, tuple[int, ...]]
     memdescs: dict[int, MemdescInfo]
     memdesc_views: dict[int, MemdescViewInfo | None]
     memdesc_physical_allocation_bytes: dict[int, int]
@@ -587,6 +588,7 @@ def _build_conversion_input(
             value_id: value.type.divisibility
             for value_id, value in source_program.values.items()
         },
+        invariant_bits.analyze_invariant_bits(source_program),
         memdescs,
         memdesc_views,
         memdesc_physical_allocation_bytes,
@@ -4489,7 +4491,6 @@ def _convert_mma_packet_truncf(builder, type_layout_program, op):
 
 
 def _convert_layout(builder, conversion_input, type_layout_program, op):
-    del conversion_input
     if len(op.operands) != 1 or len(op.results) != 1:
         fail(
             "TLXW_OP_CONVERT_LAYOUT",
@@ -4502,9 +4503,7 @@ def _convert_layout(builder, conversion_input, type_layout_program, op):
         op,
         type_layout_program,
     )
-    source_invariant_bits = op.attrs.get("tlx.source_invariant_bits")
-    if source_invariant_bits is not None:
-        source_invariant_bits = tuple(int(value) for value in source_invariant_bits)
+    source_invariant_bits = conversion_input.logical_invariant_bits[op.operands[0]]
     relation = _packet_relation_attrs(
         type_layout_program,
         op.operands,
@@ -4520,6 +4519,11 @@ def _convert_layout(builder, conversion_input, type_layout_program, op):
             "fact_policy": "invalidate_layout_sensitive",
             "relation": relation,
             "transform": "identity",
+            **(
+                {"source_invariant_bits": source_invariant_bits}
+                if source_invariant_bits
+                else {}
+            ),
         },
         layout_map_ids=result_layout_map_ids,
         source_op_index=op.index,
@@ -5455,12 +5459,20 @@ def _convert_sched_barrier(builder, op):
             "rocdl.sched.barrier must not produce values",
             source_op_index=op.index,
         )
+    mask = int(op.attrs.get("mask", 0) or 0)
+    if mask != 0:
+        fail(
+            "TLXW_OP_UNSUPPORTED_SCHED_BARRIER_MASK",
+            STAGE,
+            "masked ROCDL scheduling barriers require class-aware Wave lowering",
+            source_op_index=op.index,
+        )
     border = op.attrs.get("triton.warp_pipeline.border")
     builder.add_op(
         "sched_barrier",
         attrs={
             "border": "" if border is None else str(border),
-            "mask": int(op.attrs.get("mask", 0) or 0),
+            "mask": mask,
         },
         source_op_index=op.index,
     )
