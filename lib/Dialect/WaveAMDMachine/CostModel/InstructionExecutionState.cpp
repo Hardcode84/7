@@ -107,8 +107,6 @@ void configureInstructionScheduleModel(
   config.ldsDmaIssueWaveStreams = targetWaveCount;
   config.scheduleModel.issueStreams = config.ldsDmaIssueWaveStreams;
   config.scheduleModel.readyPressureWaveCohort = readyPressureWaveCohort;
-  config.scheduleModel.enableCoexecWindow =
-      config.scheduleModel.issueStreams > 1;
   config.scheduleModel.pressureLimits = pressureLimits;
   int64_t issuePeriod = config.issuePeriod > 0
                             ? config.issuePeriod
@@ -708,11 +706,6 @@ bool InstructionScheduleModel::canSelectStallFiller(
     return false;
   return !facts.issueDeadlineCycle ||
          facts.candidateRequiredCycle <= *facts.issueDeadlineCycle;
-}
-
-InstructionCoexecutionModel InstructionScheduleModel::applyCoexecutionPolicy(
-    InstructionCoexecutionModel model) const {
-  return enableCoexecWindow ? model : InstructionCoexecutionModel{};
 }
 
 bool InstructionScheduleModel::canIssueLdsDmaDuringLead(
@@ -1432,8 +1425,8 @@ InstructionExecutionState::describe(Operation *op) const {
   desc.mfmaCoissueResource = usesMfmaCoissueResource(op, cls, arch);
   desc.instructionIssueCount =
       getInstructionIssueCount(op, arch.isa, config.wavefrontSize);
-  desc.coexecution = config.scheduleModel.applyCoexecutionPolicy(
-      getInstructionCoexecutionModel(op, cls, arch, config.wavefrontSize));
+  desc.coexecution =
+      getInstructionCoexecutionModel(op, cls, arch, config.wavefrontSize);
   desc.counterIssueCount = getWaitcntInfo(op).issueCount;
   desc.issueSlots = desc.instructionIssueCount;
   if (op->hasTrait<traits::MFMAOp>())

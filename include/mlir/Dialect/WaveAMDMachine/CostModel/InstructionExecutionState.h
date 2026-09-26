@@ -196,8 +196,6 @@ public:
   bool isStallFillerCompatible(
       const InstructionStallFillerCompatibilityFacts &facts) const;
   bool canSelectStallFiller(const InstructionStallFillerFacts &facts) const;
-  InstructionCoexecutionModel
-  applyCoexecutionPolicy(InstructionCoexecutionModel model) const;
   bool canIssueLdsDmaDuringLead(int64_t resourceWait,
                                 bool dependenciesReady) const;
   bool shouldPrioritizeLongLatency(bool enabled, int64_t candidateLatency,
@@ -252,7 +250,6 @@ private:
   int64_t ldsDmaIssueLead = 0;
   unsigned issueStreams = 1;
   unsigned readyPressureWaveCohort = 1;
-  bool enableCoexecWindow = true;
 };
 
 struct InstructionExecutionConfig {

@@ -221,16 +221,20 @@ func.func @cohort_mfma_coexec_window_reject_salu(
 
 // CHECK-LABEL: func.func @cohort_mfma_coexec_window_single_wave(
 // CHECK: waveamdmachine.uniform_loop
+// CHECK: waveamdmachine.v_add_f32
 // CHECK: waveamdmachine.mfma_f32_32x32x16_f16
 // DIAG: waveamd-machine-schedule region func=cohort_mfma_coexec_window_single_wave
-// DIAG-SAME: coexec_window_gaps=0
+// DIAG-SAME: action=apply reason=coexec_window
+// DIAG-SAME: coexec_window_gaps=1
 func.func @cohort_mfma_coexec_window_single_wave(
     %cond: !waveamdmachine.reg<scc, 1>,
     %a: !waveamdmachine.reg<vgpr, 4>,
     %b: !waveamdmachine.reg<vgpr, 4>,
     %acc0: !waveamdmachine.reg<vgpr, 16>,
     %acc1: !waveamdmachine.reg<vgpr, 16>,
-    %acc2: !waveamdmachine.reg<vgpr, 16>)
+    %acc2: !waveamdmachine.reg<vgpr, 16>,
+    %x: !waveamdmachine.reg<vgpr, 1>,
+    %y: !waveamdmachine.reg<vgpr, 1>)
     attributes {gpu.known_block_size = array<i32: 64, 1, 1>,
                 wave.kernel,
                 wave.workgroup_size = array<i32: 64, 1, 1>,
@@ -246,6 +250,9 @@ func.func @cohort_mfma_coexec_window_single_wave(
     %m2 = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc2
         : (!waveamdmachine.reg<vgpr, 4>, !waveamdmachine.reg<vgpr, 4>,
            !waveamdmachine.reg<vgpr, 16>) -> !waveamdmachine.reg<vgpr, 16>
+    %sum = waveamdmachine.v_add_f32 %x, %y
+        : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+          -> !waveamdmachine.reg<vgpr, 1>
     waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
   }
   return
