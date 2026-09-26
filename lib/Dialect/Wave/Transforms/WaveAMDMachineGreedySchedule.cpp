@@ -112,6 +112,11 @@ enum class GreedyStepStatus : uint8_t {
   Blocked,
 };
 
+struct GreedyStep {
+  std::optional<unsigned> issued;
+  GreedyStepStatus status;
+};
+
 struct ScheduleEdge {
   unsigned src = 0;
   unsigned dst = 0;
@@ -1579,9 +1584,7 @@ static bool nextStillReady(const BitVector &ready, const BitVector &scheduled,
   return !scheduled.test(next) && ready.test(next);
 }
 
-enum class FillStallStatus : uint8_t { Ready, ScheduledFiller };
-
-static FailureOr<FillStallStatus> fillStallBeforeNext(
+static FailureOr<std::optional<unsigned>> fillStallBeforeNext(
     const GreedyRegion &region, const GraphTables &graph, IssueState &state,
     IssueState *steadyState, BitVector &ready, BitVector &scheduled,
     SmallVectorImpl<unsigned> &pending, SmallVectorImpl<unsigned> &order,
@@ -1594,7 +1597,7 @@ static FailureOr<FillStallStatus> fillStallBeforeNext(
   if (*readyNow || computeIslands.session.canIssueBaselineDespiteStall(
                        next, getReadyScheduleIssueFacts(nextPreview),
                        state.model.getScheduleModel()))
-    return FillStallStatus::Ready;
+    return std::optional<unsigned>{};
 
   recordGapStats(region.ops[next], nextPreview, stats);
   FillableStall stall = computeIslands.session.classifyStall(
@@ -1611,7 +1614,7 @@ static FailureOr<FillStallStatus> fillStallBeforeNext(
     return failure();
   if (!decision->candidate) {
     ++stats.unfilledGaps;
-    return FillStallStatus::Ready;
+    return std::optional<unsigned>{};
   }
 
   recordFilledStall(region.ops[next], nextPreview, stats);
@@ -1619,7 +1622,7 @@ static FailureOr<FillStallStatus> fillStallBeforeNext(
                                  scheduled, pending, order,
                                  *decision->candidate, origins, noInsts)))
     return failure();
-  return FillStallStatus::ScheduledFiller;
+  return decision->candidate;
 }
 
 static GreedyResult failGreedyModel(GreedyResult &result) {
@@ -1628,7 +1631,7 @@ static GreedyResult failGreedyModel(GreedyResult &result) {
   return result;
 }
 
-static FailureOr<GreedyStepStatus> scheduleReadyByIndex(
+static FailureOr<GreedyStep> scheduleReadyByIndex(
     unsigned selected, const GreedyRegion &region, const GraphTables &graph,
     IssueState &state, IssueState *steadyState, BitVector &ready,
     BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
@@ -1641,10 +1644,10 @@ static FailureOr<GreedyStepStatus> scheduleReadyByIndex(
                                ready, scheduled, pending, order,
                                *selectedPreview, origins)))
     return failure();
-  return GreedyStepStatus::Continue;
+  return GreedyStep{selected, GreedyStepStatus::Continue};
 }
 
-static FailureOr<GreedyStepStatus> scheduleOriginalNext(
+static FailureOr<GreedyStep> scheduleOriginalNext(
     const GreedyRegion &region, const GraphTables &graph, IssueState &state,
     IssueState *steadyState, BitVector &ready, BitVector &scheduled,
     SmallVectorImpl<unsigned> &pending, GreedyResult &result, unsigned next,
@@ -1653,25 +1656,25 @@ static FailureOr<GreedyStepStatus> scheduleOriginalNext(
     const ComputeIslandInfo &computeIslands) {
   stallTarget = next;
   IssuePreview preview;
-  FailureOr<FillStallStatus> filled =
+  FailureOr<std::optional<unsigned>> filled =
       fillStallBeforeNext(region, graph, state, steadyState, ready, scheduled,
                           pending, result.order, result.stats, next, preview,
                           origins, noInsts, computeIslands);
   if (failed(filled))
     return failure();
-  if (*filled == FillStallStatus::ScheduledFiller) {
+  if (*filled) {
     if (!nextStillReady(ready, scheduled, next))
       stallTarget.reset();
-    return GreedyStepStatus::Continue;
+    return GreedyStep{**filled, GreedyStepStatus::Continue};
   }
   stallTarget.reset();
   if (scheduled.test(next))
-    return GreedyStepStatus::Continue;
+    return GreedyStep{std::nullopt, GreedyStepStatus::Continue};
   if (failed(scheduleReadyNode(next, region, graph, state, steadyState, ready,
                                scheduled, pending, result.order, preview,
                                origins)))
     return failure();
-  return GreedyStepStatus::Continue;
+  return GreedyStep{next, GreedyStepStatus::Continue};
 }
 
 static BitVector buildNoInsts(const GreedyRegion &region,
@@ -1971,17 +1974,17 @@ findGreedyAction(const GreedyRegion &region, const IssueState &state,
   return alternative;
 }
 
-static FailureOr<std::optional<GreedyStepStatus>> resumeGreedyStallTarget(
+static FailureOr<std::optional<GreedyStep>> resumeGreedyStallTarget(
     const GreedyRegion &region, const GraphTables &graph, IssueState &state,
     IssueState *steadyState, BitVector &ready, BitVector &scheduled,
     SmallVectorImpl<unsigned> &pending, GreedyResult &result,
     const ValueOriginMap &origins, const ComputeIslandInfo &computeIslands,
     const BitVector &noInsts, std::optional<unsigned> &stallTarget) {
   if (!stallTarget)
-    return std::optional<GreedyStepStatus>{};
+    return std::optional<GreedyStep>{};
   if (!nextStillReady(ready, scheduled, *stallTarget)) {
     stallTarget.reset();
-    return std::optional<GreedyStepStatus>{};
+    return std::optional<GreedyStep>{};
   }
   FailureOr<std::optional<unsigned>> modelDecision =
       findReadyAlternative(ReadySchedulePhase::ResumeBaseline, ready,
@@ -1991,23 +1994,23 @@ static FailureOr<std::optional<GreedyStepStatus>> resumeGreedyStallTarget(
     return failure();
 
   if (*modelDecision) {
-    FailureOr<GreedyStepStatus> scheduledResult =
+    FailureOr<GreedyStep> scheduledResult =
         scheduleReadyByIndex(**modelDecision, region, graph, state, steadyState,
                              ready, scheduled, pending, result.order, origins);
     if (failed(scheduledResult))
       return failure();
-    return std::optional<GreedyStepStatus>(*scheduledResult);
+    return std::optional<GreedyStep>(*scheduledResult);
   }
-  FailureOr<GreedyStepStatus> scheduledResult = scheduleOriginalNext(
+  FailureOr<GreedyStep> scheduledResult = scheduleOriginalNext(
       region, graph, state, steadyState, ready, scheduled, pending, result,
       *stallTarget, origins, noInsts, stallTarget, computeIslands);
   if (failed(scheduledResult))
     return failure();
-  return std::optional<GreedyStepStatus>(*scheduledResult);
+  return std::optional<GreedyStep>(*scheduledResult);
 }
 
 struct GreedyStepPreparation {
-  std::optional<GreedyStepStatus> completed;
+  std::optional<GreedyStep> completed;
   unsigned next = 0;
 };
 
@@ -2022,8 +2025,9 @@ static FailureOr<GreedyStepPreparation> prepareGreedyStep(
                                noInsts)))
     return failure();
   if (result.order.size() == region.ops.size())
-    return GreedyStepPreparation{GreedyStepStatus::Done};
-  FailureOr<std::optional<GreedyStepStatus>> resumed = resumeGreedyStallTarget(
+    return GreedyStepPreparation{
+        GreedyStep{std::nullopt, GreedyStepStatus::Done}};
+  FailureOr<std::optional<GreedyStep>> resumed = resumeGreedyStallTarget(
       region, graph, state, steadyState, ready, scheduled, pending, result,
       origins, computeIslands, noInsts, stallTarget);
   if (failed(resumed))
@@ -2032,7 +2036,8 @@ static FailureOr<GreedyStepPreparation> prepareGreedyStep(
     return GreedyStepPreparation{**resumed};
   if (!ready.any()) {
     recordDependencyCycle(graph, scheduled, pending, result);
-    return GreedyStepPreparation{GreedyStepStatus::Blocked};
+    return GreedyStepPreparation{
+        GreedyStep{std::nullopt, GreedyStepStatus::Blocked}};
   }
 
   unsigned next = findFirstUnscheduled(scheduled);
@@ -2042,7 +2047,7 @@ static FailureOr<GreedyStepPreparation> prepareGreedyStep(
   return GreedyStepPreparation{std::nullopt, next};
 }
 
-static FailureOr<GreedyStepStatus> scheduleGreedyReadyAction(
+static FailureOr<GreedyStep> scheduleGreedyReadyAction(
     unsigned next, const GreedyRegion &region, const GraphTables &graph,
     IssueState &state, IssueState *steadyState, BitVector &ready,
     BitVector &scheduled, SmallVectorImpl<unsigned> &pending,
@@ -2063,7 +2068,7 @@ static FailureOr<GreedyStepStatus> scheduleGreedyReadyAction(
                               noInsts, stallTarget, computeIslands);
 }
 
-static FailureOr<GreedyStepStatus> buildGreedyStepWithoutRecurrence(
+static FailureOr<GreedyStep> buildGreedyStepWithoutRecurrence(
     const GreedyRegion &region, const GraphTables &graph, IssueState &state,
     IssueState *steadyState, BitVector &ready, BitVector &scheduled,
     SmallVectorImpl<unsigned> &pending, GreedyResult &result,
@@ -2081,7 +2086,7 @@ static FailureOr<GreedyStepStatus> buildGreedyStepWithoutRecurrence(
       pending, result, origins, computeIslands, noInsts, stallTarget);
 }
 
-static FailureOr<GreedyStepStatus> buildGreedyStep(
+static FailureOr<GreedyStep> buildGreedyStep(
     const GreedyRegion &region, const GraphTables &graph,
     const waveamdmachine::ArchData &arch,
     const waveamdmachine::EventSimConfig &config, IssueState &state,
@@ -2130,13 +2135,13 @@ static FailureOr<GreedyCompletion> buildGreedyBaselineCompletion(
   std::optional<unsigned> stallTarget;
 
   while (baselineResult.order.size() != region.ops.size()) {
-    FailureOr<GreedyStepStatus> step = buildGreedyStepWithoutRecurrence(
+    FailureOr<GreedyStep> step = buildGreedyStepWithoutRecurrence(
         region, graph, baselineState, baselineSteadyState.get(), baselineReady,
         baselineScheduled, baselinePending, baselineResult, origins,
         computeIslands, noInsts, stallTarget);
-    if (failed(step) || *step == GreedyStepStatus::Blocked)
+    if (failed(step) || step->status == GreedyStepStatus::Blocked)
       return failure();
-    if (*step == GreedyStepStatus::Done)
+    if (step->status == GreedyStepStatus::Done)
       break;
   }
 
@@ -2166,11 +2171,11 @@ struct GreedyOrderState {
         noInsts(buildNoInsts(region, staticInfo)), state(std::move(state)),
         steadyState(std::move(steadyState)) {}
 
-  FailureOr<GreedyStepStatus> step(const GreedyRegion &region,
-                                   const GraphTables &graph,
-                                   const waveamdmachine::ArchData &arch,
-                                   const waveamdmachine::EventSimConfig &config,
-                                   const ValueOriginMap &origins) {
+  FailureOr<GreedyStep> step(const GreedyRegion &region,
+                             const GraphTables &graph,
+                             const waveamdmachine::ArchData &arch,
+                             const waveamdmachine::EventSimConfig &config,
+                             const ValueOriginMap &origins) {
     return buildGreedyStep(region, graph, arch, config, state,
                            steadyState.get(), ready, scheduled, pending, result,
                            origins, computeIslands, noInsts, stallTarget);
@@ -2194,13 +2199,13 @@ static GreedyResult runGreedyOrder(GreedyOrderState &orderState,
                                    const waveamdmachine::EventSimConfig &config,
                                    const ValueOriginMap &origins) {
   while (orderState.result.order.size() != region.ops.size()) {
-    FailureOr<GreedyStepStatus> step =
+    FailureOr<GreedyStep> step =
         orderState.step(region, graph, arch, config, origins);
     if (failed(step))
       return failGreedyModel(orderState.result);
-    if (*step == GreedyStepStatus::Done)
+    if (step->status == GreedyStepStatus::Done)
       break;
-    if (*step == GreedyStepStatus::Blocked)
+    if (step->status == GreedyStepStatus::Blocked)
       return orderState.result;
   }
 
@@ -2591,8 +2596,6 @@ private:
   void loadModel(unsigned classId);
   void saveModel(unsigned classId);
   LogicalResult advanceClass(unsigned classId, size_t &added);
-  FailureOr<Operation *> getTrailingBarrier(unsigned classId,
-                                            size_t previousSize) const;
   LogicalResult rendezvousBarriers();
   bool hasWaitingBarriers() const;
   MultiWaveGreedyResults takeResults();
@@ -2627,23 +2630,6 @@ void MultiWaveGreedyCoordinator::saveModel(unsigned classId) {
     steadyState = classState.steadyState->model.takeMultiWaveState();
 }
 
-FailureOr<Operation *>
-MultiWaveGreedyCoordinator::getTrailingBarrier(unsigned classId,
-                                               size_t previousSize) const {
-  const GreedyOrderState &classState = *classes[classId];
-  Operation *barrier = nullptr;
-  for (unsigned position :
-       llvm::seq<unsigned>(previousSize, classState.result.order.size())) {
-    Operation *op = regions[classId].ops[classState.result.order[position]];
-    if (!isBarrierOp(op))
-      continue;
-    if (barrier || position + 1 != classState.result.order.size())
-      return failure();
-    barrier = op;
-  }
-  return barrier;
-}
-
 LogicalResult MultiWaveGreedyCoordinator::rendezvousBarriers() {
   if (!llvm::all_of(waitingBarriers,
                     [](Operation *barrier) { return barrier != nullptr; }))
@@ -2662,21 +2648,20 @@ LogicalResult MultiWaveGreedyCoordinator::advanceClass(unsigned classId,
   GreedyOrderState &classState = *classes[classId];
   size_t previousSize = classState.result.order.size();
   loadModel(classId);
-  FailureOr<GreedyStepStatus> step =
+  FailureOr<GreedyStep> step =
       classState.step(regions[classId], graphs[classId], arch, config, origins);
   if (failed(step))
     return failure();
-  if (*step == GreedyStepStatus::Blocked)
+  if (step->status == GreedyStepStatus::Blocked)
     return failure();
   saveModel(classId);
 
   added = classState.result.order.size() - previousSize;
   if (added == 0)
     return failure();
-  FailureOr<Operation *> barrier = getTrailingBarrier(classId, previousSize);
-  if (failed(barrier))
-    return failure();
-  waitingBarriers[classId] = *barrier;
+  Operation *issued =
+      step->issued ? regions[classId].ops[*step->issued] : nullptr;
+  waitingBarriers[classId] = issued && isBarrierOp(issued) ? issued : nullptr;
   if (failed(rendezvousBarriers()))
     return failure();
   return success();
