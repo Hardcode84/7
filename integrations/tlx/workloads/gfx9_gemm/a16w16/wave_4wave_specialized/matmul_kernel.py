@@ -578,10 +578,10 @@ def _store_acc_strip(
     offsets_0, offsets_2 = tl.split(offsets_even)
     offsets_1, offsets_3 = tl.split(offsets_odd)
 
-    tlx.buffer_store(tlx.cast_preserve_layout(acc_0, tl.float16), c_ptr, offsets_0)
-    tlx.buffer_store(tlx.cast_preserve_layout(acc_1, tl.float16), c_ptr, offsets_1)
-    tlx.buffer_store(tlx.cast_preserve_layout(acc_2, tl.float16), c_ptr, offsets_2)
-    tlx.buffer_store(tlx.cast_preserve_layout(acc_3, tl.float16), c_ptr, offsets_3)
+    tlx.buffer_store(acc_0.to(tl.float16), c_ptr, offsets_0)
+    tlx.buffer_store(acc_1.to(tl.float16), c_ptr, offsets_1)
+    tlx.buffer_store(acc_2.to(tl.float16), c_ptr, offsets_2)
+    tlx.buffer_store(acc_3.to(tl.float16), c_ptr, offsets_3)
 
 
 @triton.jit

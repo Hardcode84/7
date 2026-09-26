@@ -556,8 +556,8 @@ class SoftmaxState:
         registers1 = _pin_score_register_layout(exponentiated_scores.registers1)
         tile_sum = _reduce_score_registers(registers0, registers1)
         row_sum = self.row_sum + tile_sum
-        registers0 = tlx.cast_preserve_layout(registers0, out_dtype)
-        registers1 = tlx.cast_preserve_layout(registers1, out_dtype)
+        registers0 = registers0.to(out_dtype)
+        registers1 = registers1.to(out_dtype)
         p0, p1 = _registers_to_probability_fragments(registers0)
         p2, p3 = _registers_to_probability_fragments(registers1)
         probabilities = ProbabilityFragments(
@@ -757,7 +757,7 @@ def _normalize_output_fragment(
     acc = tlx.require_layout(acc, mma_layout)
     row_scale = _workitems_to_rows(inverse_row_sum)
     output = acc * row_scale[:, None]
-    output = tlx.cast_preserve_layout(output, out_dtype)
+    output = output.to(out_dtype)
     return tlx.release_layout(output)
 
 
