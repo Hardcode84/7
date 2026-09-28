@@ -174,9 +174,11 @@ struct HazardConfig {
   unsigned valuWriteSGPRVmemReadLatency;
   unsigned valuWriteExecConsumerLatency;
   unsigned transForwardingWaitStates;
+  unsigned dstSelForwardingWaitStates;
   bool hasDelayAlu;
   bool lgkmWaitNeedsValuGap;
   bool hasTransForwardingHazard;
+  bool hasDstSelForwardingHazard;
   bool hasTransCoexecutionHazard;
   bool hasWmmaCoexecutionHazard;
   bool hasScratchBaseForwardingHazard;
@@ -219,10 +221,13 @@ static HazardConfig makeHazardConfig(const llvm::MCSubtargetInfo &sti,
       /*valuWriteExecConsumerLatency=*/
       getValuWriteExecConsumerLatency(isaVersion),
       /*transForwardingWaitStates=*/issueHazards.transWriteVGPRValuRead,
+      /*dstSelForwardingWaitStates=*/1,
       /*hasDelayAlu=*/llvm::AMDGPU::isGFX11Plus(sti),
       /*lgkmWaitNeedsValuGap=*/
       legacyWaitCounters && !isCDNA4Family(isaVersion),
       /*hasTransForwardingHazard=*/
+      isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
+      /*hasDstSelForwardingHazard=*/
       isCDNA3Family(isaVersion) || isCDNA4Family(isaVersion),
       /*hasTransCoexecutionHazard=*/
       arch && arch->hasTransCoexecutionHazard,
@@ -332,6 +337,7 @@ enum class PhysicalHazardKind : uint8_t {
   MfmaWrite,
   MfmaSrcCRead,
   TransWriteVGPR,
+  DstSelWriteVGPR,
   ValuWriteVGPR,
   ValuWriteSGPR,
   StoreWriteData,
@@ -798,13 +804,17 @@ static bool isVMEM(Operation *op) {
          op->hasTrait<OpTrait::waveamdmachine::VMEMStoreOp>();
 }
 
+static bool isDS(Operation *op) {
+  return op->hasTrait<OpTrait::waveamdmachine::DSOp>();
+}
+
 struct HazardOpInfo {
   std::optional<waveamdmachine::StoreWriteDataHazard> storeWriteData;
   std::optional<unsigned> lgkmWaitLimit;
   waveamdmachine::WaitcntInfo waitcnt;
   waveamdmachine::SchedClass schedClass =
       waveamdmachine::SchedClass::NumSchedClasses;
-  unsigned instructionIssueCount = 1;
+  unsigned waitStateCount = 1;
   unsigned mfmaPasses = 0;
   bool noMachineInst = false;
   bool controlFlow = false;
@@ -825,7 +835,25 @@ struct HazardOpInfo {
   bool readFirstLane = false;
   bool permlane32Swap = false;
   bool ldsDmaIssue = false;
+  bool ds = false;
 };
+
+static FailureOr<unsigned> getHazardWaitStateCount(Operation *op,
+                                                   const HazardConfig &cfg) {
+  if (auto nop = dyn_cast<waveamdmachine::SNopOp>(op)) {
+    auto imm = nop->getOperand(0).getDefiningOp<waveamdmachine::ImmOp>();
+    if (!imm)
+      return nop.emitOpError("requires a literal immediate");
+    uint64_t encoded = imm.getValue();
+    unsigned bits =
+        cfg.isaVersion.Major >= 12 ? 7 : (cfg.isaVersion.Major >= 8 ? 4 : 3);
+    if (encoded >= (uint64_t{1} << bits))
+      return nop.emitOpError("immediate exceeds target encoding");
+    return static_cast<unsigned>(encoded) + 1;
+  }
+  return waveamdmachine::getInstructionIssueCount(op, cfg.isaVersion,
+                                                  cfg.wavefrontSize);
+}
 
 using HazardOpInfoMap = DenseMap<Operation *, HazardOpInfo>;
 
@@ -865,6 +893,10 @@ static bool isCachedPermlane32Swap(Operation *op, const HazardOpInfo *info) {
   return info ? info->permlane32Swap : isPermlane32Swap(op);
 }
 
+static bool isCachedMemory(Operation *op, const HazardOpInfo *info) {
+  return info ? info->ds || info->vmem : isDS(op) || isVMEM(op);
+}
+
 static unsigned getVGPRWriteHazardLimit(const HazardConfig &cfg) {
   return std::max({cfg.valuWriteVGPRMfmaLatency,
                    cfg.valuWriteVGPRReadlaneLatency,
@@ -902,6 +934,16 @@ static unsigned getTransForwardingUseWait(Operation *op, RegSpan use,
   if (!isVGPRSpan(use) || !legacyValu || trans)
     return 0;
   return waitForHazardAge(hazard, cfg.transForwardingWaitStates);
+}
+
+static unsigned getDstSelForwardingWait(Operation *op, RegSpan access,
+                                        const PhysicalHazard &hazard,
+                                        const HazardConfig &cfg,
+                                        const HazardOpInfo *info) {
+  if (hazard.kind != PhysicalHazardKind::DstSelWriteVGPR ||
+      !isVGPRSpan(access) || !isCachedVALU(op, info))
+    return 0;
+  return waitForHazardAge(hazard, cfg.dstSelForwardingWaitStates);
 }
 
 static unsigned getValuWriteSGPRUseWait(Operation *op, RegSpan use,
@@ -946,6 +988,8 @@ static unsigned getPhysicalUseWait(Operation *op, unsigned operandIndex,
                                    const HazardOpInfo *info) {
   if (!overlaps(use, hazard.span))
     return 0;
+  if (unsigned wait = getDstSelForwardingWait(op, use, hazard, cfg, info))
+    return wait;
   if (info ? info->mfma : isMFMA(op))
     return getMfmaUseWait(operandIndex, use, hazard, cfg);
   return getNonMfmaUseWait(op, use, hazard, cfg, info);
@@ -964,13 +1008,16 @@ static unsigned getPhysicalDefWait(Operation *op, RegSpan def,
         hazard, getXdlResultLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::MfmaSrcCRead &&
-      isCachedLegacyVALU(op, cfg, info))
+      (isCachedLegacyVALU(op, cfg, info) || isCachedMemory(op, info)))
     return waitForHazardAge(
         hazard, getXdlSrcCReadWarLatency(getHazardMfmaPassCount(hazard), cfg));
 
   if (hazard.kind == PhysicalHazardKind::StoreWriteData &&
       isCachedVALU(op, info) && isVGPRSpan(def))
     return waitForHazardAge(hazard, hazard.limit);
+
+  if (unsigned wait = getDstSelForwardingWait(op, def, hazard, cfg, info))
+    return wait;
 
   return 0;
 }
@@ -1001,6 +1048,15 @@ static unsigned getResultPhysicalWait(Operation *op, const HazardState &state,
     for (const PhysicalHazard &hazard : state.physical)
       wait = std::max(wait, getPhysicalDefWait(op, *span, hazard, cfg, info));
   }
+  auto fixedDefs =
+      dyn_cast<waveamdmachine::FixedPhysicalRegisterDefsOpInterface>(op);
+  if (!fixedDefs)
+    return wait;
+  for (const waveamdmachine::PhysicalRegisterSpan &def :
+       fixedDefs.getFixedPhysicalRegisterDefs())
+    for (const PhysicalHazard &hazard : state.physical)
+      wait = std::max(
+          wait, getPhysicalDefWait(op, toRegSpan(def), hazard, cfg, info));
   return wait;
 }
 
@@ -1099,6 +1155,23 @@ static void addProducedTransRegHazard(Value result, HazardState &state,
                     cfg.transForwardingWaitStates);
 }
 
+static void addProducedDstSelForwardingHazard(Operation *op, HazardState &state,
+                                              const HazardConfig &cfg) {
+  if (!cfg.hasDstSelForwardingHazard)
+    return;
+  auto producer = dyn_cast<waveamdmachine::DstSelForwardingOpInterface>(op);
+  if (!producer)
+    return;
+  Value result = producer.getDstSelForwardingResult();
+  if (!result)
+    return;
+  std::optional<RegSpan> span = getAllocatedRegSpan(result);
+  if (!span || !isVGPRSpan(*span))
+    return;
+  addPhysicalHazard(state, *span, PhysicalHazardKind::DstSelWriteVGPR,
+                    cfg.dstSelForwardingWaitStates);
+}
+
 static FailureOr<HazardOpInfoMap> collectHazardOpInfo(Operation *root,
                                                       const HazardConfig &cfg) {
   HazardOpInfoMap infos;
@@ -1113,8 +1186,10 @@ static FailureOr<HazardOpInfoMap> collectHazardOpInfo(Operation *root,
     info.waitcnt = getWaitcntInfo(op);
     info.noMachineInst = emitsNoMachineInst(*op);
     info.controlFlow = isControlFlowOp(op);
-    info.instructionIssueCount = waveamdmachine::getInstructionIssueCount(
-        op, cfg.isaVersion, cfg.wavefrontSize);
+    FailureOr<unsigned> waitStates = getHazardWaitStateCount(op, cfg);
+    if (failed(waitStates))
+      return WalkResult::interrupt();
+    info.waitStateCount = *waitStates;
     info.mfma = isMFMA(op);
     info.mfmaPasses = info.mfma ? getMfmaPassCount(op) : 0;
     info.legacyValu = isLegacyVALU(op, cfg);
@@ -1138,6 +1213,7 @@ static FailureOr<HazardOpInfoMap> collectHazardOpInfo(Operation *root,
     info.readFirstLane = isa<waveamdmachine::VReadfirstlaneB32Op>(op);
     info.permlane32Swap = isPermlane32Swap(op);
     info.ldsDmaIssue = isLdsDmaIssue(op);
+    info.ds = isDS(op);
     infos.try_emplace(op, info);
     return WalkResult::advance();
   });
@@ -1184,6 +1260,7 @@ static void addProducedPhysicalHazards(Operation *op, HazardState &state,
   }
   if (info ? info->legacyValu : isLegacyVALU(op, cfg))
     addProducedValuPhysicalHazards(op, state, cfg, info);
+  addProducedDstSelForwardingHazard(op, state, cfg);
   addProducedStorePhysicalHazards(op, state, cfg, info);
 }
 
@@ -1242,12 +1319,13 @@ static bool isCachedScratchMemory(Operation *op, const HazardOpInfo *info) {
               : op->hasTrait<OpTrait::waveamdmachine::ScratchMemoryOp>();
 }
 
-static unsigned getCachedInstructionIssueCount(Operation *op,
-                                               const HazardConfig &cfg,
-                                               const HazardOpInfo *info) {
-  return info ? info->instructionIssueCount
-              : waveamdmachine::getInstructionIssueCount(op, cfg.isaVersion,
-                                                         cfg.wavefrontSize);
+static unsigned getCachedWaitStateCount(Operation *op, const HazardConfig &cfg,
+                                        const HazardOpInfo *info) {
+  if (info)
+    return info->waitStateCount;
+  FailureOr<unsigned> waitStates = getHazardWaitStateCount(op, cfg);
+  assert(succeeded(waitStates) && "validated hazard op must have wait states");
+  return *waitStates;
 }
 
 static unsigned getWmmaVALUWaitSlots(Operation *op, const HazardConfig &cfg,
@@ -1462,7 +1540,7 @@ static void transferHazards(Operation *op, HazardState &state,
                             const HazardOpInfo *info = nullptr) {
   bool controlFlow = info ? info->controlFlow : isControlFlowOp(op);
   if (!(info ? info->noMachineInst : emitsNoMachineInst(*op))) {
-    unsigned issueCount = getCachedInstructionIssueCount(op, cfg, info);
+    unsigned issueCount = getCachedWaitStateCount(op, cfg, info);
     advanceHazards(state, issueCount, /*advanceLgkm=*/!controlFlow);
     if (isCachedVALUForCoexecution(op, info))
       advanceCoexecHazards(state, issueCount);

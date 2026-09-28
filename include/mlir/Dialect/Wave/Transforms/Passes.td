@@ -602,8 +602,12 @@ def WaveAMDLateTuples
 
 def WaveAMDMFMAPackedPeephole
     : Pass<"waveamd-mfma-packed-peephole"> {
-  let summary = "Unpack packed F32 operations still blocked by MFMA";
+  let summary = "Lower packed F32 operations around MFMA";
   let description = [{
+    In gfx950 functions that contain MFMA, decomposes every packed F32 add,
+    multiply, and FMA after scheduling. This removes the victim instructions
+    for the MFMA operand read-skip erratum before register allocation.
+
     On targets with MFMA coissue exclusion, replays the final compute-slot
     order and decomposes packed F32 add, multiply, and FMA operations only when
     their scalar lanes fit inside the remaining MFMA window. Exact tuple

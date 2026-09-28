@@ -1,5 +1,6 @@
 // RUN: wave-opt --waveamd-insert-hazard-waits -split-input-file %s | FileCheck %s
 // RUN: wave-opt --waveamd-insert-hazard-waits -split-input-file %s | wave-opt -split-input-file | FileCheck %s
+// RUN: wave-opt --waveamd-insert-hazard-waits -split-input-file %s | wave-opt --waveamd-insert-hazard-waits -split-input-file | FileCheck %s
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx1100"} {
 
@@ -390,6 +391,144 @@ func.func @cdna4_mfma_result_store_delay(
          !waveamdmachine.reg<sgpr, 2>) -> !waveamdmachine.mem.token
   return
 }
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+
+// CHECK-LABEL: func.func @dst_sel_forwarding_raw
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_pk_add_f32
+func.func @dst_sel_forwarding_raw(
+    %a: !waveamdmachine.reg<vgpr, 2, 0>,
+    %b: !waveamdmachine.reg<vgpr, 2, 2>,
+    %c: !waveamdmachine.reg<vgpr, 2, 4>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 2, 2>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %sum = waveamdmachine.v_pk_add_f32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 2, 8>,
+         !waveamdmachine.reg<vgpr, 2, 4>)
+        -> !waveamdmachine.reg<vgpr, 2, 10>
+  return
+}
+
+// CHECK-LABEL: func.func @dst_sel_forwarding_waw
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_pk_add_f32
+func.func @dst_sel_forwarding_waw(
+    %a: !waveamdmachine.reg<vgpr, 2, 0>,
+    %b: !waveamdmachine.reg<vgpr, 2, 2>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 2, 2>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %sum = waveamdmachine.v_pk_add_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 2, 2>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  return
+}
+
+// CHECK-LABEL: func.func @dst_sel_forwarding_inactive
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK-NEXT: waveamdmachine.v_pk_add_f32
+func.func @dst_sel_forwarding_inactive(
+    %a: !waveamdmachine.reg<vgpr, 2, 0>,
+    %b: !waveamdmachine.reg<vgpr, 2, 2>,
+    %c: !waveamdmachine.reg<vgpr, 2, 4>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b {op_sel_hi = 2 : i64}
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 2, 2>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %sum = waveamdmachine.v_pk_add_f32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 2, 8>,
+         !waveamdmachine.reg<vgpr, 2, 4>)
+        -> !waveamdmachine.reg<vgpr, 2, 10>
+  return
+}
+
+// CHECK-LABEL: func.func @dst_sel_forwarding_gap_filled
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK-NEXT: waveamdmachine.v_xor_b32
+// CHECK-NEXT: waveamdmachine.v_pk_add_f32
+func.func @dst_sel_forwarding_gap_filled(
+    %a: !waveamdmachine.reg<vgpr, 2, 0>,
+    %b: !waveamdmachine.reg<vgpr, 2, 2>,
+    %c: !waveamdmachine.reg<vgpr, 2, 4>,
+    %x: !waveamdmachine.reg<vgpr, 1, 6>,
+    %y: !waveamdmachine.reg<vgpr, 1, 7>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 2, 2>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %fill = waveamdmachine.v_xor_b32 %x, %y
+      : (!waveamdmachine.reg<vgpr, 1, 6>,
+         !waveamdmachine.reg<vgpr, 1, 7>)
+        -> !waveamdmachine.reg<vgpr, 1, 12>
+  %sum = waveamdmachine.v_pk_add_f32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 2, 8>,
+         !waveamdmachine.reg<vgpr, 2, 4>)
+        -> !waveamdmachine.reg<vgpr, 2, 10>
+  return
+}
+
+// CHECK-LABEL: func.func @dst_sel_forwarding_f16_raw
+// CHECK: waveamdmachine.v_pk_mul_f16
+// CHECK-NEXT: waveamdmachine.imm 0
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.v_add_f32
+func.func @dst_sel_forwarding_f16_raw(
+    %a: !waveamdmachine.reg<vgpr, 1, 0>,
+    %b: !waveamdmachine.reg<vgpr, 1, 1>,
+    %c: !waveamdmachine.reg<vgpr, 1, 2>) {
+  %mul = waveamdmachine.v_pk_mul_f16 %a, %b
+      : (!waveamdmachine.reg<vgpr, 1, 0>,
+         !waveamdmachine.reg<vgpr, 1, 1>)
+        -> !waveamdmachine.reg<vgpr, 1, 2>
+  %sum = waveamdmachine.v_add_f32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 1, 2>,
+         !waveamdmachine.reg<vgpr, 1, 2>)
+        -> !waveamdmachine.reg<vgpr, 1, 3>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
+
+// CHECK-LABEL: func.func @no_dst_sel_forwarding_hazard
+// CHECK: waveamdmachine.v_pk_mul_f32
+// CHECK-NEXT: waveamdmachine.v_pk_add_f32
+func.func @no_dst_sel_forwarding_hazard(
+    %a: !waveamdmachine.reg<vgpr, 2, 0>,
+    %b: !waveamdmachine.reg<vgpr, 2, 2>,
+    %c: !waveamdmachine.reg<vgpr, 2, 4>) {
+  %mul = waveamdmachine.v_pk_mul_f32 %a, %b
+      : (!waveamdmachine.reg<vgpr, 2, 0>,
+         !waveamdmachine.reg<vgpr, 2, 2>)
+        -> !waveamdmachine.reg<vgpr, 2, 8>
+  %sum = waveamdmachine.v_pk_add_f32 %mul, %c
+      : (!waveamdmachine.reg<vgpr, 2, 8>,
+         !waveamdmachine.reg<vgpr, 2, 4>)
+        -> !waveamdmachine.reg<vgpr, 2, 10>
+  return
+}
+
+}
+
+// -----
+
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 
 // CHECK-LABEL: func.func @m0_delay_before_lds_dma
 // CHECK: waveamdmachine.s_mov_m0
@@ -1123,6 +1262,47 @@ func.func @cdna4_mfma_8pass_src_c_read_war(
   %sum = waveamdmachine.v_add_u32 %x, %s
       : (!waveamdmachine.reg<vgpr, 1, 80>, !waveamdmachine.reg<sgpr, 1, 0>)
       -> !waveamdmachine.reg<vgpr, 1, 9>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_8pass_src_c_ds_read_war
+// CHECK: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: waveamdmachine.imm 6
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.ds_load_b32
+func.func @cdna4_mfma_8pass_src_c_ds_read_war(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 16, 8>,
+    %addr: !waveamdmachine.reg<vgpr, 1, 80>) {
+  %r = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 16, 8>) -> !waveamdmachine.reg<vgpr, 16, 40>
+  %load = waveamdmachine.ds_load_b32 %addr
+      : (!waveamdmachine.reg<vgpr, 1, 80>) -> !waveamdmachine.reg<vgpr, 1, 9>
+  return
+}
+
+// CHECK-LABEL: func.func @cdna4_mfma_8pass_src_c_vmem_read_war
+// CHECK: waveamdmachine.mfma_f32_32x32x16_f16
+// CHECK-NEXT: waveamdmachine.imm 6
+// CHECK-NEXT: waveamdmachine.s_nop
+// CHECK-NEXT: waveamdmachine.buffer_load_b32
+func.func @cdna4_mfma_8pass_src_c_vmem_read_war(
+    %a: !waveamdmachine.reg<vgpr, 4, 0>,
+    %b: !waveamdmachine.reg<vgpr, 4, 4>,
+    %acc: !waveamdmachine.reg<vgpr, 16, 8>,
+    %off: !waveamdmachine.reg<vgpr, 1, 80>,
+    %desc: !waveamdmachine.reg<sgpr, 4, 0>,
+    %zero: !waveamdmachine.reg<sgpr, 1, 4>,
+    %dep: !waveamdmachine.mem.token) {
+  %r = waveamdmachine.mfma_f32_32x32x16_f16 %a, %b, %acc
+      : (!waveamdmachine.reg<vgpr, 4, 0>, !waveamdmachine.reg<vgpr, 4, 4>,
+         !waveamdmachine.reg<vgpr, 16, 8>) -> !waveamdmachine.reg<vgpr, 16, 40>
+  %loaded, %tok = waveamdmachine.buffer_load_b32 %off, %desc, %zero after %dep
+      : (!waveamdmachine.reg<vgpr, 1, 80>, !waveamdmachine.reg<sgpr, 4, 0>,
+         !waveamdmachine.reg<sgpr, 1, 4>, !waveamdmachine.mem.token)
+      -> (!waveamdmachine.reg<vgpr, 1, 9>, !waveamdmachine.mem.token)
   return
 }
 

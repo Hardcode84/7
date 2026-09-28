@@ -764,7 +764,11 @@ class WaveAMDMachine_BinaryU32Result<string mnemonic>
                                        ["inferResultRanges"]>]>;
 
 class WaveAMDMachine_PackedBinaryResult<string mnemonic>
-    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+    : WaveAMDMachine_Op<mnemonic, [
+        WaveAMDMachine_VALU,
+        Pure,
+        WaveAMDMachine_DstSelForwardingOpInterface
+      ]> {
   let archPredicate =
       "isa.Major == 9 || isa.Major == 11 || " #
       "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
@@ -780,7 +784,11 @@ class WaveAMDMachine_PackedBinaryResult<string mnemonic>
 }
 
 class WaveAMDMachine_PackedTernaryResult<string mnemonic>
-    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+    : WaveAMDMachine_Op<mnemonic, [
+        WaveAMDMachine_VALU,
+        Pure,
+        WaveAMDMachine_DstSelForwardingOpInterface
+      ]> {
   let archPredicate =
       "isa.Major == 9 || isa.Major == 11 || " #
       "(isa.Major == 12 && isa.Minor == 5 && isa.Stepping == 0)";
@@ -798,7 +806,11 @@ class WaveAMDMachine_PackedTernaryResult<string mnemonic>
 }
 
 class WaveAMDMachine_PackedF32BinaryResult<string mnemonic>
-    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+    : WaveAMDMachine_Op<mnemonic, [
+        WaveAMDMachine_VALU,
+        Pure,
+        WaveAMDMachine_DstSelForwardingOpInterface
+      ]> {
   let archPredicate = "isa.Major == 8 || isa.Major == 9 || isa.Major == 12";
   let arguments = (ins WaveAMDMachine_VGPR2:$lhs,
                        WaveAMDMachine_VGPR2:$rhs,
@@ -818,7 +830,11 @@ class WaveAMDMachine_PackedF32BinaryResult<string mnemonic>
 }
 
 class WaveAMDMachine_PackedF32TernaryResult<string mnemonic>
-    : WaveAMDMachine_Op<mnemonic, [WaveAMDMachine_VALU, Pure]> {
+    : WaveAMDMachine_Op<mnemonic, [
+        WaveAMDMachine_VALU,
+        Pure,
+        WaveAMDMachine_DstSelForwardingOpInterface
+      ]> {
   let archPredicate = "isa.Major == 8 || isa.Major == 9 || isa.Major == 12";
   let arguments = (ins WaveAMDMachine_VGPR2:$a,
                        WaveAMDMachine_VGPR2:$b,

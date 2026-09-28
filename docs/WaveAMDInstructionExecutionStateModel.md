@@ -272,12 +272,14 @@ its resource-release interval. TRANS and represented packed FP16/FP32
 arithmetic also consume it; ordinary VALU remains available as stall filler.
 Shared-CU simulation uses the same resource per SIMD.
 
-`waveamd-mfma-packed-peephole` runs after machine scheduling. It replays the
-scheduled compute slots and decomposes packed F32 add, multiply, and FMA only
-when scalar lanes fit inside a remaining MFMA exclusion window. Source
-selectors and FMA negation survive the rewrite; clamped operations stay
-packed. Fixed-register clobber candidates also stay packed. Exact tuple
-join/split round trips are removed while unpacking.
+`waveamd-mfma-packed-peephole` runs after machine scheduling. On gfx950, it
+decomposes all packed F32 add, multiply, and FMA operations in each function
+that contains MFMA. This target legalization implements the
+[operand read-skip workaround](HazardMitigationDesign.md#gfx950-mfma-operand-read-skip).
+On other targets with MFMA coissue exclusion, the pass replays scheduled
+compute slots and decomposes a packed operation only when its scalar lanes fit
+inside the remaining MFMA window. Source selectors and FMA negation survive
+the rewrite. Exact tuple join/split round trips are removed while unpacking.
 
 Memory value wait:
 
