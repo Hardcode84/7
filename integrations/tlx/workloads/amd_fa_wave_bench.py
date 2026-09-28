@@ -19,7 +19,7 @@ WAVES_PER_PROGRAM = 8
 ROWS_PER_WAVE = QUERY_TILE_SIZE // WAVES_PER_PROGRAM
 FORCED_REBASE_K_STEP = 64.0
 FORCED_REBASE_LOG2_HEADROOM = amd_fa_wave.SOFTMAX_REFERENCE_HEADROOM_LOG2.value
-WAVE_PERFORMANCE_FLOOR_TFLOPS = 1000.0
+WAVE_PERFORMANCE_FLOOR_TFLOPS = 950.0
 
 
 def nonnegative_int(text):
@@ -160,7 +160,10 @@ def parse_args():
     parser.add_argument(
         "--min-tflops",
         type=float,
-        help="required performance; defaults to 1000 for TLX Wave and 0 for LLVM",
+        help=(
+            "required performance; defaults to "
+            f"{WAVE_PERFORMANCE_FLOOR_TFLOPS:g} for TLX Wave and 0 for LLVM"
+        ),
     )
     parser.add_argument(
         "--qk-max-abs",

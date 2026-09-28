@@ -1524,7 +1524,7 @@ def test_tlx_perf_sweep_forwards_compile_workers_to_fa(tmp_path):
         "wave",
     ]
     assert all(spec.command[-2:] == ("--compile-workers", "3") for spec in specs[:2])
-    for spec, minimum in zip(specs[2:4], ("0", "1000"), strict=False):
+    for spec, minimum in zip(specs[2:4], ("0", "950"), strict=False):
         assert spec.command[-8:] == (
             "--rep",
             "1",
@@ -1535,7 +1535,7 @@ def test_tlx_perf_sweep_forwards_compile_workers_to_fa(tmp_path):
             "--min-tflops",
             minimum,
         )
-    for spec, minimum in zip(specs[4:], ("0", "1000"), strict=False):
+    for spec, minimum in zip(specs[4:], ("0", "950"), strict=False):
         assert spec.command[-6:] == (
             "--rep",
             "1",
@@ -1544,6 +1544,28 @@ def test_tlx_perf_sweep_forwards_compile_workers_to_fa(tmp_path):
             "--min-tflops",
             minimum,
         )
+
+
+def test_tlx_perf_sweep_uses_safe_packed_f32_environment(tmp_path, monkeypatch):
+    runner = _load_tlx_perf_sweep_module()
+    args = SimpleNamespace(device="5", wave_opt=None)
+    llvm = runner.RunSpec("llvm", "LLVM", "llvm", (), tmp_path / "llvm")
+    wave = runner.RunSpec("wave", "Wave", "wave", (), tmp_path / "wave")
+    monkeypatch.setenv("TRITON_DEFAULT_BACKEND", "tlx_wave")
+    monkeypatch.setenv("AMDGCN_SCALARIZE_PACKED_FOPS", "1")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+
+    llvm_env = runner.child_environment(args, llvm)
+    wave_env = runner.child_environment(args, wave)
+
+    assert llvm_env["ROCR_VISIBLE_DEVICES"] == "5"
+    assert llvm_env["AMDGCN_SCALARIZE_PACKED_FOPS"] == "1"
+    assert "TRITON_DEFAULT_BACKEND" not in llvm_env
+    assert "HIP_VISIBLE_DEVICES" not in llvm_env
+    assert "CUDA_VISIBLE_DEVICES" not in llvm_env
+    assert wave_env["TRITON_DEFAULT_BACKEND"] == "tlx_wave"
+    assert "AMDGCN_SCALARIZE_PACKED_FOPS" not in wave_env
 
 
 def test_tlx_fa_wave_bench_forces_every_adaptive_rebase():

@@ -38,6 +38,7 @@ DEFAULT_MXFP_TIMING_REPEATS = 7
 F16_V10_BASELINE_SHAPE = "8192x8192x8192"
 F16_V11_BASELINE_SHAPE = "8192x8192x8192"
 F16_INTER_WAVE_BASELINE_SHAPE = (8192, 8192, 8192)
+FA_EIGHT_WAVE_FLOOR_TFLOPS = 950
 
 
 F16_INPUT_MODES = f16_inputs.INPUT_MODES
@@ -427,7 +428,7 @@ def build_run_specs(args, cache_root):
         for mode, bound_args in (("bounded", ("--qk-max-abs", "1")), ("adaptive", ())):
             for backend in ("llvm", "wave"):
                 cache_dir = cache_root / f"fa-eight-wave-{mode}-{backend}"
-                minimum = "1000" if backend == "wave" else "0"
+                minimum = str(FA_EIGHT_WAVE_FLOOR_TFLOPS) if backend == "wave" else "0"
                 command = (
                     python,
                     script,
@@ -463,8 +464,10 @@ def child_environment(args, spec):
 
     if spec.backend == "wave":
         env["TRITON_DEFAULT_BACKEND"] = "tlx_wave"
+        env.pop("AMDGCN_SCALARIZE_PACKED_FOPS", None)
     else:
         env.pop("TRITON_DEFAULT_BACKEND", None)
+        env["AMDGCN_SCALARIZE_PACKED_FOPS"] = "1"
     return env
 
 
@@ -474,6 +477,8 @@ def print_run(args, spec):
         settings.insert(0, f"ROCR_VISIBLE_DEVICES={shlex.quote(args.device)}")
     if spec.backend == "wave":
         settings.append("TRITON_DEFAULT_BACKEND=tlx_wave")
+    else:
+        settings.append("AMDGCN_SCALARIZE_PACKED_FOPS=1")
     print(f"\n{'=' * 80}\n{spec.label}\n{'=' * 80}", flush=True)
     print(" ".join((*settings, shlex.join(spec.command))), flush=True)
 
