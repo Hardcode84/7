@@ -1,6 +1,5 @@
 """Explicit memory ordering around ordering barriers."""
 
-from collections import defaultdict, deque
 from dataclasses import replace
 
 from . import target_ir
@@ -30,7 +29,6 @@ def thread_barrier_issue_order(target_program):
     values = list(target_program.values)
     ops = list(target_program.ops)
     regions = []
-    lds_derived_values = _lds_data_descendants(target_program)
 
     def resource_targets(target_value_ids):
         return tuple(
@@ -90,42 +88,8 @@ def thread_barrier_issue_order(target_program):
         )
         return op_id, result_id
 
-    def add_lds_consumer_order(operands, source_op_index):
-        operands = tuple(dict.fromkeys(int(value_id) for value_id in operands))
-        if not operands:
-            fail(
-                "TLXW_BARRIER_ORDER_EMPTY_LDS_CONSUMER_ORDER",
-                STAGE,
-                "LDS-consumer-order token requires at least one dependency",
-                source_op_index=source_op_index,
-            )
-        result_id = add_token_value(
-            target_ir.EVENT_DOMAIN_LDS_CONSUMER_ORDER,
-            f"lds_consumer_order_{source_op_index}_{len(ops)}",
-            resource_targets(operands),
-        )
-        op_id = len(ops)
-        ops.append(
-            target_ir.TargetOp(
-                op_id,
-                "lds_consumer_order",
-                operands,
-                (result_id,),
-                target_ir._attrs_tuple({"input_count": len(operands)}, op_id),
-                source_op_index=source_op_index,
-            )
-        )
-        return op_id, result_id
-
     for region in target_program.regions:
         original_op_ids = tuple(int(op_id) for op_id in region.op_ids)
-        lds_consumer_frontiers = _lds_consumer_frontiers(
-            region,
-            original_op_ids,
-            ops,
-            values,
-            lds_derived_values,
-        )
         has_later_issue_barrier = _suffix_matches(
             original_op_ids,
             ops,
@@ -178,19 +142,6 @@ def thread_barrier_issue_order(target_program):
             if not completes_lds_reads and not orders_memory_issue:
                 ordered_op_ids.append(op_id)
                 continue
-
-            consumer_values = lds_consumer_frontiers.get(position, ())
-            if consumer_values:
-                attrs = target_ir.attrs_dict(op)
-                dependency_count = int(attrs.get("dependency_count", 0))
-                readiness = op.operands[:dependency_count]
-                order_op_id, order_token = add_lds_consumer_order(
-                    (*readiness, *consumer_values),
-                    op.source_op_index,
-                )
-                ordered_op_ids.append(order_op_id)
-                op = _replace_barrier_readiness(op, order_token)
-                ops[op_id] = op
 
             if completes_lds_reads and preceding_completion_tokens:
                 op = _append_barrier_lds_read_dependencies(
@@ -256,135 +207,6 @@ def thread_barrier_issue_order(target_program):
     )
     ordered_program = _thread_structured_lds_read_completion(ordered_program)
     return _thread_structured_memory_issue(ordered_program)
-
-
-def _connect_structured_lds_flow(program, op, connect):
-    if op.kind == "for_loop":
-        body = program.regions[int(op.region_ids[0])]
-        for init, argument, yielded, result in zip(
-            op.operands[3:],
-            body.block_arg_ids[1:],
-            body.yield_value_ids,
-            op.results,
-            strict=True,
-        ):
-            connect(init, argument)
-            connect(yielded, argument)
-            connect(init, result)
-            connect(yielded, result)
-    else:
-        for region_id in op.region_ids:
-            child = program.regions[int(region_id)]
-            for yielded, result in zip(child.yield_value_ids, op.results, strict=True):
-                connect(yielded, result)
-
-
-def _lds_data_graph(program):
-    values = program.values
-    direct_users = defaultdict(list)
-    op_users = defaultdict(list)
-    data_results = {}
-    seeds = []
-
-    def connect(source, target):
-        if values[int(target)].type.representation != "token":
-            direct_users[int(source)].append(int(target))
-
-    for op in program.ops:
-        results = tuple(
-            int(result)
-            for result in op.results
-            if values[int(result)].type.representation != "token"
-        )
-        if op.kind == "local_load":
-            seeds.extend(results)
-        elif op.region_ids or op.kind == "for_loop":
-            _connect_structured_lds_flow(program, op, connect)
-        else:
-            data_results[op.target_op_id] = results
-            for operand in op.operands:
-                if values[int(operand)].type.representation != "token":
-                    op_users[int(operand)].append(op.target_op_id)
-    return seeds, direct_users, op_users, data_results
-
-
-def _lds_data_descendants(target_program):
-    seeds, direct_users, op_users, data_results = _lds_data_graph(target_program)
-    derived = set(seeds)
-    pending = deque(seeds)
-    visited_ops = set()
-    while pending:
-        source = pending.popleft()
-        for result in direct_users[source]:
-            if result not in derived:
-                derived.add(result)
-                pending.append(result)
-        for op_id in op_users[source]:
-            if op_id in visited_ops:
-                continue
-            visited_ops.add(op_id)
-            for result in data_results[op_id]:
-                if result not in derived:
-                    derived.add(result)
-                    pending.append(result)
-    return derived
-
-
-def _lds_consumer_frontiers(region, op_ids, ops, values, lds_derived_values):
-    """Return dataflow consumer sinks of LDS reads before each ordering barrier."""
-    crossing_by_position = {}
-    derived_values = set(region.block_arg_ids) & lds_derived_values
-    consumer_frontier = []
-    for position, op_id in enumerate(op_ids):
-        op = ops[op_id]
-        if _orders_memory_issue(op):
-            if consumer_frontier:
-                crossing_by_position[position] = tuple(dict.fromkeys(consumer_frontier))
-            derived_values.clear()
-            consumer_frontier.clear()
-            continue
-
-        if op.kind == "local_load":
-            data_count = int(
-                target_ir.attrs_dict(op).get("data_result_count", len(op.results))
-            )
-            derived_values.update(
-                int(result_id) for result_id in op.results[:data_count]
-            )
-            continue
-
-        derived_operands = tuple(
-            int(value_id) for value_id in op.operands if int(value_id) in derived_values
-        )
-        if not derived_operands and not op.region_ids:
-            continue
-        data_results = tuple(
-            int(result_id)
-            for result_id in op.results
-            if values[int(result_id)].type.representation != "token"
-            and (not op.region_ids or int(result_id) in lds_derived_values)
-        )
-        if not data_results:
-            continue
-        consumed = set(derived_operands)
-        consumer_frontier[:] = [
-            value_id for value_id in consumer_frontier if value_id not in consumed
-        ]
-        derived_values.update(data_results)
-        consumer_frontier.extend(data_results)
-    return crossing_by_position
-
-
-def _replace_barrier_readiness(op, target_value_id):
-    attrs = target_ir.attrs_dict(op)
-    dependency_count = int(attrs.get("dependency_count", 0))
-    operands = (int(target_value_id), *op.operands[dependency_count:])
-    attrs["dependency_count"] = 1
-    return replace(
-        op,
-        operands=tuple(operands),
-        attrs=target_ir._attrs_tuple(attrs, op.target_op_id),
-    )
 
 
 def _thread_structured_memory_issue(target_program):

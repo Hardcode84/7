@@ -6130,7 +6130,7 @@ def test_tlx_wave_converter_preserves_async_wait_source_order():
     ]
 
 
-def test_tlx_wave_barrier_token_carries_lds_consumer_frontier():
+def test_tlx_wave_barrier_waits_for_lds_read_not_its_consumer():
     builder = converter_target_ir.TargetBuilder()
     token_type = converter_target_ir.TargetType("token", "token")
     memdesc_type = converter_target_ir.TargetType("memdesc", "memdesc", "f16")
@@ -6182,18 +6182,13 @@ def test_tlx_wave_barrier_token_carries_lds_consumer_frontier():
 
     ordered = converter_barrier_order.thread_barrier_issue_order(builder.build())
 
-    consumer_order = next(op for op in ordered.ops if op.kind == "lds_consumer_order")
     barrier = ordered.ops[barrier_id]
-    assert consumer_order.operands == (consumed,)
-    assert barrier.operands == (consumer_order.results[0], completion)
-    assert converter_target_ir.attrs_dict(barrier)["dependency_count"] == 1
+    assert barrier.operands == (completion,)
+    assert converter_target_ir.attrs_dict(barrier)["dependency_count"] == 0
     assert converter_target_ir.attrs_dict(barrier)["lds_read_dependency_count"] == 1
-    assert ordered.values[consumer_order.results[0]].event_domain == (
-        converter_target_ir.EVENT_DOMAIN_LDS_CONSUMER_ORDER
-    )
 
 
-def test_tlx_wave_lds_consumer_frontier_tracks_loop_results_individually():
+def test_tlx_wave_barrier_does_not_wait_for_loop_data_result():
     builder = converter_target_ir.TargetBuilder()
     scalar = converter_target_ir.TargetType("scalar", "scalar", "i32")
     tensor = converter_target_ir.TargetType("tensor", "simd_tuple", "f16", 64, 1)
@@ -6235,12 +6230,13 @@ def test_tlx_wave_lds_consumer_frontier_tracks_loop_results_individually():
     )
 
     ordered = converter_barrier_order.thread_barrier_issue_order(builder.build())
-    consumer_order = next(op for op in ordered.ops if op.kind == "lds_consumer_order")
-    assert consumer_order.operands == (data_result,)
-    assert address_result not in consumer_order.operands
+    barrier = next(op for op in ordered.ops if op.kind == "barrier")
+    assert data_result not in barrier.operands
+    assert address_result not in barrier.operands
+    assert converter_target_ir.attrs_dict(barrier)["dependency_count"] == 0
 
 
-def test_tlx_wave_lds_consumer_frontier_tracks_branch_results_individually():
+def test_tlx_wave_barrier_does_not_wait_for_branch_data_result():
     builder = converter_target_ir.TargetBuilder()
     scalar = converter_target_ir.TargetType("scalar", "scalar", "i1")
     tensor = converter_target_ir.TargetType("tensor", "simd_tuple", "f16", 64, 1)
@@ -6299,9 +6295,10 @@ def test_tlx_wave_lds_consumer_frontier_tracks_branch_results_individually():
     )
 
     ordered = converter_barrier_order.thread_barrier_issue_order(builder.build())
-    consumer_order = next(op for op in ordered.ops if op.kind == "lds_consumer_order")
-    assert consumer_order.operands == (data_result,)
-    assert address_result not in consumer_order.operands
+    barrier = next(op for op in ordered.ops if op.kind == "barrier")
+    assert data_result not in barrier.operands
+    assert address_result not in barrier.operands
+    assert converter_target_ir.attrs_dict(barrier)["dependency_count"] == 0
 
 
 def _target_async_wait_local_load_program(load_kind):
@@ -20889,12 +20886,6 @@ def test_tlx_wave_converter_pipeline_uses_compiler_barrier_for_async_refill(
         "exec_where",
     ]
     assert all(op.kind != "sched_barrier" for op in output.target_program.ops)
-    mma = next(op for op in output.target_program.ops if op.kind == "mma")
-    consumer_order = next(
-        op
-        for op in output.target_program.ops
-        if op.kind == "lds_consumer_order" and mma.results[0] in op.operands
-    )
     assert raw_wave.count("wave.where") == 2
     assert (
         sum(
@@ -20931,7 +20922,7 @@ def test_tlx_wave_converter_pipeline_uses_compiler_barrier_for_async_refill(
     ]
     assert len(barrier_indices) == 1
     assert barrier_indices[0] < refill_index
-    assert "wave.schedule_token" in raw_wave
+    assert "wave.schedule_token" not in raw_wave
     barrier_lines = [lines[index] for index in barrier_indices]
     assert len(barrier_lines) == 1
     release_token = _ssa_result_name(barrier_lines[0])
@@ -20974,7 +20965,6 @@ def test_tlx_wave_converter_pipeline_uses_compiler_barrier_for_async_refill(
     )
     assert local_load_tokens
     assert set(lds_read_tokens) == set(local_load_tokens)
-    assert full_barrier.operands[0] == consumer_order.results[0]
     _run_wave_verify(wave)
     del ctx
 
