@@ -56,6 +56,7 @@ if (_simulator / "sdk-venv/bin/rocm-sdk").is_file() and (
 
 llvm_config.with_environment("WAVE_BUILD_DIR", config.wave_mlir_obj_root)
 llvm_config.with_environment("WAVE_LLVM_TOOLS_DIR", config.llvm_tools_dir)
+llvm_config.with_environment("TRITON_WAVE_BUILD_DIR", config.wave_mlir_obj_root)
 config.substitutions.append(("%PATH%", config.environment["PATH"]))
 config.substitutions.append(("%shlibext", config.llvm_shlib_ext))
 config.substitutions.append(("%python", f'"{sys.executable}"'))
