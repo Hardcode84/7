@@ -125,7 +125,9 @@
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-clear-regalloc-transform-state"
 // PIPELINE: transform.named_sequence @waveamd_backend_finish_transform_regalloc
-// PIPELINE: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
+// PIPELINE: transform.apply_registered_pass "waveamd-mfma-packed-peephole"
+// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
+// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-clear-regalloc-assignments"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "canonicalize"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
@@ -214,8 +216,6 @@
 // PIPELINE-NEXT: "require-selected-input" = true }
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.apply_registered_pass "waveamd-collapse-materialization-variants"
-// PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
-// PIPELINE-NEXT: transform.apply_registered_pass "waveamd-mfma-packed-peephole"
 // PIPELINE-NEXT: : (!transform.any_op) -> !transform.any_op
 // PIPELINE-NEXT: transform.include @waveamd_backend_postschedule
 // PIPELINE: transform.named_sequence @waveamd_backend_emit_only

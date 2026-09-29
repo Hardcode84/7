@@ -1,6 +1,6 @@
 // RUN: wave-opt --split-input-file --waveamd-mfma-packed-peephole %s | FileCheck %s
 
-module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
+module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx942"} {
 
 // CHECK-LABEL: func.func @unpack_round_trip(
 // CHECK-SAME: %[[ADD_MMA_A:[a-zA-Z0-9_]+]]: !waveamdmachine.reg<vgpr, 4>

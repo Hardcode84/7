@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Wave/Transforms/Passes.h"
 
 #include "WaveAMDMachineScheduleEligibility.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/ArchData.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/FunctionalUnit.h"
 #include "mlir/Dialect/WaveAMDMachine/CostModel/InstructionExecutionState.h"
@@ -445,6 +446,45 @@ static void unpackPackedF32(Operation *op) {
       tuple->erase();
 }
 
+static bool hasMFMAOperandReadSkipErratum(const llvm::AMDGPU::IsaVersion &isa) {
+  return isa.Major == 9 && isa.Minor == 5 && isa.Stepping == 0;
+}
+
+static bool containsMFMA(func::FuncOp func) {
+  return func
+      .walk([](Operation *op) {
+        return op->hasTrait<OpTrait::waveamdmachine::MFMAOp>()
+                   ? WalkResult::interrupt()
+                   : WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
+static LogicalResult
+collectErratumCandidates(func::FuncOp func,
+                         llvm::SetVector<Operation *> &candidates) {
+  if (!containsMFMA(func))
+    return success();
+  WalkResult walk = func.walk([&](Operation *op) {
+    std::optional<PackedF32Info> info = getPackedF32Info(op);
+    if (!info)
+      return WalkResult::advance();
+    if (info->clamp) {
+      op->emitOpError("gfx950 MFMA functions do not support clamped packed "
+                      "F32 operations");
+      return WalkResult::interrupt();
+    }
+    if (hasFixedResultClobber(op, *info)) {
+      op->emitOpError("gfx950 MFMA functions cannot scalarize a packed F32 "
+                      "operation with an overlapping fixed result");
+      return WalkResult::interrupt();
+    }
+    candidates.insert(op);
+    return WalkResult::advance();
+  });
+  return success(!walk.wasInterrupted());
+}
+
 struct WaveAMDMFMAPackedPeepholePass
     : public wave::impl::WaveAMDMFMAPackedPeepholeBase<
           WaveAMDMFMAPackedPeepholePass> {
@@ -454,6 +494,20 @@ struct WaveAMDMFMAPackedPeepholePass
         getAMDGPUTargetIsaVersion(root, "waveamd-mfma-packed-peephole");
     if (failed(isa))
       return signalPassFailure();
+
+    if (hasMFMAOperandReadSkipErratum(*isa)) {
+      llvm::SetVector<Operation *> candidates;
+      WalkResult walk = root->walk([&](func::FuncOp func) {
+        return failed(collectErratumCandidates(func, candidates))
+                   ? WalkResult::interrupt()
+                   : WalkResult::advance();
+      });
+      if (walk.wasInterrupted())
+        return signalPassFailure();
+      for (Operation *candidate : candidates)
+        unpackPackedF32(candidate);
+      return;
+    }
 
     if (!isArchSupported(*isa)) {
       root->emitError(

@@ -19,16 +19,17 @@ mutable local copy of the incoming state. The lattice carries the
 LGKM pending bit, active SSA-value hazards, and physical-register
 hazard windows.
 
-Primary hazard classes modeled today include:
+Hazard classes:
 
 | Hazard | Producer | Consumer | Gap |
 |---|---|---|---|
 | VALU after LGKM-clearing wait | `s_waitcnt` with non-default lgkm | any `VALUOp`-trait op | 1 cycle on non-CDNA4 targets (`s_delay_alu` on gfx11+, `s_nop 0` elsewhere) |
 | TRANS forwarding on gfx940-family | `WriteTrans32` VALU op | non-TRANS `VALUOp`-trait op reading the TRANS result | 1 instruction |
+| Destination-selection forwarding on gfx940-family | VALU result with destination selection | overlapping VALU read or write | 1 instruction |
 | M0 read after `s_mov_m0` | `s_mov_m0` | any op with a `!m0`-typed operand | 1 instruction |
 | VMEM store after MFMA | any `MFMAOp`-trait op | any `VMEMStoreOp`-trait op consuming the MFMA result | pass-count-derived XDL result latency |
 | MFMA physical result write | allocated MFMA result span | later read/write of the same span | pass-count-derived XDL result latency |
-| MFMA SrcC WAR | allocated MFMA accumulator span | later write of the same span | pass-count-derived XDL SrcC latency |
+| MFMA SrcC WAR | allocated MFMA accumulator span | later VALU or memory write of the same span | pass-count-derived XDL SrcC latency |
 | VALU physical write | allocated VGPR/SGPR/VCC/EXEC result | later consumers sensitive to that class | target-specific VALU write latency |
 | Store write-data | selected stores | later physical span users | target-specific store-data latency |
 
@@ -52,12 +53,41 @@ pass-count-derived result hazards. No-machine-inst forwarding ops
 conservatively copy operand hazards to results.
 
 Constants for the gaps live in `HazardConfig`: M0 pipeline delay, VALU write
-latencies, TRANS forwarding wait states, LGKM wait behavior, and target ISA
+latencies, forwarding wait states, LGKM wait behavior, and target ISA
 state used to derive MFMA pass-count latencies. CDNA4 disables the
 LGKM-to-VALU gap; LLVM and CDNA4 docs have no matching post-`s_waitcnt` VALU
 hazard. `valuDep1` is the `s_delay_alu` encoding for "wait one VALU cycle",
-computed once at pass start. The gfx940-family TRANS forwarding gap is one
-wait state.
+computed once at pass start. Gfx940-family TRANS and destination-selection
+forwarding gaps are one wait state. This rule matches the
+[LLVM destination-selection hazard](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp#L1063-L1184).
+MFMA SrcC WAR repair covers VALU, VMEM, and DS register writes, matching
+[LLVM's MAI hazard check](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp#L3336-L3451).
+
+## gfx950 MFMA operand read-skip
+
+On gfx950, an MFMA can cause a packed-FP32 VALU instruction on a co-executing
+wave to skip its operand read. The VALU instruction can then use stale VGPR
+data. The confirmed victim class is `v_pk_add_f32`, `v_pk_mul_f32`, and
+`v_pk_fma_f32`.
+
+The common backend finishing sequence disables these packed operations for each
+gfx950 function that contains an MFMA or scaled MFMA operation. It lowers every
+packed lane to scalar instructions before register allocation. Keeping the
+packed representation through scheduling preserves its compact live range and
+resource cost. The rule covers the full function because the victim and MFMA
+can run on different waves. Functions without matrix operations keep
+packed-FP32 throughput. Default, unscheduled, and calibration pipelines use
+this sequence before register allocation.
+
+This erratum does not change instruction order. Scheduler legality remains SSA
+dominance plus explicit token edges. Hazard repair does not insert an MFMA NOP.
+
+The public [ROCm erratum workaround](https://github.com/ROCm/triton/commit/aa3cf1a1601f19ac254946bf891a7c002803b30a)
+implements packed-FP32 target-feature suppression and cites ROCM-27743 and
+DEGGIGX90-5078. [LLVM issue 206825](https://github.com/llvm/llvm-project/issues/206825)
+contains the public reproducer and the schedule-sensitive symptom. The
+[CDNA4 ISA reference](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf)
+defines the affected MFMA instruction class.
 
 ## Trait-based classification
 
@@ -101,6 +131,8 @@ own block-entry states.
 At a consumer, the rewrite inserts the maximum needed `s_nop` count
 across active SSA and physical hazards, advances the local state by
 that count, then applies the VALU-after-LGKM mitigation if needed.
+Hazard aging counts `s_nop N` as `N + 1` wait states, matching
+[LLVM's wait-state model](https://github.com/llvm/llvm-project/blob/30bff76d3a294fe0882a05472234b25bb752b16a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp#L1932-L1941).
 
 ## Cross-references
 
@@ -113,22 +145,6 @@ that count, then applies the VALU-after-LGKM mitigation if needed.
 
 Wave uses dense forward dataflow for active hazards, with trait-based
 op classification from the local WaveAMDMachine dialect.
-
-## Deferred work
-
-**Hazard-aware code motion.** `waveamd-hazard-repair` handles the
-pre-scheduler local repair pass. `waveamd-insert-hazard-waits` also contracts
-some barrier drains, fills LGKM/VALU gaps, and hoists M0 moves before final
-NOP insertion.
-
-**Tablegen-described catalog.** A generated hazard catalog only pays
-off once we ship 10+ hazard kinds with multiple subcases each. Three
-direct C++ hazards are fine for now.
-
-**Forwarding precision.** No-machine-inst ops conservatively copy the
-union of operand hazards to all results. That is safe for current
-pseudo ops, but tuple-like ops could keep per-lane precision if false
-positive waits ever show up in real kernels.
 
 ## File layout
 

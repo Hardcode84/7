@@ -224,6 +224,7 @@ def check_transform_finish(label: str, ir, transform_finish) -> None:
         label,
         transform_finish_passes,
         [
+            "waveamd-mfma-packed-peephole",
             "waveamd-clear-regalloc-assignments",
             "canonicalize",
             "cse",

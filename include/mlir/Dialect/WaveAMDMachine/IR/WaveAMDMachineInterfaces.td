@@ -237,6 +237,24 @@ def WaveAMDMachine_M0WriteHazardOpInterface
   ];
 }
 
+def WaveAMDMachine_DstSelForwardingOpInterface
+    : OpInterface<"DstSelForwardingOpInterface"> {
+  let cppNamespace = "::mlir::waveamdmachine";
+  let description = [{
+    VALU result that needs a destination-selection forwarding gap.
+  }];
+  let methods = [
+    InterfaceMethod<
+      [{Result with destination-selection forwarding, if active.}],
+      "::mlir::Value",
+      "getDstSelForwardingResult",
+      (ins),
+      [{}],
+      [{ return ($_op.getOpSelHi() & 1) ? $_op.getResult() : ::mlir::Value(); }]
+    >,
+  ];
+}
+
 def WaveAMDMachine_MMAOpInterface
     : OpInterface<"MMAOpInterface"> {
   let cppNamespace = "::mlir::waveamdmachine";

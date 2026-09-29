@@ -171,7 +171,9 @@ module attributes {transform.with_named_sequence} {
 
   transform.named_sequence @waveamd_backend_finish_transform_regalloc(
       %root: !transform.any_op {transform.consumed}) -> !transform.any_op {
-    %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %root
+    %rlegal = transform.apply_registered_pass "waveamd-mfma-packed-peephole" to %root
+        : (!transform.any_op) -> !transform.any_op
+    %rclr = transform.apply_registered_pass "waveamd-clear-regalloc-assignments" to %rlegal
         : (!transform.any_op) -> !transform.any_op
     %rc = transform.apply_registered_pass "canonicalize" to %rclr
         : (!transform.any_op) -> !transform.any_op
@@ -319,9 +321,7 @@ module attributes {transform.with_named_sequence} {
         to %rcanon : (!transform.any_op) -> !transform.any_op
     %rwinner = transform.apply_registered_pass "waveamd-collapse-materialization-variants"
         to %rs : (!transform.any_op) -> !transform.any_op
-    %rpack = transform.apply_registered_pass "waveamd-mfma-packed-peephole"
-        to %rwinner : (!transform.any_op) -> !transform.any_op
-    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rpack)
+    %r1 = transform.include @waveamd_backend_postschedule failures(propagate) (%rwinner)
         : (!transform.any_op) -> !transform.any_op
     transform.yield %r1 : !transform.any_op
   }

@@ -24,7 +24,9 @@ module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx950"} {
 // ASM-NEXT: v_add_f32_e32
 // ASM-NEXT: v_add_f32_e32
 // ASM-NEXT: v_add_f32_e32
-// ASM-NEXT: v_pk_add_f32
+// ASM-NEXT: v_add_f32_e32
+// ASM-NEXT: v_add_f32_e32
+// ASM-NOT: v_pk_add_f32
 // DIAG: waveamd-machine-schedule region func=mfma_packed_coissue_schedule_codegen
 // DIAG-SAME: action=apply reason=compute_resource
 // DIAG-SAME: resource_stall_fills=3
