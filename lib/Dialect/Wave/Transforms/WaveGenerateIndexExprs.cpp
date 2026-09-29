@@ -849,6 +849,17 @@ static bool isSymbolicSelectOp(SelectOp op, bool allowI64Integers,
   return cmp && canBuildSymbolicCmp(cmp, allowI64Integers, solver, store);
 }
 
+// Rational substitution can widen typed i32 div/rem intermediates.
+static bool isFixedWidthDivRem(Value value) {
+  BinaryOp binary = value.getDefiningOp<BinaryOp>();
+  if (!binary || !isSignlessI32StorageType(value.getType()))
+    return false;
+  return binary.getKind() == BinaryKind::DivSI ||
+         binary.getKind() == BinaryKind::DivUI ||
+         binary.getKind() == BinaryKind::RemSI ||
+         binary.getKind() == BinaryKind::RemUI;
+}
+
 class SymbolicValueBuilder {
 public:
   explicit SymbolicValueBuilder(WaveDialect &dialect, DataFlowSolver &solver,
@@ -1926,6 +1937,8 @@ private:
 
   FailureOr<std::optional<sym::ExprHandle>>
   buildGeneratedBindingExpr(Value value) {
+    if (isFixedWidthDivRem(value))
+      return std::optional<sym::ExprHandle>{};
     if (!hasSymbolicRoot(value))
       return std::optional<sym::ExprHandle>{};
     bool skip = false;
@@ -2356,6 +2369,8 @@ static FailureOr<bool> collectGeneratedBindingRewrite(
     IndexExprOp op, WaveDialect &dialect, BindingState &state, StringRef name,
     Value value, SmallVectorImpl<sym::ExprSubstitution> &substitutions,
     DataFlowSolver &solver) {
+  if (isFixedWidthDivRem(value))
+    return preserveGeneratedBinding(state, name, value);
   SymbolicValueBuilder builder(
       dialect, solver,
       /*allowI64Integers=*/false,
