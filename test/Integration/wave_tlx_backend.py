@@ -1,4 +1,6 @@
 # RUN: %python %s
+# RUN: %python -m pytest -q %S/../../integrations/tlx/tests/test_backend.py \
+# RUN:   -k llvm_gfx950_fa_safe_packed_f32
 # REQUIRES: wave-python-bindings, tlx-wave-backend
 # SPDX-FileCopyrightText: 2026 wave-mlir contributors
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception

@@ -34,7 +34,9 @@ cmake --build build --target wave-opt wave-translate WavePythonModules \
 
 Use the [TLX companion branch](https://github.com/Hardcode84/tlx_triton/tree/wave-integration),
 which supplies the structural source IR and layout bindings. Set
-`TLX_TRITON_DIR` to that checkout.
+`TLX_TRITON_DIR` to that checkout. The companion must disable packed FP32
+operations throughout gfx950 kernels that use MFMA. The
+`AMDGCN_SCALARIZE_PACKED_FOPS` flag alone does not enforce this requirement.
 Install Triton first, then install this backend as a separate editable distribution.
 
 ```bash

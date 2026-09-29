@@ -981,6 +981,40 @@ def _load_tlx_fa_wave_module(module_name="_tlx_wave_test_fa_wave"):
     return module
 
 
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_llvm_gfx950_fa_safe_packed_f32(tmp_path, adaptive):
+    tutorial = _load_tlx_fa_wave_module()
+    sm_scale, adaptive_reference, log2_score_bound = (
+        tutorial._resolve_softmax_reference(128, None, None if adaptive else 1.0)
+    )
+    constants = {
+        "N_CTX": 8192,
+        "BATCH": 2,
+        "HEADS": 64,
+        "TOTAL_HEADS": 128,
+        "SM_SCALE": sm_scale,
+        "LOG2_SCORE_BOUND": log2_score_bound,
+        "ADAPTIVE_REFERENCE": adaptive_reference,
+    }
+    source = ASTSource(
+        fn=tutorial._attn_fwd_wave_pipeline,
+        signature={
+            **dict.fromkeys(("Q", "K", "V", "Out"), "*bf16"),
+            **dict.fromkeys(constants, "constexpr"),
+        },
+        constexprs=constants,
+    )
+    with triton.knobs.cache.scope(), triton.knobs.amd.scope():
+        triton.knobs.cache.dir = str(tmp_path / "cache")
+        triton.knobs.amd.scalarize_packed_fops = True
+        compiled = triton_compile(
+            source, target=GPUTarget("hip", "gfx950", 64), options={"num_warps": 8}
+        )
+    assert "v_mfma_" in compiled.asm["amdgcn"]
+    assert not re.search(r"\bv_pk_(?:add|mul|fma)_f32\b", compiled.asm["amdgcn"])
+    assert compiled.asm["hsaco"][:4] == b"\x7fELF"
+
+
 def _load_tlx_fa_wave_bench_module(module_name="_tlx_wave_test_fa_wave_bench"):
     tutorial_dir = Path(__file__).resolve().parents[1] / "workloads"
     bench_path = tutorial_dir / "amd_fa_wave_bench.py"
@@ -1524,7 +1558,7 @@ def test_tlx_perf_sweep_forwards_compile_workers_to_fa(tmp_path):
         "wave",
     ]
     assert all(spec.command[-2:] == ("--compile-workers", "3") for spec in specs[:2])
-    for spec, minimum in zip(specs[2:4], ("0", "1000"), strict=False):
+    for spec, minimum in zip(specs[2:4], ("0", "950"), strict=False):
         assert spec.command[-8:] == (
             "--rep",
             "1",
@@ -1535,7 +1569,7 @@ def test_tlx_perf_sweep_forwards_compile_workers_to_fa(tmp_path):
             "--min-tflops",
             minimum,
         )
-    for spec, minimum in zip(specs[4:], ("0", "1000"), strict=False):
+    for spec, minimum in zip(specs[4:], ("0", "950"), strict=False):
         assert spec.command[-6:] == (
             "--rep",
             "1",
@@ -1544,6 +1578,28 @@ def test_tlx_perf_sweep_forwards_compile_workers_to_fa(tmp_path):
             "--min-tflops",
             minimum,
         )
+
+
+def test_tlx_perf_sweep_uses_safe_packed_f32_environment(tmp_path, monkeypatch):
+    runner = _load_tlx_perf_sweep_module()
+    args = SimpleNamespace(device="5", wave_opt=None)
+    llvm = runner.RunSpec("llvm", "LLVM", "llvm", (), tmp_path / "llvm")
+    wave = runner.RunSpec("wave", "Wave", "wave", (), tmp_path / "wave")
+    monkeypatch.setenv("TRITON_DEFAULT_BACKEND", "tlx_wave")
+    monkeypatch.setenv("AMDGCN_SCALARIZE_PACKED_FOPS", "1")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+
+    llvm_env = runner.child_environment(args, llvm)
+    wave_env = runner.child_environment(args, wave)
+
+    assert llvm_env["ROCR_VISIBLE_DEVICES"] == "5"
+    assert llvm_env["AMDGCN_SCALARIZE_PACKED_FOPS"] == "1"
+    assert "TRITON_DEFAULT_BACKEND" not in llvm_env
+    assert "HIP_VISIBLE_DEVICES" not in llvm_env
+    assert "CUDA_VISIBLE_DEVICES" not in llvm_env
+    assert wave_env["TRITON_DEFAULT_BACKEND"] == "tlx_wave"
+    assert "AMDGCN_SCALARIZE_PACKED_FOPS" not in wave_env
 
 
 def test_tlx_fa_wave_bench_forces_every_adaptive_rebase():
