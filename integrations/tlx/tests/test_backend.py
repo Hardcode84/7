@@ -1313,7 +1313,7 @@ def test_tlx_glu_precompile_reuses_variant_launch_configuration(monkeypatch):
 
 
 def test_tlx_fa_precompile_reuses_runtime_launch_configuration(monkeypatch):
-    pytest.importorskip("torch")
+    torch = pytest.importorskip("torch")
     bench = _load_tlx_fa_bench_module("_tlx_wave_test_fa_bench_precompile")
     calls = {}
     kernels = {
@@ -1342,6 +1342,8 @@ def test_tlx_fa_precompile_reuses_runtime_launch_configuration(monkeypatch):
     assert set(calls) == set(kernels)
     for args, kwargs in calls.values():
         assert all(isinstance(arg, MockTensor) for arg in args[:4])
+        strides = torch.empty(args[0].shape, device="meta").stride()
+        assert args[4:20] == strides * 4
         assert kwargs["grid"]
 
     simple_args, simple_kwargs = calls["async_simple"]
