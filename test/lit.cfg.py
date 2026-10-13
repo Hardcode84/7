@@ -35,6 +35,7 @@ _wave_python_root = str(
     Path(config.wave_mlir_obj_root) / "python_packages" / "wave_mlir"
 )
 _wave_python_mlir_libs = str(Path(_wave_python_root) / "mlir" / "_mlir_libs")
+llvm_config.with_system_environment(["PYTHONPATH"])
 if Path(_wave_python_root).is_dir():
     llvm_config.with_environment("PYTHONPATH", _wave_python_root, append_path=True)
     config.available_features.add("wave-python-bindings")

@@ -2543,7 +2543,7 @@ def _symbolic_mask_conditions(state, predicates):
 
 
 def _symbolic_buffer_relation(state, op, attrs, ordinary_operand_count):
-    """Deserialize a producer-composed relation and bind its scalar leaves."""
+    """Bind scalar and per-slot SIMD address operands."""
     blob = attrs.get("bit_offset_relation")
     names = tuple(attrs.get("index_binding_names", ()))
     count = int(attrs.get("index_binding_count", 0))
@@ -2555,7 +2555,7 @@ def _symbolic_buffer_relation(state, op, attrs, ordinary_operand_count):
             "bit-offset relation",
             target_op_id=op.target_op_id,
         )
-    if count != len(names) or len(set(names)) != count:
+    if len(set(names)) != len(names):
         fail(
             "TLXW_EMIT_MEMORY_RELATION",
             STAGE,
@@ -2572,9 +2572,14 @@ def _symbolic_buffer_relation(state, op, attrs, ordinary_operand_count):
             "memory relation binding operand segment is malformed",
             target_op_id=op.target_op_id,
         )
+    components = tuple(
+        component
+        for target_id in target_ids
+        for component in _as_components(_require_value(state, target_id, op))
+    )
     bindings = {
-        state.dsl.sym(str(name)): _require_value(state, target_id, op)
-        for name, target_id in zip(names, target_ids, strict=False)
+        state.dsl.sym(str(name)): component
+        for name, component in zip(names, components, strict=True)
     }
     return _deserialize_relation_expr(state, blob, op), bindings
 

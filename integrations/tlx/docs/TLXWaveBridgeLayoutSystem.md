@@ -155,8 +155,15 @@ reshape remains an exact integer expression outside this GF(2) path.
 Global-memory relations use the same producer boundary. Conversion carries a
 small forward integer expression for offset-producing operations and composes
 its logical dimensions with the final distributed `LinearLayout` at the memory
-operation. Dynamic scalar leaves become ordinary mapping bindings. There is no
-target-SSA ancestry pass and no element-offset materialization carrier.
+operation. Dynamic scalar leaves become ordinary mapping bindings. An offset
+without a forward expression binds its integer SIMD components directly, in
+packet-slot order. Wave derives recurrences and address facts from their SSA
+definitions. Buffer byte offsets retain modulo-2^32 arithmetic.
+
+Binding operand count and binding name count differ for component tuples.
+Names follow operand order, then component order. Each name binds one scalar
+or lane-SIMD integer value. SSA-bound offsets retain their source packet layout;
+only a logical expression permits composition with another packet layout.
 
 Local-memory relations first rebase the canonical register/lane/warp physical
 inputs onto `(slot, item)`, with item bits formed from lane bits followed by warp
@@ -501,7 +508,7 @@ Target operations carry only schema data needed for emission:
   vector payload width, target family, and metadata ID;
 - ordinary memory metadata such as cache, contiguity, mask behavior, and pointer
   range;
-- global-memory bit-offset relations and their ordinary scalar binding names.
+- global-memory bit-offset relations and their scalar or SIMD binding names.
 
 Target IR must not carry source MLIR objects, Python layout objects, fact or
 layout analysis records, lazy resolvers, callables, emitter state, or

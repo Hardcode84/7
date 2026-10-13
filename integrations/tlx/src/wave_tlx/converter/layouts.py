@@ -1260,6 +1260,25 @@ def make_range_relation(
     return dsl.ixs_serialize(normalized[len(goals)])
 
 
+def buffer_offset_binding_relation(names, element_byte_width):
+    """Map packet slots to fixed-width SSA element offsets."""
+    dsl = load_wave_dsl()
+    slot = dsl.sym("slot")
+    offsets = tuple(dsl.sym(name) for name in names)
+    offset = (
+        offsets[0]
+        if len(offsets) == 1
+        else dsl.piecewise(
+            *(
+                (value, dsl.ixs_eq(slot, index))
+                for index, value in enumerate(offsets[:-1])
+            ),
+            default=offsets[-1],
+        )
+    )
+    return dsl.ixs_serialize(8 * dsl.mod(int(element_byte_width) * offset, 1 << 32))
+
+
 def global_memory_bit_offset_relation(
     layout,
     index_expr,

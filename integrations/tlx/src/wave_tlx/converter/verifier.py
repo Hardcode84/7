@@ -1614,8 +1614,7 @@ def _verify_memory_edges(op, target_program):
             or not relation
             or any(type(byte) is not int or byte < 0 or byte > 255 for byte in relation)
             or not isinstance(binding_names, tuple)
-            or len(binding_names) != binding_count
-            or len(set(binding_names)) != binding_count
+            or len(set(binding_names)) != len(binding_names)
             or any(not isinstance(name, str) or not name for name in binding_names)
         ):
             fail(
@@ -1647,11 +1646,21 @@ def _verify_memory_edges(op, target_program):
                 "memory relation binding operand segment is malformed",
                 target_op_id=op.target_op_id,
             )
-        for target_value_id in op.operands[
-            ordinary_count : ordinary_count + binding_count
-        ]:
+        binding_ids = op.operands[ordinary_count : ordinary_count + binding_count]
+        component_count = sum(
+            target_program.values[int(value_id)].type.component_count
+            for value_id in binding_ids
+        )
+        if len(binding_names) != component_count:
+            fail(
+                "TLXW_VERIFY_MEMORY_RELATION",
+                STAGE,
+                "memory relation names must match binding components",
+                target_op_id=op.target_op_id,
+            )
+        for target_value_id in binding_ids:
             binding_type = target_program.values[int(target_value_id)].type
-            if binding_type.representation != "scalar" or (
+            if binding_type.representation not in {"scalar", "simd", "simd_tuple"} or (
                 binding_type.element_type != "index"
                 and not (
                     isinstance(binding_type.element_type, str)
@@ -1661,7 +1670,7 @@ def _verify_memory_edges(op, target_program):
                 fail(
                     "TLXW_VERIFY_MEMORY_RELATION",
                     STAGE,
-                    "memory relation bindings must be scalar integer SSA values",
+                    "memory relation bindings must be integer SSA values",
                     target_op_id=op.target_op_id,
                     target_value_id=int(target_value_id),
                 )

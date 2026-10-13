@@ -124,6 +124,14 @@ mod = ixsimpl.mod
 xor = ixsimpl.xor_
 
 
+def piecewise(
+    *branches: tuple[ixsimpl.Expr | int, ixsimpl.Expr | int],
+    default: ixsimpl.Expr | int,
+) -> ixsimpl.Expr:
+    """Build a total piecewise expression."""
+    return ixsimpl.pw(*branches, (default, sym_ctx.true_()))
+
+
 def ixs_check(
     exprs: Sequence[ixsimpl.Expr],
     facts: Sequence[ixsimpl.Expr],

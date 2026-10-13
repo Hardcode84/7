@@ -188,12 +188,18 @@ def _join_value_relation(builder, source_ids, result_id):
 def _memory_relation(builder, offset_target_id, element_byte_width, element_contiguity):
     relation = _value_relation(builder, offset_target_id)
     if relation is None:
-        fail(
-            "TLXW_RELATION_UNREPRESENTABLE_OFFSET",
-            STAGE,
-            "global-memory offset has no exact forward value relation",
-            target_value_id=int(offset_target_id),
+        value = builder.values[int(offset_target_id)]
+        names = tuple(
+            f"offset{offset_target_id}_{component}"
+            for component in range(value.type.component_count)
         )
+        return {
+            "bit_offset_relation": layouts.buffer_offset_binding_relation(
+                names, element_byte_width
+            ),
+            "index_binding_count": 1,
+            "index_binding_names": names,
+        }, (int(offset_target_id),)
     value = builder.values[int(offset_target_id)]
     if value.layout_map_id is None:
         fail(
@@ -224,17 +230,10 @@ def _buffer_memory_relation(
     *,
     layout=None,
 ):
-    """Compose a uniform pointer displacement into a buffer index relation.
-
-    Direct-to-LDS buffer operations carry a scalar resource base and a
-    distributed element offset.  Keep the resource rooted at the original
-    pointer and serialize any exact ``addptr`` displacement together with the
-    distributed offset.  This avoids materializing an equivalent buffer
-    descriptor for every displaced use while preserving the source address
-    expression exactly.
-    """
+    """Return a resource base and its exact buffer byte-offset relation."""
     pointer = builder.pointer_relations.get(int(base_target_id))
-    if pointer is None:
+    offset = _value_relation(builder, offset_target_id)
+    if pointer is None or offset is None:
         if layout is not None:
             return int(base_target_id), *_memory_relation_for_layout(
                 builder,
@@ -251,14 +250,6 @@ def _buffer_memory_relation(
         )
         return int(base_target_id), attrs, bindings
 
-    offset = _value_relation(builder, offset_target_id)
-    if offset is None:
-        fail(
-            "TLXW_RELATION_UNREPRESENTABLE_OFFSET",
-            STAGE,
-            "global-memory offset has no exact forward value relation",
-            target_value_id=int(offset_target_id),
-        )
     value = builder.values[int(offset_target_id)]
     if layout is None and value.layout_map_id is None:
         fail(
@@ -3118,7 +3109,16 @@ def _convert_buffer_load_to_local(
         op,
     )
     dma_packet_layout = None
-    if not has_mask and not has_other and contiguity > 1:
+    # Packet remapping requires a logical formula; SSA bindings retain ownership.
+    if (
+        not has_mask
+        and not has_other
+        and contiguity > 1
+        and _value_relation(
+            builder, _single_source_target(builder, fields["offset_value_id"], op)
+        )
+        is not None
+    ):
         dma_packet_layout = layouts.direct_to_lds_packet_layout(
             offset_layout,
             memdesc_layout,

@@ -10877,6 +10877,32 @@ def test_tlx_wave_runtime_launches_no_memory_kernel():
         torch.cuda.synchronize()
 
 
+@triton.jit
+def _tlx_wave_wrapping_column_sum(src, dst, stride, BLOCK: tl.constexpr):
+    src += 3
+    columns = tl.arange(0, BLOCK)
+    offset = columns
+    total = tl.full((BLOCK,), 0, tl.float32)
+    for _row in range(4):
+        total += tlx.buffer_load(src, offset)
+        offset += stride
+    tl.store(dst + columns, total)
+
+
+@pytest.mark.parametrize("block", [64, 512])
+@pytest.mark.parametrize("wrap", [0, 1 << 30, -(1 << 30)])
+def test_tlx_wave_runtime_wrapping_buffer_recurrence(block, wrap):
+    torch, _arch = _require_tlx_wave_runtime_target()
+    x = torch.arange(4 * block + 3, device="cuda", dtype=torch.float32)
+    y = torch.empty(block, device="cuda", dtype=torch.float32)
+    with _active_tlx_wave_driver():
+        _tlx_wave_wrapping_column_sum[(1,)](
+            x, y, block + wrap, BLOCK=block, num_warps=1
+        )
+        torch.cuda.synchronize()
+    torch.testing.assert_close(y, x[3:].reshape(4, block).sum(0), rtol=0, atol=0)
+
+
 def test_tlx_wave_runtime_launches_masked_global_memory_kernel():
     torch, _arch = _require_tlx_wave_runtime_target()
     block = 64
@@ -13491,6 +13517,163 @@ def test_tlx_wave_converter_preserves_shared_dma_base_materialization(tmp_path):
     assert dma_ops[0].operands[1] == dma_ops[1].operands[1]
     assert dma_ops[0].operands[1] != output.target_program.kernel.arg_target_ids[0]
     assert output.emitted_module.text.count("wave.ptr_add") == 1
+    del ctx
+
+
+def _assert_memory_relation_binding_count(target_program, op):
+    names = converter_target_ir.attrs_dict(op)["index_binding_names"]
+    for malformed_names in (names[:-1], (*names, "extra_offset")):
+        malformed_op = replace(
+            op,
+            attrs=tuple(
+                (
+                    replace(attr, value=malformed_names)
+                    if attr.name == "index_binding_names"
+                    else attr
+                )
+                for attr in op.attrs
+            ),
+        )
+        malformed = replace(
+            target_program,
+            ops=tuple(
+                malformed_op if candidate == op else candidate
+                for candidate in target_program.ops
+            ),
+        )
+        with pytest.raises(converter_diagnostics.Diagnostic) as exc_info:
+            converter_verifier.verify_target_program(malformed)
+        assert exc_info.value.code == "TLXW_VERIFY_MEMORY_RELATION"
+        assert exc_info.value.target_op_id == op.target_op_id
+        assert "names must match binding components" in str(exc_info.value)
+
+
+def _assert_wrapping_buffer_relation(relation, names, update, load_after_update):
+    direction = 1 if update == "addi" else -1
+    for stride in (16, 1073741840, -1073741808):
+        for iteration in range(3):
+            values = {
+                name: (component + direction * (iteration + load_after_update) * stride)
+                % (1 << 32)
+                for component, name in enumerate(names)
+            }
+            for slot, name in enumerate(names):
+                assert relation.eval({"slot": slot, **values}) == 8 * (
+                    4 * values[name] % (1 << 32)
+                )
+
+
+@pytest.mark.parametrize("components", [1, 8])
+@pytest.mark.parametrize("update", ["addi", "subi"])
+@pytest.mark.parametrize("load_after_update", [False, True])
+def test_tlx_wave_converter_maps_loop_carried_buffer_offset(
+    tmp_path, components, update, load_after_update
+):
+    size = 64 * components
+    offset = "%next" if load_after_update else "%current"
+    preamble = f"""
+#blocked = #ttg.blocked<{{sizePerThread = [{components}], threadsPerWarp = [64], warpsPerCTA = [1], order = [0]}}>
+"""
+    local_func = f"""
+  tt.func public @converter_loop_carried_buffer_offset(
+      %src: !tt.ptr<f32> {{tt.pointer_range = 32 : i32}},
+      %dst: !tt.ptr<f32> {{tt.pointer_range = 32 : i32}},
+      %stride: i32 {{tt.divisibility = 16 : i32}}) attributes {{noinline = false}} {{
+    %offset = tt.make_range {{end = {size} : i32, start = 0 : i32}} : tensor<{size}xi32, #blocked>
+    %lower = arith.constant 2 : i32
+    %upper = arith.constant 8 : i32
+    %step = arith.constant 2 : i32
+    %base_delta = arith.constant 3 : i32
+    %src_shifted = tt.addptr %src, %base_delta : !tt.ptr<f32>, i32
+    %dst_shifted = tt.addptr %dst, %base_delta : !tt.ptr<f32>, i32
+    %delta = tt.splat %stride : i32 -> tensor<{size}xi32, #blocked>
+    %result = scf.for %i = %lower to %upper step %step
+        iter_args(%current = %offset) -> (tensor<{size}xi32, #blocked>) : i32 {{
+      %next = arith.{update} %current, %delta : tensor<{size}xi32, #blocked>
+      %loaded = amdg.buffer_load %src_shifted[{offset}] {{contiguity = {components} : i32}} : tensor<{size}xf32, #blocked>
+      amdg.buffer_store %loaded, %dst_shifted[{offset}] {{contiguity = {components} : i32}} : tensor<{size}xf32, #blocked>
+      scf.yield %next : tensor<{size}xi32, #blocked>
+    }}
+    tt.return
+  }}
+"""
+    mod, ctx = _parse_ttgir(tmp_path, local_func, num_warps=1, preamble=preamble)
+    output = converter_pipeline.convert_ttgir_to_wave(mod)
+    memory_ops = [
+        op
+        for op in output.target_program.ops
+        if op.kind in {"buffer_load", "buffer_store"}
+    ]
+    assert len(memory_ops) == 2
+    shifted_pointers = {
+        op.results[0] for op in output.target_program.ops if op.kind == "addptr"
+    }
+    assert len(shifted_pointers) == 2
+    assert memory_ops[0].operands[0] in shifted_pointers
+    assert memory_ops[1].operands[1] in shifted_pointers
+    dsl, _ir = converter_emission._load_wave_dsl()
+    for op in memory_ops:
+        attrs = converter_target_ir.attrs_dict(op)
+        assert attrs["index_binding_count"] == 1
+        names = attrs["index_binding_names"]
+        assert len(names) == components
+        _assert_memory_relation_binding_count(output.target_program, op)
+        relation = dsl.ixs_deserialize(attrs["bit_offset_relation"])
+        _assert_wrapping_buffer_relation(relation, names, update, load_after_update)
+    wave = output.emitted_module.text
+    assert "scf.for" in wave
+    assert wave.count("wave.gather") == 1
+    lowered = _run_wave_lower_symbolic_memory(wave)
+    assert "wave.gather" not in lowered
+    assert "wave.scatter" not in lowered
+    _run_waveamd_to_machine(wave)
+    result = subprocess.run(
+        [wave_bridge_tools._wave_tool("wave-translate"), "--wave-to-amdgpu-asm"],
+        input=wave,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "buffer_load_dword" in result.stdout
+    assert "buffer_store_dword" in result.stdout
+    del ctx
+
+
+@pytest.mark.parametrize("components", [1, 4])
+def test_tlx_wave_converter_loop_carried_dma_offset(tmp_path, components):
+    size = components * 64
+    preamble = f"""
+#blocked = #ttg.blocked<{{sizePerThread = [{components}], threadsPerWarp = [64], warpsPerCTA = [1], order = [0]}}>
+#shared = #ttg.swizzled_shared<{{vec = {components}, perPhase = 1, maxPhase = 1, order = [0]}}>
+#smem = #ttg.shared_memory
+"""
+    local_func = f"""
+  tt.func public @converter_loop_carried_dma_offset(
+      %src: !tt.ptr<f32> {{tt.pointer_range = 32 : i32}},
+      %stride: i32 {{tt.divisibility = 16 : i32}}) attributes {{noinline = false}} {{
+    %alloc = ttg.local_alloc : () -> !ttg.memdesc<{size}xf32, #shared, #smem, mutable>
+    %offset = tt.make_range {{end = {size} : i32, start = 0 : i32}} : tensor<{size}xi32, #blocked>
+    %zero = arith.constant 0 : i32
+    %one = arith.constant 1 : i32
+    %two = arith.constant 2 : i32
+    %delta = tt.splat %stride : i32 -> tensor<{size}xi32, #blocked>
+    %result = scf.for %i = %zero to %two step %one
+        iter_args(%current = %offset) -> (tensor<{size}xi32, #blocked>) : i32 {{
+      %token = amdg.buffer_load_to_local %src[%current] into %alloc {{contiguity = {components} : i32}} : <f32>[tensor<{size}xi32, #blocked>] -> <{size}xf32, #shared, #smem, mutable>
+      %group = ttg.async_commit_group tokens %token
+      %wait = ttg.async_wait %group {{num = 0 : i32}}
+      %next = arith.addi %current, %delta : tensor<{size}xi32, #blocked>
+      scf.yield %next : tensor<{size}xi32, #blocked>
+    }}
+    tt.return
+  }}
+"""
+    mod, ctx = _parse_ttgir(tmp_path, local_func, num_warps=1, preamble=preamble)
+    output = converter_pipeline.convert_ttgir_to_wave(mod)
+    lowered = _run_wave_lower_symbolic_memory(output.emitted_module.text)
+    assert "waveamd.dma_load_lds" in lowered
+    _run_waveamd_to_machine(lowered)
     del ctx
 
 
@@ -18242,15 +18425,15 @@ def test_tlx_wave_converter_masks_wide_buffer_store_with_where(
     tmp_path,
 ):
     preamble = """
-#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [1], order = [0]}>
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [64], warpsPerCTA = [1], order = [0]}>
 """
     local_func = """
   tt.func public @converter_wide_masked_buffer_store(%arg0: !tt.ptr<f16> {tt.pointer_range = 32 : i32}, %limit: i32) attributes {noinline = false} {
-    %range = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32, #blocked>
-    %value = arith.constant dense<0.000000e+00> : tensor<64xf16, #blocked>
-    %limit_splat = tt.splat %limit : i32 -> tensor<64xi32, #blocked>
-    %mask = arith.cmpi slt, %range, %limit_splat : tensor<64xi32, #blocked>
-    amdg.buffer_store %value, %arg0[%range], %mask {contiguity = 4 : i32} : tensor<64xf16, #blocked>
+    %range = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #blocked>
+    %value = arith.constant dense<0.000000e+00> : tensor<256xf16, #blocked>
+    %limit_splat = tt.splat %limit : i32 -> tensor<256xi32, #blocked>
+    %mask = arith.cmpi slt, %range, %limit_splat : tensor<256xi32, #blocked>
+    amdg.buffer_store %value, %arg0[%range], %mask {contiguity = 4 : i32} : tensor<256xf16, #blocked>
     tt.return
   }
 """
