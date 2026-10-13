@@ -23,3 +23,13 @@ __pycache__/
 compile_commands.json
 
 .codex
+
+# Slide dependencies and generated binary exports
+node_modules/
+*.lockb
+*.pdf
+*.pptx
+*.png
+*.jpg
+*.jpeg
+*.webp

@@ -51,6 +51,7 @@ path = [
     "LICENSE.TXT",
     "llvm-commit.txt",
     "build_tools/llvm_patches/*.patch",
+    "build_tools/slides/bun.lock",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 wave-mlir contributors"
