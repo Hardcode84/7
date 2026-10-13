@@ -232,6 +232,8 @@ SIMPLE_BEST_CONFIG = {
 def _kernel_runtime_args(a, b, bias, y, out):
     M, K = a.shape
     _, N = b.shape
+    if not (0 < M < 2**31 and 0 < N < 2**31):
+        raise ValueError("GLU row and column extents must fit positive signed i32")
     a_strides = a.stride()
     b_strides = b.stride()
     y_strides = y.stride()
@@ -281,6 +283,16 @@ def chiplet_transform_chunked(
         + xcd * chunk_size
         + (local_pid % chunk_size)
     )
+
+
+@triton.jit
+def wrapped_tile_offsets(tile, extent, BLOCK_SIZE: tl.constexpr):
+    """Map unsigned tile coordinates into a positive signed-32 extent."""
+    coordinates = tl.cast(tile, tl.uint32) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(
+        tl.uint32
+    )
+    # Unsigned remainder preserves aligned groups; signed remainder does not.
+    return (coordinates % tl.cast(extent, tl.uint32)).to(tl.int32)
 
 
 @triton.constexpr_function
@@ -361,10 +373,10 @@ def tlx_addmm_glu_kernel_optimized(
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # Get offsets this pid is responsible for in m dim
-    offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_m = wrapped_tile_offsets(pid_m, M, BLOCK_SIZE_M)
 
     # Get offsets this pid is responsible for in n dim
-    offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_n = wrapped_tile_offsets(pid_n, N, BLOCK_SIZE_N)
 
     # Get offsets this pid is responsible for in k dim
     offs_k = tl.arange(0, BLOCK_SIZE_K)
@@ -619,10 +631,10 @@ def tlx_addmm_glu_kernel_optimized_async(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
 
     # Get offsets this pid is responsible for in m dim
-    offs_m = offs_cm % M
+    offs_m = wrapped_tile_offsets(pid_m, M, BLOCK_SIZE_M)
 
     # Get offsets this pid is responsible for in n dim
-    offs_n = offs_cn % N
+    offs_n = wrapped_tile_offsets(pid_n, N, BLOCK_SIZE_N)
 
     # Get offsets this pid is responsible for in k dim
     offs_k = tl.arange(0, BLOCK_SIZE_K)
@@ -828,8 +840,8 @@ def tlx_addmm_glu_kernel_simple_async(
 
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    offs_m = offs_cm % M
-    offs_n = offs_cn % N
+    offs_m = wrapped_tile_offsets(pid_m, M, BLOCK_SIZE_M)
+    offs_n = wrapped_tile_offsets(pid_n, N, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     # Async-prefetch Y into a padded LDS buffer before the K-loop
@@ -938,8 +950,8 @@ def tlx_addmm_glu_kernel_persistent(
         pid_m = first_pid_m + ((swizzled % num_pid_in_group) % group_size_m)
         pid_n = (swizzled % num_pid_in_group) // group_size_m
 
-        offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        offs_m = wrapped_tile_offsets(pid_m, M, BLOCK_SIZE_M)
+        offs_n = wrapped_tile_offsets(pid_n, N, BLOCK_SIZE_N)
 
         a_base_off = offs_m[:, None] * sa0
         b_base_off = offs_n[None, :] * sb1
@@ -1156,8 +1168,8 @@ def tlx_addmm_glu_kernel_baseline(
     tl.assume(sc0 > 0)
     tl.assume(sc1 > 0)
 
-    offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_m = wrapped_tile_offsets(pid_m, M, BLOCK_SIZE_M)
+    offs_n = wrapped_tile_offsets(pid_n, N, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + offs_m[:, None] * sa0 + offs_k[None, :] * sa1
     b_ptrs = b_ptr + offs_k[:, None] * sb0 + offs_n[None, :] * sb1

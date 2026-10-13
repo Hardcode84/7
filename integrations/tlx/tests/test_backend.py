@@ -11008,13 +11008,61 @@ def test_tlx_runtime_gfx950_v9_amd_backend_transposed_b_e2e(tmp_path):
     torch.testing.assert_close(got, expected, atol=1e-1, rtol=0)
 
 
-def test_tlx_wave_runtime_gfx950_glu_optimized_async_e2e(tmp_path):
+@triton.jit
+def _tlx_glu_tile_coordinates(
+    out, tile, extent, BLOCK: tl.constexpr, OFFSETS: tl.constexpr
+):
+    offsets = OFFSETS(tile, extent, BLOCK)
+    tl.store(out + tl.arange(0, BLOCK), offsets)
+
+
+@pytest.mark.parametrize("backend", ["wave", "llvm"])
+@pytest.mark.parametrize("block", [32, 128, 512])
+def test_tlx_glu_wrapped_tile_coordinates(backend, block):
+    torch, _arch = _require_tlx_wave_runtime_target()
+    tutorial = _load_tlx_glu_bench_module()
+    out = torch.empty(block, device="cuda", dtype=torch.int32)
+    driver = _active_tlx_wave_driver if backend == "wave" else _active_amd_driver
+    with driver():
+        for tile in (0, 1, (2**31 - 1) // 128, -1):
+            for extent in (1, 48, 127, 1024, 21568, 2**31 - 1):
+                _tlx_glu_tile_coordinates[(1,)](
+                    out, tile, extent, block, tutorial.wrapped_tile_offsets, num_warps=1
+                )
+                coordinates = (tile * block + torch.arange(block, device="cuda")) & (
+                    2**32 - 1
+                )
+                torch.testing.assert_close(
+                    out, (coordinates % extent).int(), atol=0, rtol=0
+                )
+        torch.cuda.synchronize()
+
+
+@pytest.mark.parametrize("m,n", [(0, 128), (128, 0), (2**31, 128), (128, 2**31)])
+def test_tlx_glu_rejects_invalid_coordinate_extents(m, n):
+    torch = pytest.importorskip("torch")
+    tutorial = _load_tlx_glu_bench_module()
+    a = MockTensor(torch.float16, [m, 256])
+    b = MockTensor(torch.float16, [256, n])
+    with pytest.raises(ValueError, match="extents must fit positive signed i32"):
+        tutorial._kernel_runtime_args(a, b, None, None, None)
+
+
+@pytest.mark.parametrize("backend", ["wave", "llvm"])
+@pytest.mark.parametrize(
+    "shape,max_tile_n", [((128, 128, 256), 256), ((257, 193, 256), 128)]
+)
+@pytest.mark.parametrize(
+    "variant",
+    ["baseline", "simple_async", "optimized_async", "optimized", "persistent"],
+)
+def test_tlx_wave_runtime_gfx950_glu_e2e(tmp_path, backend, shape, max_tile_n, variant):
     torch, arch = _require_tlx_wave_runtime_target()
     if arch != "gfx950":
         pytest.skip(f"requires physical gfx950 hardware for gfx950 GLU e2e, got {arch}")
-    tutorial = _load_tlx_glu_bench_module("_tlx_wave_glu_optimized_async_runtime")
+    tutorial = _load_tlx_glu_bench_module()
 
-    m, n, k = 128, 128, 256
+    m, n, k = shape
     device = torch.device("cuda")
     torch.manual_seed(0)
     a = torch.randn((m, k), device=device, dtype=torch.float16)
@@ -11024,15 +11072,28 @@ def test_tlx_wave_runtime_gfx950_glu_optimized_async_e2e(tmp_path):
 
     expected = tutorial.pytorch_baseline(bias, a, b, y)
     torch.cuda.synchronize()
-
-    with (
-        _active_tlx_wave_driver(),
-        triton.knobs.cache.scope(),
-        triton.knobs.runtime.scope(),
-    ):
-        triton.knobs.cache.dir = str(tmp_path / "glu-optimized-async-runtime-cache")
+    driver = _active_tlx_wave_driver if backend == "wave" else _active_amd_driver
+    with driver(), triton.knobs.cache.scope(), triton.knobs.runtime.scope():
+        triton.knobs.cache.dir = str(tmp_path / "glu-runtime-cache")
         triton.knobs.runtime.override_arch = "gfx950"
-        got = tutorial.run_optimized_async(a, b, bias, y)
+        configs = {
+            "baseline": tutorial.BASELINE_BEST_CONFIG,
+            "simple_async": tutorial.SIMPLE_BEST_CONFIG,
+            "optimized_async": tutorial.ASYNC_BEST_CONFIG,
+            "optimized": tutorial.BEST_CONFIG,
+            "persistent": tutorial.PERSISTENT_BEST_CONFIG,
+        }
+        cfg = dict(configs[variant][k])
+        # Narrow tiles bound LLVM layout scratch for unaligned row strides.
+        cfg["BLOCK_SIZE_N"] = min(cfg["BLOCK_SIZE_N"], max_tile_n)
+        got = torch.empty_like(y)
+        if variant == "baseline":
+            tutorial.run_kernel_baseline(bias, a, b, y, cfg, out=got)
+        elif variant == "persistent":
+            num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+            tutorial.run_kernel_persistent(a, b, bias, y, got, cfg, num_cus)
+        else:
+            getattr(tutorial, f"run_kernel_{variant}")(a, b, bias, y, got, cfg)
         torch.cuda.synchronize()
 
     torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)

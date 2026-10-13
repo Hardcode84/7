@@ -2,7 +2,7 @@
 # RUN: %python -m pytest -q %S/../../integrations/tlx/tests/test_backend.py \
 # RUN:   -k 'llvm_gfx950_fa or tlx_fa_llvm_schedule or tlx_fa_packed_f32'
 # RUN: %python -m pytest -q %S/../../integrations/tlx/tests/test_backend.py \
-# RUN:   -k 'ssa_memory_contiguity'
+# RUN:   -k 'ssa_memory_contiguity or tlx_glu or runtime_gfx950_glu'
 # REQUIRES: wave-python-bindings, tlx-wave-backend
 # SPDX-FileCopyrightText: 2026 wave-mlir contributors
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
