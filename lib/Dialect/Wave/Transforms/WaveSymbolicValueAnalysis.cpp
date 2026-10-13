@@ -64,7 +64,9 @@ void SymbolicValueBuilder::appendSSAFact(Value value, sym::PredHandle fact) {
 
 void SymbolicValueBuilder::appendSSAFacts(Value value,
                                           ArrayRef<sym::PredHandle> facts) {
-  for (sym::PredHandle fact : facts)
+  // Insertion can move inline fact storage in the source DenseMap bucket.
+  SmallVector<sym::PredHandle, 2> stableFacts(facts);
+  for (sym::PredHandle fact : stableFacts)
     appendSSAFact(value, fact);
 }
 
@@ -601,8 +603,16 @@ FailureOr<sym::ExprHandle> SymbolicValueBuilder::buildLeafOrRecurrence(
     const ProducerProofContext &context) {
   if (BlockArgument arg = dyn_cast<BlockArgument>(value)) {
     if (std::optional<LoopCarriedRecurrence> recurrence =
-            matchLoopCarriedRecurrence(arg))
-      return buildLoopCarriedRecurrence(*recurrence, skip, context);
+            matchLoopCarriedRecurrence(arg)) {
+      FailureOr<sym::ExprHandle> result =
+          buildLoopCarriedRecurrence(*recurrence, skip, context);
+      if (!skip && succeeded(result)) {
+        // Block arguments have no producer to transport invariant SSA facts.
+        appendSSAFacts(arg, getSSAFacts(recurrence->init));
+        appendSSAFacts(arg, getSSAFacts(recurrence->stride));
+      }
+      return result;
+    }
     if (exactIntegerCasts && scf::getForInductionVarOwner(arg))
       return buildForInductionExpr(arg, skip, context);
   }
