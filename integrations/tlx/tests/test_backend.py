@@ -10464,7 +10464,8 @@ def test_tlx_wave_fa_reserved_launch_option_order_is_deterministic():
         )
 
 
-def test_tlx_wave_fa_forwards_compiler_options(monkeypatch):
+@pytest.mark.parametrize("packed_option", [None, False, True])
+def test_tlx_wave_fa_forwards_compiler_options(monkeypatch, packed_option):
     import torch
 
     tutorial = _load_tlx_fa_wave_module("_tlx_wave_fa_forwards_compiler_options")
@@ -10494,6 +10495,9 @@ def test_tlx_wave_fa_forwards_compiler_options(monkeypatch):
         "get_current_target",
         lambda: SimpleNamespace(backend="tlx_wave"),
     )
+    packed_options = (
+        {} if packed_option is None else {"disable_packed_fp32_ops": packed_option}
+    )
     result = tutorial.attention(
         q,
         k,
@@ -10504,6 +10508,7 @@ def test_tlx_wave_fa_forwards_compiler_options(monkeypatch):
         tlx_wave_enable_multi_wave_specialize=True,
         schedule_hint="none",
         llvm_fn_attrs=("amdgpu-waves-per-eu=2",),
+        **packed_options,
     )
 
     assert result is sentinel
@@ -10514,6 +10519,7 @@ def test_tlx_wave_fa_forwards_compiler_options(monkeypatch):
         "tlx_wave_enable_multi_wave_specialize": True,
         "schedule_hint": "none",
         "llvm_fn_attrs": ("amdgpu-waves-per-eu=2",),
+        "disable_packed_fp32_ops": True if packed_option is None else packed_option,
         "N_CTX": 256,
         "BATCH": 1,
         "HEADS": 1,

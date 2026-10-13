@@ -1659,6 +1659,8 @@ def _build_launch_options(
         "ADAPTIVE_REFERENCE": adaptive_reference,
         "num_warps": 8,
     }
+    # Packed FP32 competes with MFMA issue on gfx950.
+    launch_options.setdefault("disable_packed_fp32_ops", True)
     if triton.runtime.driver.active.get_current_target().backend == "tlx_wave":
         launch_options.setdefault("tlx_wave_enable_multi_wave_specialize", False)
     return launch_options
