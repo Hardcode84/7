@@ -1361,6 +1361,13 @@ def flash_attn_async_prefetch(
     waves_per_eu = kw.pop(
         "waves_per_eu", _async_prefetch_default_waves_per_eu(D, causal, N_CTX)
     )
+    if (
+        D == 128
+        and causal
+        and triton.runtime.driver.active.get_current_target().backend == "hip"
+    ):
+        # One wave/SIMD: trade spare registers for instruction overlap.
+        kw.setdefault("llvm_fn_attrs", "amdgpu-sched-strategy=iterative-ilp")
 
     grid = (triton.cdiv(N_CTX, BLOCK_M), B * H)
     compile_kwargs = {
@@ -1436,6 +1443,12 @@ def flash_attn_persistent(
             warmup=warmup,
             **kw,
         )
+
+    if (
+        D == 128 or (D == 64 and causal)
+    ) and triton.runtime.driver.active.get_current_target().backend == "hip":
+        # One wave/SIMD: trade spare registers for instruction overlap.
+        kw.setdefault("llvm_fn_attrs", "amdgpu-sched-strategy=iterative-ilp")
 
     o = torch.empty_like(q) if out is None else out
     num_m_blocks = triton.cdiv(N_CTX_Q, BLOCK_M)

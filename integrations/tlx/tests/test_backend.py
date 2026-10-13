@@ -1422,6 +1422,98 @@ def test_tlx_fa_d64_causal_occupancy_is_backend_specific(
         assert calls["async_prefetch"]["waves_per_eu"] == 0
 
 
+@pytest.mark.parametrize("backend", ["hip", "tlx_wave"])
+@pytest.mark.parametrize("kernel_name", ["async_prefetch", "persistent"])
+@pytest.mark.parametrize("head_dim", [64, 128, 256])
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize(
+    "override", [None, "", "amdgpu-sched-strategy=iterative-rp,noinline"]
+)
+def test_tlx_fa_llvm_schedule_is_workload_specific(
+    monkeypatch, backend, kernel_name, head_dim, causal, override
+):
+    torch = pytest.importorskip("torch")
+    bench = _load_tlx_fa_bench_module("_tlx_wave_test_fa_schedule")
+    calls = []
+    monkeypatch.setattr(
+        bench.triton.runtime.driver.active,
+        "get_current_target",
+        lambda: SimpleNamespace(backend=backend),
+    )
+    kernel = getattr(bench, f"_attn_fwd_{kernel_name}")
+    monkeypatch.setattr(kernel, "warmup", lambda *args, **kw: calls.append(kw))
+    tensor = MockTensor(torch.bfloat16, (1, 64, 4096, head_dim))
+    kwargs = {"NUM_SMS": 304} if kernel_name == "persistent" else {}
+    if override is not None:
+        kwargs["llvm_fn_attrs"] = override
+    bench.get_kernel(kernel_name)(
+        tensor, tensor, tensor, 0.125, causal, out=tensor, warmup=True, **kwargs
+    )
+    selected = (backend, kernel_name, head_dim, causal) in {
+        ("hip", "async_prefetch", 128, True),
+        ("hip", "persistent", 128, False),
+        ("hip", "persistent", 128, True),
+        ("hip", "persistent", 64, True),
+    }
+    expected = "amdgpu-sched-strategy=iterative-ilp" if selected else None
+    assert calls[0].get("llvm_fn_attrs") == (
+        override if override is not None else expected
+    )
+
+
+@pytest.mark.parametrize(
+    "kernel_name,head_dim,causal",
+    [
+        ("async_prefetch", 128, True),
+        ("persistent", 128, False),
+        ("persistent", 128, True),
+        ("persistent", 64, True),
+    ],
+)
+@pytest.mark.parametrize("override", [None, ""])
+def test_llvm_gfx950_fa_schedule_reaches_codegen(
+    monkeypatch, tmp_path, kernel_name, head_dim, causal, override
+):
+    torch = pytest.importorskip("torch")
+    bench = _load_tlx_fa_bench_module("_tlx_wave_test_fa_schedule_codegen")
+    kernel = getattr(bench, f"_attn_fwd_{kernel_name}")
+    warmup = kernel.warmup
+    compiled = []
+
+    def compile_kernel(*args, **kwargs):
+        compiled.append(warmup(*args, **kwargs))
+        return compiled[-1]
+
+    monkeypatch.setattr(kernel, "warmup", compile_kernel)
+    tensor = MockTensor(torch.bfloat16, (1, 64, 4096, head_dim))
+    options = {"NUM_SMS": 304} if kernel_name == "persistent" else {}
+    if override is not None:
+        options["llvm_fn_attrs"] = override
+    with (
+        _active_amd_driver(),
+        triton.knobs.runtime.scope(),
+        triton.knobs.cache.scope(),
+    ):
+        triton.knobs.runtime.override_arch = "gfx950"
+        triton.knobs.cache.dir = str(tmp_path / "cache")
+        bench.get_kernel(kernel_name)(
+            tensor,
+            tensor,
+            tensor,
+            1 / math.sqrt(head_dim),
+            causal,
+            out=tensor,
+            warmup=True,
+            **options,
+        )
+    assert len(compiled) == 1
+    asm = compiled[0].asm
+    schedule_attr = '"amdgpu-sched-strategy"="iterative-ilp"'
+    assert (schedule_attr in asm["llir"]) == (override is None)
+    assert "v_mfma_" in asm["amdgcn"]
+    assert asm["hsaco"].startswith(b"\x7fELF")
+
+
 def test_tlx_glu_parallel_precompile_defers_device_query_to_worker(monkeypatch):
     pytest.importorskip("torch")
     bench = _load_tlx_glu_bench_module("_tlx_wave_test_glu_bench_worker_device")
