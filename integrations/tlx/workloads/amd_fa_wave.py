@@ -1684,6 +1684,7 @@ def attention(
     inputs.  ``qk_max_abs`` explicitly selects the bounded specialization.
     ``out`` may be exactly ``q``, but it must not partially overlap ``q`` or
     overlap any part of ``k`` or ``v``.
+    ``disable_packed_fp32_ops`` defaults to True; callers can override it.
     """
     batch, heads, sequence, head_dim = _validate_attention_inputs(
         q, k, v, causal, compiler_options
