@@ -50,7 +50,7 @@ def _load_a_fragment(smem_a, buffer, phase: tl.constexpr, tile: tl.constexpr):
     )
     fragment = tlx.require_layout(tlx.local_load(fragment_view), fragment_layout)
     fragment = tl.reshape(fragment, (32, 32))
-    return tlx.release_layout(fragment)
+    return tlx.release_layout(fragment, relaxed=True)
 
 
 @triton.jit
@@ -91,7 +91,7 @@ def _load_b_fragment(smem_b, buffer, phase: tl.constexpr, tile: tl.constexpr):
     fragment = tlx.require_layout(tlx.local_load(fragment_view), fragment_layout)
     fragment = tl.permute(fragment, (0, 1, 4, 3, 2, 5))
     fragment = tl.reshape(fragment, (32, 64))
-    return tlx.release_layout(fragment)
+    return tlx.release_layout(fragment, relaxed=True)
 
 
 @triton.jit
@@ -214,38 +214,38 @@ def _mma_phase(a, b, acc):
     c72 = tl.dot(a[7], b[2], acc[30])
     c73 = tl.dot(a[7], b[3], acc[31])
     return (
-        tlx.release_layout(c00),
-        tlx.release_layout(c01),
-        tlx.release_layout(c02),
-        tlx.release_layout(c03),
-        tlx.release_layout(c10),
-        tlx.release_layout(c11),
-        tlx.release_layout(c12),
-        tlx.release_layout(c13),
-        tlx.release_layout(c20),
-        tlx.release_layout(c21),
-        tlx.release_layout(c22),
-        tlx.release_layout(c23),
-        tlx.release_layout(c30),
-        tlx.release_layout(c31),
-        tlx.release_layout(c32),
-        tlx.release_layout(c33),
-        tlx.release_layout(c40),
-        tlx.release_layout(c41),
-        tlx.release_layout(c42),
-        tlx.release_layout(c43),
-        tlx.release_layout(c50),
-        tlx.release_layout(c51),
-        tlx.release_layout(c52),
-        tlx.release_layout(c53),
-        tlx.release_layout(c60),
-        tlx.release_layout(c61),
-        tlx.release_layout(c62),
-        tlx.release_layout(c63),
-        tlx.release_layout(c70),
-        tlx.release_layout(c71),
-        tlx.release_layout(c72),
-        tlx.release_layout(c73),
+        tlx.release_layout(c00, relaxed=True),
+        tlx.release_layout(c01, relaxed=True),
+        tlx.release_layout(c02, relaxed=True),
+        tlx.release_layout(c03, relaxed=True),
+        tlx.release_layout(c10, relaxed=True),
+        tlx.release_layout(c11, relaxed=True),
+        tlx.release_layout(c12, relaxed=True),
+        tlx.release_layout(c13, relaxed=True),
+        tlx.release_layout(c20, relaxed=True),
+        tlx.release_layout(c21, relaxed=True),
+        tlx.release_layout(c22, relaxed=True),
+        tlx.release_layout(c23, relaxed=True),
+        tlx.release_layout(c30, relaxed=True),
+        tlx.release_layout(c31, relaxed=True),
+        tlx.release_layout(c32, relaxed=True),
+        tlx.release_layout(c33, relaxed=True),
+        tlx.release_layout(c40, relaxed=True),
+        tlx.release_layout(c41, relaxed=True),
+        tlx.release_layout(c42, relaxed=True),
+        tlx.release_layout(c43, relaxed=True),
+        tlx.release_layout(c50, relaxed=True),
+        tlx.release_layout(c51, relaxed=True),
+        tlx.release_layout(c52, relaxed=True),
+        tlx.release_layout(c53, relaxed=True),
+        tlx.release_layout(c60, relaxed=True),
+        tlx.release_layout(c61, relaxed=True),
+        tlx.release_layout(c62, relaxed=True),
+        tlx.release_layout(c63, relaxed=True),
+        tlx.release_layout(c70, relaxed=True),
+        tlx.release_layout(c71, relaxed=True),
+        tlx.release_layout(c72, relaxed=True),
+        tlx.release_layout(c73, relaxed=True),
     )
 
 
@@ -385,38 +385,38 @@ def _mma_phase_with_next_reads(a, b, acc, smem_a, smem_b, next_buffer):
     next_a1 = (na8, na9, na10, na11, na12, na13, na14, na15)
     next_b1 = (nb4, nb5, nb6, nb7)
     next_acc = (
-        tlx.release_layout(c00),
-        tlx.release_layout(c01),
-        tlx.release_layout(c02),
-        tlx.release_layout(c03),
-        tlx.release_layout(c10),
-        tlx.release_layout(c11),
-        tlx.release_layout(c12),
-        tlx.release_layout(c13),
-        tlx.release_layout(c20),
-        tlx.release_layout(c21),
-        tlx.release_layout(c22),
-        tlx.release_layout(c23),
-        tlx.release_layout(c30),
-        tlx.release_layout(c31),
-        tlx.release_layout(c32),
-        tlx.release_layout(c33),
-        tlx.release_layout(c40),
-        tlx.release_layout(c41),
-        tlx.release_layout(c42),
-        tlx.release_layout(c43),
-        tlx.release_layout(c50),
-        tlx.release_layout(c51),
-        tlx.release_layout(c52),
-        tlx.release_layout(c53),
-        tlx.release_layout(c60),
-        tlx.release_layout(c61),
-        tlx.release_layout(c62),
-        tlx.release_layout(c63),
-        tlx.release_layout(c70),
-        tlx.release_layout(c71),
-        tlx.release_layout(c72),
-        tlx.release_layout(c73),
+        tlx.release_layout(c00, relaxed=True),
+        tlx.release_layout(c01, relaxed=True),
+        tlx.release_layout(c02, relaxed=True),
+        tlx.release_layout(c03, relaxed=True),
+        tlx.release_layout(c10, relaxed=True),
+        tlx.release_layout(c11, relaxed=True),
+        tlx.release_layout(c12, relaxed=True),
+        tlx.release_layout(c13, relaxed=True),
+        tlx.release_layout(c20, relaxed=True),
+        tlx.release_layout(c21, relaxed=True),
+        tlx.release_layout(c22, relaxed=True),
+        tlx.release_layout(c23, relaxed=True),
+        tlx.release_layout(c30, relaxed=True),
+        tlx.release_layout(c31, relaxed=True),
+        tlx.release_layout(c32, relaxed=True),
+        tlx.release_layout(c33, relaxed=True),
+        tlx.release_layout(c40, relaxed=True),
+        tlx.release_layout(c41, relaxed=True),
+        tlx.release_layout(c42, relaxed=True),
+        tlx.release_layout(c43, relaxed=True),
+        tlx.release_layout(c50, relaxed=True),
+        tlx.release_layout(c51, relaxed=True),
+        tlx.release_layout(c52, relaxed=True),
+        tlx.release_layout(c53, relaxed=True),
+        tlx.release_layout(c60, relaxed=True),
+        tlx.release_layout(c61, relaxed=True),
+        tlx.release_layout(c62, relaxed=True),
+        tlx.release_layout(c63, relaxed=True),
+        tlx.release_layout(c70, relaxed=True),
+        tlx.release_layout(c71, relaxed=True),
+        tlx.release_layout(c72, relaxed=True),
+        tlx.release_layout(c73, relaxed=True),
     )
     return next_acc, next_a0, next_b0, next_a1, next_b1
 

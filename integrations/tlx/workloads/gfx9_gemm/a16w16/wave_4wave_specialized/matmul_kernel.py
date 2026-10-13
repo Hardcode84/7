@@ -48,7 +48,7 @@ def _load_a_fragment(region, phase: tl.constexpr, tile: tl.constexpr, ready):
         tlx.local_load(fragment_view, token=ready), fragment_layout
     )
     fragment = tl.reshape(fragment, (32, 32))
-    return tlx.release_layout(fragment)
+    return tlx.release_layout(fragment, relaxed=True)
 
 
 @triton.jit
@@ -86,7 +86,7 @@ def _load_b_fragment(region, phase: tl.constexpr, tile: tl.constexpr, ready):
     )
     fragment = tl.permute(fragment, (0, 1, 4, 3, 2, 5))
     fragment = tl.reshape(fragment, (32, 32))
-    return tlx.release_layout(fragment)
+    return tlx.release_layout(fragment, relaxed=True)
 
 
 @triton.jit
@@ -242,7 +242,8 @@ def _mma_range(a, b, acc, begin: tl.constexpr, end: tl.constexpr):
                 emitted[
                     (index // 8) * 8
                     + ((index % 8) if (index // 8) % 2 == 0 else 7 - index % 8)
-                ]
+                ],
+                relaxed=True,
             )
             for index in range(64)
         ]

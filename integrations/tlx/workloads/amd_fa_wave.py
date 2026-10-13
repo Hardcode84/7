@@ -186,7 +186,9 @@ def _registers_to_probability_fragments(registers):
     )
     packet = logical.reshape([BLOCK_M, BLOCK_N // 2])
     lower, upper = packet.reshape([BLOCK_M, 2, BLOCK_N // 4]).permute(0, 2, 1).split()
-    return tlx.release_layout(lower), tlx.release_layout(upper)
+    return tlx.release_layout(lower, relaxed=True), tlx.release_layout(
+        upper, relaxed=True
+    )
 
 
 @triton.jit
@@ -237,12 +239,12 @@ def _pin_workitem_layout(value):
         block_bases=[],
         shape=[8 * 64],
     )
-    return tlx.release_layout(tlx.require_layout(value, workitem_layout))
+    return tlx.release_layout(tlx.require_layout(value, workitem_layout), relaxed=True)
 
 
 @triton.jit
 def _duplicate_rows_to_workitems(rows):
-    rows = tlx.release_layout(rows)
+    rows = tlx.release_layout(rows, relaxed=True)
     per_wave_rows = rows.reshape([8, 32])
     per_workitem = tl.broadcast_to(per_wave_rows[:, None, :], (8, 2, 32))
     return _pin_workitem_layout(per_workitem.reshape([8 * 64]))
@@ -322,7 +324,7 @@ def _pv_mfma(
     values = tlx.require_layout(values, v_layout)
     accumulator = tlx.require_layout(accumulator, mma_layout)
     accumulator = tl.dot(probabilities, values, accumulator)
-    return tlx.release_layout(accumulator)
+    return tlx.release_layout(accumulator, relaxed=True)
 
 
 @triton.jit
@@ -346,7 +348,7 @@ def _load_value_fragment(
         layout=v_layout,
         relaxed=True,
     )
-    return tlx.release_layout(fragment)
+    return tlx.release_layout(fragment, relaxed=True)
 
 
 @aggregate
@@ -738,7 +740,7 @@ def _load_query(
     offsets = tlx.require_layout(offsets, q_load_layout)
     q = tlx.buffer_load(Q + q_base, offsets)
     q = tlx.require_layout(q, q_layout)
-    return tlx.release_layout(q)
+    return tlx.release_layout(q, relaxed=True)
 
 
 @triton.jit
@@ -758,7 +760,7 @@ def _normalize_output_fragment(
     row_scale = _workitems_to_rows(inverse_row_sum)
     output = acc * row_scale[:, None]
     output = output.to(out_dtype)
-    return tlx.release_layout(output)
+    return tlx.release_layout(output, relaxed=True)
 
 
 @triton.jit
@@ -884,8 +886,8 @@ def _score_phase(
         layout=mma_layout,
     )
     next_scores = tl.dot(q, current_k, score_acc)
-    next_scores = tlx.release_layout(next_scores)
-    q = tlx.release_layout(q)
+    next_scores = tlx.release_layout(next_scores, relaxed=True)
+    q = tlx.release_layout(q, relaxed=True)
     return state, probability_fragments, next_scores
 
 
@@ -952,8 +954,8 @@ def _warp_pipeline_phase(
             layout=mma_layout,
         )
         next_scores = tl.dot(q, current_k, score_acc)
-        next_scores = tlx.release_layout(next_scores)
-        q = tlx.release_layout(q)
+        next_scores = tlx.release_layout(next_scores, relaxed=True)
+        q = tlx.release_layout(q, relaxed=True)
 
     with tlx.warp_pipeline_stage("value"):
         value_fragments = _load_value_fragments(
@@ -1040,7 +1042,7 @@ def _pipeline(
         layout=mma_layout,
     )
     scores = tl.dot(q, k0, score_acc)
-    scores = tlx.release_layout(scores)
+    scores = tlx.release_layout(scores, relaxed=True)
     _stage_end()
     state, exponentiated_scores = state.prepare(
         scores,
@@ -1059,7 +1061,7 @@ def _pipeline(
     # Peel phase zero so the loop enters with real PV accumulator values.  In
     # addition to matching the four-slot ring, this lets Wave keep the MFMA
     # accumulator register groups intact across the loop backedge.
-    q = tlx.release_layout(q)
+    q = tlx.release_layout(q, relaxed=True)
     v_ready1 = _issue_tile(
         v_ptrs,
         1,
