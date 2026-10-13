@@ -17,7 +17,6 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -531,9 +530,10 @@ static void eraseMarkedOperations(Region &region) {
   while (changed) {
     changed = false;
     region.walk<WalkOrder::PostOrder>([&](Operation *op) {
-      if ((!op->hasAttr(rejectedEffectAttr) &&
-           !op->hasAttr(rejectedSetupAttr)) ||
-          !op->use_empty())
+      // Dead pure users can keep rejected effects alive.
+      if (!op->use_empty() ||
+          (!op->hasAttr(rejectedEffectAttr) &&
+           !op->hasAttr(rejectedSetupAttr) && !isOpTriviallyDead(op)))
         return;
       rewriter.eraseOp(op);
       changed = true;
@@ -546,7 +546,6 @@ static void eraseMarkedOperations(Region &region) {
   });
   assert(!rejectedEffectRemains &&
          "rejected materialization effect still has a consumer");
-  eliminateTriviallyDeadOps(rewriter, region);
 }
 
 static void eraseRejectedEffects(const CandidateScope &scope,
