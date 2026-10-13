@@ -162,6 +162,11 @@ def ixs_eq(lhs: ixsimpl.Expr, rhs: ixsimpl.Expr | int) -> ixsimpl.Expr:
     return sym_ctx.eq(lhs, rhs)
 
 
+def ixs_is_constant(expr: ixsimpl.Expr) -> bool:
+    """Return whether an expression has no symbolic inputs."""
+    return not expr.free_symbols
+
+
 def ixs_serialize(expr: ixsimpl.Expr) -> tuple[int, ...]:
     """Serialize a Wave symbolic expression for bridge transport."""
     return tuple(sym_ctx.serialize(expr))

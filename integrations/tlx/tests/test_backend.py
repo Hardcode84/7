@@ -2167,6 +2167,7 @@ def test_tlx_wave_converter_boundary_is_structurally_guarded():
         "ixs_deserialize",
         "ixs_eq",
         "ixs_int",
+        "ixs_is_constant",
         "ixs_serialize",
     }
     used_ixs_facades = set()
@@ -19369,6 +19370,162 @@ def test_tlx_wave_converter_vectorizes_dynamic_stride_contiguous_f16_buffer_load
     assert machine.count("waveamdmachine.buffer_store_tuple_b32") == 8
     assert "waveamdmachine.buffer_load_b16" not in machine
     del ctx
+
+
+@pytest.mark.parametrize("remainder", ["remsi", "remui"])
+@pytest.mark.parametrize("block,warps", [(1024, 1), (4096, 4)])
+@pytest.mark.parametrize("contiguity", [1, 2, 8])
+def test_tlx_wave_ssa_memory_contiguity(tmp_path, remainder, block, warps, contiguity):
+    preamble = f"""
+#blocked = #ttg.blocked<{{sizePerThread = [8], threadsPerWarp = [64], warpsPerCTA = [{warps}], order = [0]}}>
+"""
+    tensor = f"tensor<{block}xi32, #blocked>"
+    local_func = f"""
+  tt.func public @carried_buffer_offsets(
+      %src: !tt.ptr<f16> {{tt.pointer_range = 32 : i32}},
+      %dst: !tt.ptr<f16> {{tt.pointer_range = 32 : i32}},
+      %modulus: i32 {{tt.divisibility = 16 : i32}}) {{
+    %range = tt.make_range {{end = {block} : i32, start = 0 : i32}} : {tensor}
+    %divisor = tt.splat %modulus : i32 -> {tensor}
+    %initial = arith.{remainder} %range, %divisor : {tensor}
+    %zero = arith.constant 0 : index
+    %one = arith.constant 1 : index
+    %end = arith.constant 3 : index
+    %result = scf.for %i = %zero to %end step %one iter_args(%offset = %initial) -> ({tensor}) {{
+      %loaded = amdg.buffer_load %src[%offset] {{contiguity = {contiguity} : i32}} : tensor<{block}xf16, #blocked>
+      amdg.buffer_store %loaded, %dst[%offset] {{contiguity = {contiguity} : i32}} : tensor<{block}xf16, #blocked>
+      %next = arith.addi %offset, %divisor : {tensor}
+      scf.yield %next : {tensor}
+    }}
+    tt.return
+  }}
+"""
+    mod, ctx = _parse_ttgir(tmp_path, local_func, num_warps=warps, preamble=preamble)
+    before = str(mod)
+    output = converter_pipeline.convert_ttgir_to_wave(mod)
+    assert str(mod) == before
+    dsl = converter_layouts.load_wave_dsl()
+    accesses = [
+        op
+        for op in output.target_program.ops
+        if op.kind in {"buffer_load", "buffer_store"}
+    ]
+    assert len(accesses) == 2
+    for access in accesses:
+        attrs = converter_target_ir.attrs_dict(access)
+        assert attrs["contiguity"] == contiguity
+        names = attrs["index_binding_names"]
+        assert len(names) == 16
+        relation = dsl.ixs_deserialize(attrs["bit_offset_relation"])
+        # Independent groups; signed element offsets wrap after byte scaling.
+        bindings = {
+            name: 256 * (slot // contiguity) - 32 + slot % contiguity
+            for slot, name in enumerate(names)
+        }
+        for slot, name in enumerate(names):
+            assert int(relation.eval({**bindings, "slot": slot})) == 8 * (
+                (2 * bindings[name]) % (1 << 32)
+            )
+    wave = output.emitted_module.text
+    assert wave.count("wave.gather") == 1
+    assert wave.count("wave.scatter") == 1
+    machine = _run_waveamd_to_machine(wave)
+    if contiguity == 8:
+        assert machine.count("waveamdmachine.buffer_load_tuple_b32") == 2
+        assert machine.count("waveamdmachine.buffer_store_tuple_b32") == 2
+        assert "waveamdmachine.buffer_load_b16" not in machine
+    del ctx
+
+
+@triton.jit
+def _tlx_wave_remainder_load(
+    src,
+    dst,
+    modulus,
+    base,
+    BLOCK: tl.constexpr,
+    UNSIGNED: tl.constexpr,
+    LOOP: tl.constexpr,
+    TAIL: tl.constexpr,
+):
+    columns = tl.arange(0, BLOCK)
+    raw = columns + base
+    if UNSIGNED:
+        raw = raw.to(tl.uint32)
+        modulus = modulus.to(tl.uint32)
+    offset = (raw % modulus).to(tl.int32)
+    total = tl.full((BLOCK,), 0, tl.float32)
+    for _row in range(3 if LOOP else 1):
+        total += tl.load(src + 256 + offset, columns < BLOCK - TAIL, other=0).to(
+            tl.float32
+        )
+        offset += 512
+    tl.store(dst + columns, total)
+
+
+@pytest.mark.parametrize("unsigned", [False, True])
+@pytest.mark.parametrize("loop", [False, True])
+@pytest.mark.parametrize("target", [GFX942_WAVE, GFX950_WAVE])
+def test_tlx_wave_ssa_memory_contiguity_compile(tmp_path, unsigned, loop, target):
+    source = ASTSource(
+        fn=_tlx_wave_remainder_load,
+        signature={
+            "src": "*fp32",
+            "dst": "*fp32",
+            "modulus": "i32",
+            "base": "i32",
+            "BLOCK": "constexpr",
+            "UNSIGNED": "constexpr",
+            "LOOP": "constexpr",
+            "TAIL": "constexpr",
+        },
+        constexprs={"BLOCK": 512, "UNSIGNED": unsigned, "LOOP": loop, "TAIL": 8},
+        attrs={
+            (0,): [["tt.pointer_range", 32], ["tt.divisibility", 16]],
+            (1,): [["tt.pointer_range", 32], ["tt.divisibility", 16]],
+            (2,): [["tt.divisibility", 16]],
+            (3,): [["tt.divisibility", 16]],
+        },
+    )
+    with triton.knobs.cache.scope():
+        triton.knobs.cache.dir = str(tmp_path / "remainder-cache")
+        compiled = triton_compile(source, target=target, options={"num_warps": 1})
+    assert compiled.asm["hsaco"].startswith(b"\x7fELF")
+    assert "wave.gather" in compiled.asm["wave"]
+    (load,) = (
+        line
+        for line in compiled.asm["ttgir"].splitlines()
+        if "amdg.buffer_load " in line
+    )
+    hint = re.search(r"contiguity = (\d+) : i32", load)
+    assert (int(hint[1]) if hint else 1) == (4 if unsigned else 1)
+
+
+@pytest.mark.parametrize("base", [-64, -16, 16, 2147483632])
+@pytest.mark.parametrize("tail", [7, 8])
+@pytest.mark.parametrize("block", [128, 512])
+@pytest.mark.parametrize("modulus", [48, 64, 127])
+@pytest.mark.parametrize("unsigned", [False, True])
+@pytest.mark.parametrize("loop", [False, True])
+def test_tlx_wave_runtime_ssa_memory_contiguity(
+    block, modulus, unsigned, loop, tail, base
+):
+    torch, _arch = _require_tlx_wave_runtime_target()
+    x = torch.arange(2048, device="cuda", dtype=torch.float32)
+    y = torch.empty(block, device="cuda", dtype=torch.float32)
+    with _active_tlx_wave_driver():
+        _tlx_wave_remainder_load[(1,)](
+            x, y, modulus, base, block, unsigned, loop, tail, num_warps=1
+        )
+        torch.cuda.synchronize()
+    columns = torch.arange(block, device="cuda")
+    raw = (columns + base).to(torch.int32).to(torch.int64)
+    if unsigned:
+        raw &= (1 << 32) - 1
+    offset = torch.fmod(raw, modulus)
+    expected = sum(x[256 + offset + row * 512] for row in range(3 if loop else 1))
+    expected[columns >= block - tail] = 0
+    torch.testing.assert_close(y, expected, rtol=0, atol=0)
 
 
 def test_tlx_wave_converter_preserves_runtime_unsigned_remainder(tmp_path):

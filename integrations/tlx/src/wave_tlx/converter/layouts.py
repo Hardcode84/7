@@ -1260,7 +1260,21 @@ def make_range_relation(
     return dsl.ixs_serialize(normalized[len(goals)])
 
 
-def buffer_offset_binding_relation(names, element_byte_width):
+def _contiguous_element_offset(element_offset, element_contiguity):
+    dsl = load_wave_dsl()
+    element_contiguity = int(element_contiguity)
+    if element_contiguity <= 0:
+        raise ValueError("global memory relation requires positive element contiguity")
+    if element_contiguity == 1:
+        return element_offset
+    slot = dsl.sym("slot")
+    group_slot = element_contiguity * dsl.floor(slot / element_contiguity)
+    # Source access guarantees consecutive elements within each slot group.
+    group_origin = element_offset.subs({slot: group_slot})
+    return group_origin + dsl.mod(slot, element_contiguity)
+
+
+def buffer_offset_binding_relation(names, element_byte_width, element_contiguity=1):
     """Map packet slots to fixed-width SSA element offsets."""
     dsl = load_wave_dsl()
     slot = dsl.sym("slot")
@@ -1276,6 +1290,7 @@ def buffer_offset_binding_relation(names, element_byte_width):
             default=offsets[-1],
         )
     )
+    offset = _contiguous_element_offset(offset, element_contiguity)
     return dsl.ixs_serialize(8 * dsl.mod(int(element_byte_width) * offset, 1 << 32))
 
 
@@ -1314,14 +1329,7 @@ def global_memory_bit_offset_relation(
     element_offset = index_expr.subs(
         {dsl.sym(name): expression for name, expression in logical.items()}
     )
-    element_contiguity = int(element_contiguity)
-    if element_contiguity <= 0:
-        raise ValueError("global memory relation requires positive element contiguity")
-    if element_contiguity > 1:
-        slot = dsl.sym("slot")
-        group_slot = element_contiguity * dsl.floor(slot / element_contiguity)
-        group_origin = element_offset.subs({slot: group_slot})
-        element_offset = group_origin + dsl.mod(slot, element_contiguity)
+    element_offset = _contiguous_element_offset(element_offset, element_contiguity)
     byte_offset = int(element_byte_width) * element_offset
     if wrap_i32:
         byte_offset = dsl.mod(byte_offset, 1 << 32)

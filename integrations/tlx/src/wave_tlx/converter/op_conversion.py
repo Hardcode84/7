@@ -95,6 +95,9 @@ def _set_binary_relation(builder, view, operation):
         quotient = dsl.trunc(signed_lhs / signed_rhs)
         expr = quotient if operation == "divsi" else signed_lhs - signed_rhs * quotient
     elif operation in {"divui", "remui"}:
+        # Dynamic unsigned div/rem stays in SSA; index lowering needs a static divisor.
+        if not dsl.ixs_is_constant(rhs.expr):
+            return
         width = int(target_ir.attrs_dict(builder.ops[-1]).get("source_width", 0))
         if width <= 0 or width >= 63:
             return
@@ -195,7 +198,7 @@ def _memory_relation(builder, offset_target_id, element_byte_width, element_cont
         )
         return {
             "bit_offset_relation": layouts.buffer_offset_binding_relation(
-                names, element_byte_width
+                names, element_byte_width, element_contiguity
             ),
             "index_binding_count": 1,
             "index_binding_names": names,

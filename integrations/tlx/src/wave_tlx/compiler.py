@@ -177,11 +177,7 @@ class TLXWaveBackend(amd_compiler.HIPBackend):
 
     @staticmethod
     def make_ttgir(mod, metadata, options):
-        # The Wave bridge consumes the same TTGIR contract that AMD/LLVM
-        # lowers. HIPBackend.make_ttgir already runs AMD layout cleanup; running
-        # remove-layout-conversions again after CF lifting can reshape the
-        # epilogue into a Wave-only form and drift from LLVM's memory/barrier
-        # lowering.
+        # Preserve AMD layouts and their memory access contracts.
         mod = amd_compiler.HIPBackend.make_ttgir(mod, metadata, options)
         passes.convert.triton_lift_cf_to_scf(mod)
         pm = ir.pass_manager(mod.context)
