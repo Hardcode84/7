@@ -1,3 +1,7 @@
+// RUN: wave-opt %S/wave_regalloc_join_runtime.mlir --pass-pipeline='builtin.module(waveamd-abi-lowering,waveamd-prepare-regalloc,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-insert-ticket-waits,waveamd-insert-hazard-waits,waveamd-resource-info)' \
+// RUN:   | env WAVE_PIPELINES_DIR=%S/../Target/Wave/Inputs/emit-only-pipeline wave-translate --wave-to-amdgpu-asm - > %t.runtime.s
+// RUN: FileCheck %S/wave_regalloc_join_runtime.mlir --check-prefix=ASM < %t.runtime.s
+// RUN: llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -filetype=obj %t.runtime.s -o /dev/null
 // RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-prepare-regalloc,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
 // RUN:   | FileCheck %s --check-prefix=ALLOC
 // RUN: wave-opt %s --pass-pipeline='builtin.module(waveamd-prepare-regalloc,transform-preload-library{transform-library-paths=%wave_pipelines},transform-interpreter{entry-point=waveamd_regalloc_transform_loop},waveamd-resource-info)' \
@@ -8,6 +12,68 @@
 // RUN:   | llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx90a -filetype=obj -o /dev/null
 
 module attributes {waveamdmachine.target = "amdgcn-amd-amdhsa--gfx90a"} {
+
+// ALLOC-LABEL: func.func @joined_tuple_carries()
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC-NOT: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.yield
+// ALLOC: otherwise
+// ALLOC-NOT: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.yield
+// ALLOC: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.uniform_loop
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.continue_if
+// ASM-LABEL: joined_tuple_carries:
+// ASM: s_cbranch_scc0
+// ASM: s_cbranch_scc1
+// ASM: s_endpgm
+func.func @joined_tuple_carries()
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %cond = waveamdmachine.s_cmp_lt_i32 %one, %zero
+      : (!waveamdmachine.imm, !waveamdmachine.imm) -> !waveamdmachine.reg<scc, 1>
+  %init:2 = waveamdmachine.uniform_if %cond {
+    %pair = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+    %elements:2 = waveamdmachine.tuple_to_elements %pair
+        : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.yield %pair, %elements#0
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %pair = waveamdmachine.v_mov_b32_tuple %one {registers = 2 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+    %elements:2 = waveamdmachine.tuple_to_elements %pair
+        : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.yield %pair, %elements#0
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  %results:2 = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%init#0, %init#1 : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%pair: !waveamdmachine.reg<vgpr, 2>, %scalar: !waveamdmachine.reg<vgpr, 1>):
+    %next:2 = waveamdmachine.uniform_if %cond {
+      %elements:2 = waveamdmachine.tuple_to_elements %pair
+          : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      waveamdmachine.yield %pair, %elements#0
+          : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+    } otherwise {
+      %other = waveamdmachine.v_mov_b32_tuple %scalar {registers = 2 : i64}
+          : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+      %elements:2 = waveamdmachine.tuple_to_elements %other
+          : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      waveamdmachine.yield %other, %elements#0
+          : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+    } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+    waveamdmachine.continue_if %cond : !waveamdmachine.reg<scc, 1>
+        carries(%next#0, %next#1 : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %results#1, %results#1
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
 
 // ALLOC-LABEL: func.func @nested_region_carry_codegen()
 // ALLOC-SAME: waveamdmachine.regalloc_assignments
@@ -59,6 +125,74 @@ func.func @nested_region_carry_codegen()
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
         -> !waveamdmachine.reg<vgpr, 1>
   waveamdmachine.v_cmpx_eq_u32 %sum, %sum
+      : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
+  waveamdmachine.s_endpgm
+  return
+}
+
+// ALLOC-LABEL: func.func @different_join_offsets()
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.yield
+// ALLOC: otherwise
+// ALLOC: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.yield
+// ALLOC: waveamdmachine.uniform_loop
+// ALLOC: waveamdmachine.uniform_if
+// ALLOC: waveamdmachine.copy_tuple
+// ALLOC: waveamdmachine.continue_if
+// ASM-LABEL: different_join_offsets:
+// ASM: s_cbranch_scc0
+// ASM: v_mov_b32
+// ASM: s_branch
+// ASM: v_mov_b32
+// ASM: s_cbranch_scc0
+// ASM: s_cbranch_scc1
+// ASM: s_endpgm
+func.func @different_join_offsets()
+    attributes {wave.kernel, wave.workgroup_size = array<i32: 64, 1, 1>} {
+  %zero = waveamdmachine.imm 0 : !waveamdmachine.imm
+  %one = waveamdmachine.imm 1 : !waveamdmachine.imm
+  %wg = waveamdmachine.s_workgroup_id_x : !waveamdmachine.reg<sgpr, 1>
+  %cond = waveamdmachine.s_cmp_lt_i32 %wg, %one
+      : (!waveamdmachine.reg<sgpr, 1>, !waveamdmachine.imm) -> !waveamdmachine.reg<scc, 1>
+  %init:2 = waveamdmachine.uniform_if %cond {
+    %pair = waveamdmachine.v_mov_b32_tuple %zero {registers = 2 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+    %elements:2 = waveamdmachine.tuple_to_elements %pair
+        : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.yield %pair, %elements#1
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  } otherwise {
+    %pair = waveamdmachine.v_mov_b32_tuple %one {registers = 2 : i64}
+        : (!waveamdmachine.imm) -> !waveamdmachine.reg<vgpr, 2>
+    %elements:2 = waveamdmachine.tuple_to_elements %pair
+        : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+    waveamdmachine.yield %pair, %elements#0
+        : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  %results:2 = waveamdmachine.uniform_loop if %cond : !waveamdmachine.reg<scc, 1>
+      carries(%init#0, %init#1 : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>) {
+  ^bb0(%pair: !waveamdmachine.reg<vgpr, 2>, %scalar: !waveamdmachine.reg<vgpr, 1>):
+    %next:2 = waveamdmachine.uniform_if %cond {
+      %elements:2 = waveamdmachine.tuple_to_elements %pair
+          : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      waveamdmachine.yield %pair, %elements#0
+          : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+    } otherwise {
+      %other = waveamdmachine.v_mov_b32_tuple %scalar {registers = 2 : i64}
+          : (!waveamdmachine.reg<vgpr, 1>) -> !waveamdmachine.reg<vgpr, 2>
+      %elements:2 = waveamdmachine.tuple_to_elements %other
+          : (!waveamdmachine.reg<vgpr, 2>) -> (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>)
+      waveamdmachine.yield %other, %elements#0
+          : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+    } : !waveamdmachine.reg<scc, 1> -> !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+    %stop = waveamdmachine.s_cmp_lt_i32 %one, %zero
+        : (!waveamdmachine.imm, !waveamdmachine.imm) -> !waveamdmachine.reg<scc, 1>
+    waveamdmachine.continue_if %stop : !waveamdmachine.reg<scc, 1>
+        carries(%next#0, %next#1 : !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>)
+  } -> !waveamdmachine.reg<vgpr, 2>, !waveamdmachine.reg<vgpr, 1>
+  waveamdmachine.v_cmpx_eq_u32 %results#1, %results#1
       : (!waveamdmachine.reg<vgpr, 1>, !waveamdmachine.reg<vgpr, 1>) -> ()
   waveamdmachine.s_endpgm
   return

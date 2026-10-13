@@ -30,6 +30,7 @@
 #include <array>
 #include <limits>
 #include <optional>
+#include <tuple>
 
 using namespace mlir;
 using wave::regalloc_detail::getCombinedVGPRFamilyPressure;
@@ -183,6 +184,12 @@ public:
     return aliasOffset - storageOffset;
   }
 
+  unsigned getRoot(Value value) { return find(getOrCreate(value)).first; }
+
+  std::pair<unsigned, int64_t> getCoordinate(Value value) {
+    return find(getOrCreate(value));
+  }
+
 private:
   unsigned getOrCreate(Value value) {
     auto [it, inserted] = valueIds.try_emplace(value, parents.size());
@@ -333,6 +340,114 @@ materializeRegionCarryCopies(func::FuncOp func,
   return success();
 }
 
+static SmallVector<const RegAllocRegionFlow::Transfer *>
+getAcyclicStorageTransfers(const RegAllocRegionFlow &flow) {
+  SmallVector<const RegAllocRegionFlow::Transfer *> transfers;
+  for (const RegAllocRegionFlow::Branch &branch : flow.getBranches()) {
+    // Cyclic carries need separate storage before their edges can be joined.
+    if (branch.repetitiveRegions.any())
+      continue;
+    for (const RegAllocRegionFlow::Transfer &transfer : branch.transfers)
+      transfers.push_back(&transfer);
+  }
+  return transfers;
+}
+
+struct JoinIncomingStorage {
+  const RegAllocRegionFlow::Transfer *transfer;
+  int64_t offset = 0;
+  int64_t width = 0;
+  unsigned root = 0;
+  unsigned sourceRoot = 0;
+};
+
+static void
+snapshotJoinStorage(StorageAliasSummary &summary,
+                    const RegAllocRegionFlow::Branch &branch,
+                    SmallVectorImpl<SmallVector<JoinIncomingStorage>> &groups) {
+  for (const RegAllocRegionFlow::TransferGroup &group : branch.transferGroups) {
+    SmallVector<JoinIncomingStorage> &incoming = groups.emplace_back();
+    for (const RegAllocRegionFlow::Transfer &transfer :
+         ArrayRef(branch.transfers)
+             .slice(group.firstTransfer, group.transferCount)) {
+      Value source = transfer.operand->get();
+      std::optional<waveamdmachine::RegType> type =
+          wave::getRegAllocTransformTrackedRegType(source);
+      if (type)
+        incoming.push_back(
+            {&transfer, 0, type->getWidth(), 0, summary.getRoot(source)});
+    }
+  }
+}
+
+static void
+findIntroducedJoinOverlaps(StorageAliasSummary &summary,
+                           MutableArrayRef<JoinIncomingStorage> incoming,
+                           SmallVectorImpl<Value> &conflicts) {
+  for (JoinIncomingStorage &storage : incoming)
+    std::tie(storage.root, storage.offset) =
+        summary.getCoordinate(storage.transfer->operand->get());
+  llvm::sort(incoming, [](const auto &lhs, const auto &rhs) {
+    return std::tie(lhs.root, lhs.offset) < std::tie(rhs.root, rhs.offset);
+  });
+
+  unsigned root = std::numeric_limits<unsigned>::max();
+  unsigned sourceRoot = 0;
+  int64_t end = 0;
+  for (const JoinIncomingStorage &storage : incoming) {
+    if (storage.root != root || storage.offset >= end) {
+      root = storage.root;
+      sourceRoot = storage.sourceRoot;
+      end = storage.offset + storage.width;
+      continue;
+    }
+    if (storage.sourceRoot != sourceRoot)
+      conflicts.push_back(storage.transfer->input);
+    end = std::max(end, storage.offset + storage.width);
+  }
+}
+
+static void
+collectConflictingJoinCopies(func::FuncOp func, StorageAliasSummary &summary,
+                             const RegAllocRegionFlow &flow,
+                             SmallVectorImpl<RegionCarryCopyPlan> &plans) {
+  // V values, E edges, K max group size: O((V + E) alpha(V) + E log K) time.
+  // O(V + E) space; avoid all-pairs overlap checks at wide joins.
+  SmallVector<SmallVector<JoinIncomingStorage>> groups;
+  SmallVector<Value> conflicts;
+  // Children establish source layouts before parent joins constrain them.
+  func.walk<WalkOrder::PostOrder>([&](Operation *op) {
+    const RegAllocRegionFlow::Branch *branch = flow.lookup(op);
+    if (!branch || branch->repetitiveRegions.any())
+      return;
+    snapshotJoinStorage(summary, *branch, groups);
+    for (const RegAllocRegionFlow::Transfer &transfer : branch->transfers) {
+      Value source = transfer.operand->get();
+      std::optional<int64_t> offset = summary.getOffset(source, transfer.input);
+      if (offset && *offset != 0)
+        conflicts.push_back(transfer.input);
+      else
+        summary.add(source, transfer.input, 0);
+    }
+  });
+
+  for (SmallVector<JoinIncomingStorage> &incoming : groups)
+    findIntroducedJoinOverlaps(summary, incoming, conflicts);
+
+  DenseSet<unsigned> conflictingRoots;
+  for (Value value : conflicts)
+    conflictingRoots.insert(summary.getRoot(value));
+  for (const RegAllocRegionFlow::Transfer *transfer :
+       getAcyclicStorageTransfers(flow)) {
+    if (!conflictingRoots.contains(summary.getRoot(transfer->input)))
+      continue;
+    // Copy every incoming edge: one arm alone can clobber another live result.
+    plans.push_back({transfer->operand->get(),
+                     transfer->sourceOperation->getLoc(), transfer->operand,
+                     transfer->sourceOperation});
+  }
+}
+
 static void collectOverlappingRegionCarryCopyPlans(
     StorageAliasSummary &aliasSummary, const RegAllocRegionFlow &flow,
     SmallVectorImpl<RegionCarryCopyPlan> &plans) {
@@ -359,13 +474,28 @@ static void collectOverlappingRegionCarryCopyPlans(
 }
 
 static LogicalResult splitOverlappingRegionCarryStorage(func::FuncOp func) {
-  SmallVector<RegionCarryCopyPlan> plans;
+  SmallVector<RegionCarryCopyPlan> joinCopies;
+  SmallVector<RegionCarryCopyPlan> carryCopies;
+  {
+    StorageAliasSummary summary = buildStorageAliasSummary(func);
+    RegAllocRegionFlow flow(func);
+    collectConflictingJoinCopies(func, summary, flow, joinCopies);
+    if (joinCopies.empty())
+      collectOverlappingRegionCarryCopyPlans(summary, flow, carryCopies);
+  }
+  if (joinCopies.empty())
+    return materializeRegionCarryCopies(func, carryCopies);
+  if (failed(materializeRegionCarryCopies(func, joinCopies)))
+    return failure();
   {
     StorageAliasSummary aliasSummary = buildStorageAliasSummary(func);
     RegAllocRegionFlow flow(func);
-    collectOverlappingRegionCarryCopyPlans(aliasSummary, flow, plans);
+    for (const RegAllocRegionFlow::Transfer *transfer :
+         getAcyclicStorageTransfers(flow))
+      aliasSummary.add(transfer->operand->get(), transfer->input, 0);
+    collectOverlappingRegionCarryCopyPlans(aliasSummary, flow, carryCopies);
   }
-  return materializeRegionCarryCopies(func, plans);
+  return materializeRegionCarryCopies(func, carryCopies);
 }
 
 class RegAllocAliasStateBuilder {
