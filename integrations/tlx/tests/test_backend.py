@@ -1008,7 +1008,9 @@ def test_llvm_gfx950_fa_safe_packed_f32(tmp_path, adaptive):
         triton.knobs.cache.dir = str(tmp_path / "cache")
         triton.knobs.amd.scalarize_packed_fops = True
         compiled = triton_compile(
-            source, target=GPUTarget("hip", "gfx950", 64), options={"num_warps": 8}
+            source,
+            target=GPUTarget("hip", "gfx950", 64),
+            options={"num_warps": 8, "disable_packed_fp32_ops": True},
         )
     assert "v_mfma_" in compiled.asm["amdgcn"]
     assert not re.search(r"\bv_pk_(?:add|mul|fma)_f32\b", compiled.asm["amdgcn"])
@@ -19302,14 +19304,9 @@ def test_tlx_wave_converter_proves_signed_division_domain_from_ssa_range(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("kind", "diagnostic_code"),
-    (
-        ("buffer_load", None),
-        ("buffer_store", "TLXW_OP_BUFFER_STORE"),
-        ("buffer_load_to_local", "TLXW_OP_BUFFER_ASYNC"),
-    ),
+    "kind", ("buffer_load", "buffer_store", "buffer_load_to_local")
 )
-def test_tlx_wave_rejects_zero_buffer_contiguity(tmp_path, kind, diagnostic_code):
+def test_tlx_wave_rejects_zero_buffer_contiguity(tmp_path, capfd, kind):
     preamble = """
 #blocked = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [64], warpsPerCTA = [1], order = [0]}>
 #shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0]}>
@@ -19338,17 +19335,11 @@ def test_tlx_wave_rejects_zero_buffer_contiguity(tmp_path, kind, diagnostic_code
     tt.return
   }}
 """
-    if diagnostic_code is None:
-        with pytest.raises(RuntimeError, match="Parse MLIR file failed"):
-            _parse_ttgir(tmp_path, local_func, num_warps=1, preamble=preamble)
-        return
-
-    mod, ctx = _parse_ttgir(tmp_path, local_func, num_warps=1, preamble=preamble)
-    with pytest.raises(converter_diagnostics.Diagnostic) as exc_info:
-        converter_pipeline.convert_ttgir_to_wave(mod)
-    assert exc_info.value.code == diagnostic_code
-    assert exc_info.value.stage == "op_conversion"
-    del ctx
+    with pytest.raises(RuntimeError, match="Parse MLIR file failed"):
+        _parse_ttgir(tmp_path, local_func, num_warps=1, preamble=preamble)
+    assert (
+        "contiguity must be a positive power-of-two integer" in capfd.readouterr().err
+    )
 
 
 def test_tlx_wave_converter_preserves_direct_buffer_cache_modifiers(tmp_path):

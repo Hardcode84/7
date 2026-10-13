@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -276,9 +277,31 @@ def test_gfx9_v9_tlx_wave_hot_loop_waits_are_not_full_drains(monkeypatch, tmp_pa
     assert wave.count("wave.wait") == 0
     assert wave.count("wave.barrier") == 13
     assert asm.count("s_barrier") == amd_asm.count("s_barrier") + 2 == 21
-    assert machine.count("waveamdmachine.s_waitcnt vmcnt(10)") == 1
-    assert machine.count("waveamdmachine.s_waitcnt vmcnt(8)") == 4
-    assert asm.count("s_waitcnt vmcnt(10)") == 1
-    assert asm.count("s_waitcnt vmcnt(8)") == 4
-    assert asm.count("s_waitcnt vmcnt(0)") == 1
-    assert asm.count("s_waitcnt vmcnt(0)") < amd_asm.count("s_waitcnt vmcnt(0)")
+    ttgir = _asm_text(compiled, "ttgir")
+    assert re.findall(r"ttg\.async_wait.*?num = (\d+)", ttgir) == [
+        "3",
+        "2",
+        "2",
+        "2",
+        "2",
+        "0",
+    ]
+    expected_waits = ["10", "8", "8", "8", "8", "0"]
+    assert (
+        re.findall(r"waveamdmachine\.s_waitcnt vmcnt\((\d+)\)", machine)
+        == expected_waits
+    )
+    waits = list(re.finditer(r"\bs_waitcnt vmcnt\((\d+)\)", asm))
+    assert [wait[1] for wait in waits] == expected_waits
+    # Initial groups: 6, 2, 6, 2 DMA packets. Refills alternate 6 and 2.
+    assert [asm[: wait.start()].count("buffer_load") for wait in waits] == [
+        16,
+        16,
+        22,
+        24,
+        30,
+        32,
+    ]
+    for stage in re.split(r"\bs_waitcnt vmcnt\(\d+\)", asm)[1:]:
+        assert stage.index("s_barrier") < stage.index("ds_read")
+    assert asm.rindex("buffer_load") < waits[-1].start() < asm.index("buffer_store")
