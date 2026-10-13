@@ -1461,22 +1461,63 @@ def test_tlx_fa_llvm_schedule_is_workload_specific(
     )
 
 
+@pytest.mark.parametrize("backend", ["hip", "tlx_wave"])
 @pytest.mark.parametrize(
-    "kernel_name,head_dim,causal",
-    [
-        ("async_prefetch", 128, True),
-        ("persistent", 128, False),
-        ("persistent", 128, True),
-        ("persistent", 64, True),
-    ],
+    "kernel_name", ["async_simple", "async_prefetch", "persistent", "cluster"]
 )
-@pytest.mark.parametrize("override", [None, ""])
-def test_llvm_gfx950_fa_schedule_reaches_codegen(
-    monkeypatch, tmp_path, kernel_name, head_dim, causal, override
+@pytest.mark.parametrize("warmup", [False, True], ids=["launch", "warmup"])
+@pytest.mark.parametrize("override", [None, True, False])
+def test_tlx_fa_packed_f32_launch_options(
+    monkeypatch, backend, kernel_name, warmup, override
 ):
     torch = pytest.importorskip("torch")
-    bench = _load_tlx_fa_bench_module("_tlx_wave_test_fa_schedule_codegen")
-    kernel = getattr(bench, f"_attn_fwd_{kernel_name}")
+    bench = _load_tlx_fa_bench_module("_tlx_wave_test_fa_packed_f32_options")
+    monkeypatch.setattr(
+        bench.triton.runtime.driver.active,
+        "get_current_target",
+        lambda: SimpleNamespace(backend=backend),
+    )
+    suffix = "cluster_pipeline" if kernel_name == "cluster" else kernel_name
+    kernel = getattr(bench, f"_attn_fwd_{suffix}")
+    calls = []
+    monkeypatch.setattr(kernel, "run", lambda *args, **kw: calls.append(kw))
+    tensor = MockTensor(torch.bfloat16, (1, 64, 4096, 128))
+    options = {"NUM_SMS": 304} if kernel_name == "persistent" else {}
+    if override is not None:
+        options["disable_packed_fp32_ops"] = override
+    bench.get_kernel(kernel_name)(
+        tensor,
+        tensor,
+        tensor,
+        1 / math.sqrt(128),
+        True,
+        out=tensor,
+        warmup=warmup,
+        **options,
+    )
+    assert len(calls) == 1
+    assert calls[0]["warmup"] is warmup
+    expected = (
+        override if override is not None else (True if backend == "hip" else None)
+    )
+    assert calls[0].get("disable_packed_fp32_ops") is expected
+
+
+def _compile_tlx_fa_bench_kernel(
+    monkeypatch,
+    tmp_path,
+    kernel_name,
+    head_dim,
+    causal,
+    *,
+    batch=1,
+    n_ctx=4096,
+    **options,
+):
+    torch = pytest.importorskip("torch")
+    bench = _load_tlx_fa_bench_module("_tlx_wave_test_fa_codegen")
+    suffix = "cluster_pipeline" if kernel_name == "cluster" else kernel_name
+    kernel = getattr(bench, f"_attn_fwd_{suffix}")
     warmup = kernel.warmup
     compiled = []
 
@@ -1485,10 +1526,9 @@ def test_llvm_gfx950_fa_schedule_reaches_codegen(
         return compiled[-1]
 
     monkeypatch.setattr(kernel, "warmup", compile_kernel)
-    tensor = MockTensor(torch.bfloat16, (1, 64, 4096, head_dim))
-    options = {"NUM_SMS": 304} if kernel_name == "persistent" else {}
-    if override is not None:
-        options["llvm_fn_attrs"] = override
+    tensor = MockTensor(torch.bfloat16, (batch, 64, n_ctx, head_dim))
+    if kernel_name == "persistent":
+        options["NUM_SMS"] = 304
     with (
         _active_amd_driver(),
         triton.knobs.runtime.scope(),
@@ -1507,11 +1547,72 @@ def test_llvm_gfx950_fa_schedule_reaches_codegen(
             **options,
         )
     assert len(compiled) == 1
-    asm = compiled[0].asm
+    return compiled[0]
+
+
+@pytest.mark.parametrize(
+    "kernel_name,head_dim,causal",
+    [
+        ("async_prefetch", 128, True),
+        ("persistent", 128, False),
+        ("persistent", 128, True),
+        ("persistent", 64, True),
+    ],
+)
+@pytest.mark.parametrize("override", [None, ""])
+def test_llvm_gfx950_fa_schedule_reaches_codegen(
+    monkeypatch, tmp_path, kernel_name, head_dim, causal, override
+):
+    options = {} if override is None else {"llvm_fn_attrs": override}
+    compiled = _compile_tlx_fa_bench_kernel(
+        monkeypatch, tmp_path, kernel_name, head_dim, causal, **options
+    )
+    asm = compiled.asm
     schedule_attr = '"amdgpu-sched-strategy"="iterative-ilp"'
     assert (schedule_attr in asm["llir"]) == (override is None)
     assert "v_mfma_" in asm["amdgcn"]
+    assert not re.search(r"\bv_pk_(?:add|mul|fma)_f32\b", asm["amdgcn"])
     assert asm["hsaco"].startswith(b"\x7fELF")
+
+
+@pytest.mark.parametrize(
+    "kernel_name", ["async_simple", "async_prefetch", "persistent", "cluster"]
+)
+@pytest.mark.parametrize("batch,n_ctx", [(1, 4096), (2, 8192)])
+@pytest.mark.parametrize("override", [None, True, False])
+def test_llvm_gfx950_fa_pipelined_safe_packed_f32(
+    monkeypatch, tmp_path, kernel_name, batch, n_ctx, override
+):
+    options = {} if override is None else {"disable_packed_fp32_ops": override}
+    with triton.knobs.amd.scope():
+        triton.knobs.amd.scalarize_packed_fops = False
+        compiled = _compile_tlx_fa_bench_kernel(
+            monkeypatch,
+            tmp_path,
+            kernel_name,
+            128,
+            True,
+            batch=batch,
+            n_ctx=n_ctx,
+            **options,
+        )
+    expected = override if override is not None else True
+    assert compiled.metadata.disable_packed_fp32_ops is expected
+    hsaco = tmp_path / "kernel.hsaco"
+    hsaco.write_bytes(compiled.asm["hsaco"])
+    assert hsaco.read_bytes().startswith(b"\x7fELF")
+    disassembly = subprocess.check_output(
+        [
+            wave_bridge_tools._wave_tool("llvm-objdump", override_env="LLVM_OBJDUMP"),
+            "-d",
+            "--mcpu=gfx950",
+            str(hsaco),
+        ],
+        text=True,
+    )
+    assert "v_mfma_" in disassembly
+    if expected:
+        assert not re.search(r"\bv_pk_(?:add|mul|fma)_f32\b", disassembly)
 
 
 def test_tlx_glu_parallel_precompile_defers_device_query_to_worker(monkeypatch):

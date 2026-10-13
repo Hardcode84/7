@@ -6,6 +6,9 @@ Kernel variants (--kernel): async_simple, async_prefetch, persistent, cluster.
 The "cluster" variant is the rotated 4-cluster warp-pipeline kernel; it supports
 only the square anchor (D=128, N a multiple of BLOCK_M=256, >= 4 K/V blocks).
 
+HIP launches set disable_packed_fp32_ops=True by default.
+Pass an explicit value to override this setting.
+
 Usage:
     # Defaults: -b 1 -hq 64 -sq 1024 8192 16384 -d 64 128 -causal false --kernel async_simple
     python amd-fa-pipelined_test.py
@@ -1287,6 +1290,9 @@ def _attention_tensor_args(q, k, v, out):
 
 
 def _launch_kernel(kernel, grid, args, compile_kwargs, *, warmup=False):
+    if triton.runtime.driver.active.get_current_target().backend == "hip":
+        # gfx950 MFMA can make packed FP32 read stale operands on another wave.
+        compile_kwargs.setdefault("disable_packed_fp32_ops", True)
     if warmup:
         return kernel.warmup(*args, grid=grid, **compile_kwargs)
     return kernel[grid](*args, **compile_kwargs)
